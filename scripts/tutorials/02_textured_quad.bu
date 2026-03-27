@@ -1,0 +1,154 @@
+// ============================================================
+// Tutorial 02 — Textured Quad (OpenGL 3.3 Core)
+// ============================================================
+// Desenha um quad texturizado com EBO (index buffer).
+// Ensina: glTexImage2D, glTexParameteri, element drawing,
+//         sampler uniforms, UV coordinates.
+// ============================================================
+
+import OpenGl;
+using OpenGl;
+
+InitWindow(800, 600, "Tutorial 02 - Textured Quad");
+SetTargetFPS(60);
+
+// ---- 1. Shaders ----
+var vs_src = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+out vec2 vUV;
+void main() {
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    vUV = aUV;
+}
+";
+
+var fs_src = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uTex;
+void main() {
+    FragColor = texture(uTex, vUV);
+}
+";
+
+def compileProgram(vsSrc, fsSrc) {
+    var vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, vsSrc);
+    glCompileShader(vs);
+    if (glGetShaderiv(vs, GL_COMPILE_STATUS) == 0) print("VS: " + glGetShaderInfoLog(vs));
+    var fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, fsSrc);
+    glCompileShader(fs);
+    if (glGetShaderiv(fs, GL_COMPILE_STATUS) == 0) print("FS: " + glGetShaderInfoLog(fs));
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0) print("Link: " + glGetProgramInfoLog(p));
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return p;
+}
+
+var prog = compileProgram(vs_src, fs_src);
+var uTex = glGetUniformLocation(prog, "uTex");
+
+// ---- 2. Vertex Data (pos + uv) ----
+//  x,    y,    u,   v
+var vertices = [
+    -0.5,  0.5,  0.0, 1.0,   // top-left
+     0.5,  0.5,  1.0, 1.0,   // top-right
+     0.5, -0.5,  1.0, 0.0,   // bottom-right
+    -0.5, -0.5,  0.0, 0.0    // bottom-left
+];
+
+// Dois triângulos formando um quad
+var indices = [0, 1, 2, 0, 2, 3];
+
+// ---- 3. VAO + VBO + EBO ----
+var vao = glGenVertexArrays();
+var vbo = glGenBuffers();
+var ebo = glGenBuffers();
+
+glBindVertexArray(vao);
+
+// VBO: 16 floats * 4 = 64 bytes
+glBindBuffer(GL_ARRAY_BUFFER, vbo);
+glBufferData(GL_ARRAY_BUFFER, 16 * 4, vertices, GL_STATIC_DRAW);
+
+// EBO: 6 ints em array → passamos como dados
+glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+glBufferData(GL_ELEMENT_ARRAY_BUFFER, 6 * 4, indices, GL_STATIC_DRAW);
+
+// Pos: location 0, 2 floats, stride=16, offset=0
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 16, 0);
+glEnableVertexAttribArray(0);
+
+// UV: location 1, 2 floats, stride=16, offset=8
+glVertexAttribPointer(1, 2, GL_FLOAT, false, 16, 8);
+glEnableVertexAttribArray(1);
+
+glBindVertexArray(0);
+
+// ---- 4. Gerar textura procedural (8x8 checkerboard) ----
+var texW = 8;
+var texH = 8;
+var pixels = [];
+for (var y = 0; y < texH; y = y + 1) {
+    for (var x = 0; x < texW; x = x + 1) {
+        var on = ((x + y) % 2 == 0);
+        if (on) {
+            // Branco
+            pixels.push(255); pixels.push(255); pixels.push(255); pixels.push(255);
+        } else {
+            // Roxo
+            pixels.push(128); pixels.push(0); pixels.push(200); pixels.push(255);
+        }
+    }
+}
+
+var tex = glGenTextures();
+glBindTexture(GL_TEXTURE_2D, tex);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texW, texH, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+glBindTexture(GL_TEXTURE_2D, 0);
+
+// ---- 5. Render Loop ----
+while (!WindowShouldClose()) {
+    BeginDrawing();
+
+    glClearColor(0.05, 0.05, 0.08, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog);
+
+    // Bind textura na unit 0
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(uTex, 0);
+
+    glBindVertexArray(vao);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+
+    glUseProgram(0);
+
+    DrawText("Tutorial 02 - Textured Quad (procedural checkerboard)", 10, 10, 20, Color(255, 255, 255, 255));
+    DrawFPS(700, 10);
+
+    EndDrawing();
+}
+
+// ---- 6. Cleanup ----
+glDeleteTextures(tex);
+glDeleteBuffers(ebo);
+glDeleteBuffers(vbo);
+glDeleteVertexArrays(vao);
+glDeleteProgram(prog);
+CloseWindow();

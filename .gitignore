@@ -1,0 +1,7 @@
+/bin
+/build
+/build-*/
+/build-vendor-cache/
+/cmake-build-*/
+/dist
+/main.dump

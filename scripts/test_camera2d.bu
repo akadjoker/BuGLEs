@@ -1,0 +1,84 @@
+// test_camera2d.bu — testa Camera2D + coord conversions
+import math;
+
+InitWindow(800, 600, "Camera2D Coord Test");
+SetTargetFPS(60);
+
+var cam = Camera2D();
+// cam.zoom ja inicia com 1.0 (ctor default)
+
+// objectos no mundo
+var boxes = [];
+for (var i = 0; i < 20; i++)
+{
+    boxes.push([math.irand(-300, 300) * 1.0, math.irand(-300, 300) * 1.0]);
+}
+
+var zoom = 1.0;
+
+// Vector2 reutilizaveis (criar fora do loop)
+var mouseV = Vector2(0.0, 0.0);
+var originV = Vector2(0.0, 0.0);
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+
+    // zoom com scroll
+    var wheel = GetMouseWheelMove();
+    if (wheel != 0.0)
+    {
+        zoom = zoom + wheel * 0.1;
+        if (zoom < 0.1) { zoom = 0.1; }
+        if (zoom > 5.0) { zoom = 5.0; }
+    }
+    cam.zoom = zoom;
+
+    // converter mouse screen -> world
+    mouseV.x = GetMouseX() * 1.0;
+    mouseV.y = GetMouseY() * 1.0;
+    var (worldX, worldY) = GetScreenToWorld2D(mouseV, cam);
+
+    // converter world origin -> screen
+    var (screenX, screenY) = GetWorldToScreen2D(originV, cam);
+
+    BeginDrawing();
+    ClearBackground(Color(30, 30, 40, 255));
+
+    BeginMode2D(cam);
+
+    // eixos do mundo
+    DrawLine(-1000, 0, 1000, 0, Color(80, 80, 80, 255));
+    DrawLine(0, -1000, 0, 1000, Color(80, 80, 80, 255));
+
+    // origem
+    DrawCircle(0, 0, 8, Color(255, 255, 0, 255));
+
+    // boxes no mundo
+    for (var i = 0; i < len(boxes); i++)
+    {
+        var bx = boxes[i][0];
+        var by = boxes[i][1];
+        DrawRectangle(bx - 15, by - 15, 30, 30, Color(100, 150, 255, 200));
+        DrawRectangleLines(bx - 15, by - 15, 30, 30, Color(200, 200, 255, 255));
+    }
+
+    // cursor no mundo
+    DrawCircle(worldX, worldY, 5, Color(255, 0, 0, 255));
+    DrawCircleLines(worldX, worldY, 20, Color(255, 100, 100, 255));
+
+    EndMode2D();
+
+    // HUD (screen space)
+    DrawRectangle(0, 0, 310, 110, Color(0, 0, 0, 128));
+    DrawText("Camera2D Test", 10, 10, 20, Color(255, 255, 255, 255));
+    DrawText("Scroll: zoom", 10, 35, 14, Color(200, 200, 200, 255));
+    DrawText("Zoom: " + str(zoom), 10, 55, 14, Color(150, 255, 150, 255));
+    DrawText("Mouse world: " + str(worldX) + ", " + str(worldY), 10, 70, 14, Color(255, 200, 100, 255));
+    DrawText("Origin screen: " + str(screenX) + ", " + str(screenY), 10, 85, 14, Color(100, 200, 255, 255));
+    DrawText("FPS: " + str(GetFPS()), 10, 95, 14, Color(150, 255, 150, 255));
+
+    EndDrawing();
+}
+
+CloseWindow();

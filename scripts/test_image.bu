@@ -1,0 +1,195 @@
+// Test script for image manipulation functions
+
+InitWindow(800, 600, "Image Test");
+
+// ========================================
+// IMAGE GENERATION
+// ========================================
+
+var img = GenImageColor(64, 64, Color(255, 0, 0, 255));
+var (w, h) = GetImageSize(img);
+if (w != 64) { print("FAIL: GenImageColor width"); }
+if (h != 64) { print("FAIL: GenImageColor height"); }
+
+var grad = GenImageGradientLinear(128, 128, 0, Color(255,0,0,255), Color(0,0,255,255));
+UnloadImage(grad);
+
+var radial = GenImageGradientRadial(128, 128, 0.5, Color(255,255,255,255), Color(0,0,0,255));
+UnloadImage(radial);
+
+var sq = GenImageGradientSquare(128, 128, 0.5, Color(255,255,0,255), Color(0,0,128,255));
+UnloadImage(sq);
+
+var noise = GenImageWhiteNoise(64, 64, 0.5);
+UnloadImage(noise);
+
+var perlin = GenImagePerlinNoise(128, 128, 0, 0, 4.0);
+UnloadImage(perlin);
+
+var cell = GenImageCellular(128, 128, 16);
+UnloadImage(cell);
+
+var checked = GenImageChecked(64, 64, 8, 8, Color(255,255,255,255), Color(0,0,0,255));
+UnloadImage(checked);
+
+print("Image generation: OK");
+
+// ========================================
+// IMAGE MANIPULATION
+// ========================================
+
+var copy = ImageCopy(img);
+var (cw, ch) = GetImageSize(copy);
+if (cw != 64) { print("FAIL: ImageCopy width"); }
+
+var sub = ImageFromImage(img, Rectangle(0, 0, 32, 32));
+var (sw, sh) = GetImageSize(sub);
+if (sw != 32) { print("FAIL: ImageFromImage width"); }
+UnloadImage(sub);
+
+ImageResize(copy, 128, 128);
+var (rw, rh) = GetImageSize(copy);
+if (rw != 128) { print("FAIL: ImageResize width"); }
+
+var nn = ImageCopy(img);
+ImageResizeNN(nn, 128, 128);
+var (nnw, nnh) = GetImageSize(nn);
+if (nnw != 128) { print("FAIL: ImageResizeNN width"); }
+UnloadImage(nn);
+
+var canvas = ImageCopy(img);
+ImageResizeCanvas(canvas, 128, 128, 32, 32, Color(0, 0, 0, 255));
+var (cvw, cvh) = GetImageSize(canvas);
+if (cvw != 128) { print("FAIL: ImageResizeCanvas width"); }
+UnloadImage(canvas);
+
+var cropped = ImageCopy(img);
+ImageCrop(cropped, Rectangle(0, 0, 32, 32));
+var (crw, crh) = GetImageSize(cropped);
+if (crw != 32) { print("FAIL: ImageCrop width"); }
+UnloadImage(cropped);
+
+ImageFlipVertical(copy);
+ImageFlipHorizontal(copy);
+
+var rotated = ImageCopy(img);
+ImageRotate(rotated, 90);
+UnloadImage(rotated);
+
+var cw_img = ImageCopy(img);
+ImageRotateCW(cw_img);
+ImageRotateCCW(cw_img);
+UnloadImage(cw_img);
+
+var blurred = ImageCopy(img);
+ImageBlurGaussian(blurred, 4);
+UnloadImage(blurred);
+
+// ImageMipmaps(copy); // SKIP: triggers stb_image_resize2 ASAN bug in raylib
+
+var formatted = GenImageColor(32, 32, Color(128, 128, 128, 255));
+ImageFormat(formatted, PIXELFORMAT_UNCOMPRESSED_GRAYSCALE);
+UnloadImage(formatted);
+
+var alpha = GenImageColor(64, 64, Color(255, 0, 0, 0));
+ImageAlphaCrop(alpha, 0.5);
+UnloadImage(alpha);
+
+var premul = GenImageColor(32, 32, Color(255, 128, 0, 128));
+ImageAlphaPremultiply(premul);
+UnloadImage(premul);
+
+print("Image manipulation: OK");
+
+// ========================================
+// IMAGE COLOR OPERATIONS
+// ========================================
+
+var colorImg = GenImageColor(32, 32, Color(128, 64, 32, 255));
+
+var (r, g, b, a) = GetImageColor(colorImg, 0, 0);
+if (r != 128) { print("FAIL: GetImageColor r=" + str(r)); }
+if (g != 64) { print("FAIL: GetImageColor g=" + str(g)); }
+if (b != 32) { print("FAIL: GetImageColor b=" + str(b)); }
+
+var tinted = ImageCopy(colorImg);
+ImageColorTint(tinted, Color(255, 0, 0, 255));
+UnloadImage(tinted);
+
+var inverted = ImageCopy(colorImg);
+ImageColorInvert(inverted);
+UnloadImage(inverted);
+
+var gray = ImageCopy(colorImg);
+ImageColorGrayscale(gray);
+UnloadImage(gray);
+
+var contrast = ImageCopy(colorImg);
+ImageColorContrast(contrast, 50.0);
+UnloadImage(contrast);
+
+var bright = ImageCopy(colorImg);
+ImageColorBrightness(bright, 50);
+UnloadImage(bright);
+
+var replaced = ImageCopy(colorImg);
+ImageColorReplace(replaced, Color(128, 64, 32, 255), Color(0, 255, 0, 255));
+var (rr, rg, rb, ra) = GetImageColor(replaced, 0, 0);
+if (rr != 0) { print("FAIL: ImageColorReplace r=" + str(rr)); }
+if (rg != 255) { print("FAIL: ImageColorReplace g=" + str(rg)); }
+UnloadImage(replaced);
+
+var borderImg = GenImageColor(64, 64, Color(0, 0, 0, 0));
+var (bx, by, bw, bh) = GetImageAlphaBorder(borderImg, 0.5);
+UnloadImage(borderImg);
+
+var tex = LoadTextureFromImage(img);
+var fromTex = LoadImageFromTexture(tex);
+if (!IsImageReady(fromTex)) { print("FAIL: LoadImageFromTexture not ready"); }
+UnloadImage(fromTex);
+UnloadTexture(tex);
+
+UnloadImage(colorImg);
+print("Image color ops: OK");
+
+// ========================================
+// IMAGE DRAWING
+// ========================================
+
+var canvas2 = GenImageColor(256, 256, Color(0, 0, 0, 255));
+
+ImageClearBackground(canvas2, Color(32, 32, 64, 255));
+var (cr2, cg2, cb2, ca2) = GetImageColor(canvas2, 0, 0);
+if (cr2 != 32) { print("FAIL: ImageClearBackground r=" + str(cr2)); }
+
+ImageDrawPixel(canvas2, 10, 10, Color(255, 0, 0, 255));
+var (pr, pg, pb, pa) = GetImageColor(canvas2, 10, 10);
+if (pr != 255) { print("FAIL: ImageDrawPixel r=" + str(pr)); }
+
+ImageDrawLine(canvas2, 0, 0, 255, 255, Color(0, 255, 0, 255));
+ImageDrawCircle(canvas2, 128, 128, 32, Color(0, 0, 255, 255));
+ImageDrawCircleLines(canvas2, 64, 64, 16, Color(255, 255, 0, 255));
+ImageDrawRectangle(canvas2, 10, 10, 50, 50, Color(255, 128, 0, 255));
+ImageDrawRectangleRec(canvas2, Rectangle(100, 100, 40, 40), Color(128, 0, 255, 255));
+ImageDrawRectangleLines(canvas2, Rectangle(150, 150, 30, 30), 2, Color(255, 255, 255, 255));
+
+var stamp = GenImageColor(16, 16, Color(255, 0, 255, 255));
+ImageDraw(canvas2, stamp, Rectangle(0, 0, 16, 16), Rectangle(200, 200, 16, 16), Color(255, 255, 255, 255));
+UnloadImage(stamp);
+
+ImageDrawText(canvas2, "Hello", 50, 50, 20, Color(255, 255, 255, 255));
+
+ExportImage(canvas2, "test_canvas.png");
+UnloadImage(canvas2);
+
+print("Image drawing: OK");
+
+// ========================================
+// CLEANUP
+// ========================================
+
+UnloadImage(img);
+UnloadImage(copy);
+
+CloseWindow();
+print("All image tests passed!");

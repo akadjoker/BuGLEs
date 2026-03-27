@@ -1,0 +1,134 @@
+import Box2D;
+import math;
+using Box2D;
+
+// -- janela --
+InitWindow(800, 600, "BuGL Box2D Debug Draw Test");
+SetTargetFPS(60);
+
+// -- mundo com gravidade --
+var world = B2World(0.0, -10.0);
+
+// -- debug draw --
+var dd = B2DebugDraw();
+dd.setFlags(B2_DRAW_SHAPE_BIT | B2_DRAW_JOINT_BIT | B2_DRAW_CENTER_OF_MASS_BIT);
+dd.setScale(30.0);
+dd.setOffset(400.0, 450.0);
+dd.setFillAlpha(0.25);
+world.setDebugDraw(dd);
+
+// -- chao (static) --
+var groundDef = B2BodyDef();
+groundDef.setType(B2_STATIC_BODY);
+groundDef.setPosition(0.0, -1.0);
+var groundBody = world.createBody(groundDef);
+
+var groundBox = B2PolygonShape();
+groundBox.setAsBox(12.0, 1.0);
+groundBody.createFixture(groundBox, 0.0);
+
+// -- plataformas --
+var platDef = B2BodyDef();
+platDef.setType(B2_STATIC_BODY);
+
+platDef.setPosition(-4.0, 4.0);
+platDef.setAngle(0.15);
+var plat1 = world.createBody(platDef);
+var platShape1 = B2PolygonShape();
+platShape1.setAsBox(3.0, 0.2);
+plat1.createFixture(platShape1, 0.0);
+
+platDef.setPosition(4.0, 7.0);
+platDef.setAngle(-0.15);
+var plat2 = world.createBody(platDef);
+var platShape2 = B2PolygonShape();
+platShape2.setAsBox(3.0, 0.2);
+plat2.createFixture(platShape2, 0.0);
+
+// -- funcoes para criar formas --
+def makeBox(x, y, hw, hh)
+{
+    var bd = B2BodyDef();
+    bd.setType(B2_DYNAMIC_BODY);
+    bd.setPosition(x, y);
+    var body = world.createBody(bd);
+    var shape = B2PolygonShape();
+    shape.setAsBox(hw, hh);
+    var fd = B2FixtureDef();
+    fd.setShape(shape);
+    fd.setDensity(1.0);
+    fd.setFriction(0.3);
+    fd.setRestitution(0.2);
+    body.createFixture(fd);
+    return body;
+}
+
+def makeCircle(x, y, radius)
+{
+    var bd = B2BodyDef();
+    bd.setType(B2_DYNAMIC_BODY);
+    bd.setPosition(x, y);
+    var body = world.createBody(bd);
+    var shape = B2CircleShape();
+    shape.setRadius(radius);
+    var fd = B2FixtureDef();
+    fd.setShape(shape);
+    fd.setDensity(1.0);
+    fd.setFriction(0.3);
+    fd.setRestitution(0.5);
+    body.createFixture(fd);
+    return body;
+}
+
+// -- criar objectos iniciais --
+var bodies = [];
+for (var i = 0; i < 5; i++)
+{
+    bodies.push(makeBox(-2.0 + i * 1.0, 12.0 + i * 2.0, 0.5, 0.5));
+}
+for (var i = 0; i < 3; i++)
+{
+    bodies.push(makeCircle(2.0 + i * 1.5, 15.0 + i * 1.5, 0.4));
+}
+
+// -- loop --
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+
+    // spawn novo objecto ao clicar
+    if (IsMouseButtonPressed(0))
+    {
+        var mx = (GetMouseX() - 400.0) / 30.0;
+        var my = -(GetMouseY() - 450.0) / 30.0;
+        if (math.irand(0, 1) == 0)
+        {
+            bodies.push(makeBox(mx, my, 0.3 + math.irand(2, 6) * 0.1, 0.3 + math.irand(2, 6) * 0.1));
+        }
+        else
+        {
+            bodies.push(makeCircle(mx, my, 0.2 + math.irand(2, 5) * 0.1));
+        }
+    }
+
+    // step da fisica
+    world.step(dt);
+
+
+    BeginDrawing();
+    ClearBackground(Color(30, 30, 35, 255));
+
+ 
+    world.debugDraw();
+
+    // HUD
+    DrawText("Box2D Debug Draw Test", 10, 10, 20, Color(200, 200, 200, 255));
+    DrawText("FPS: " + str(GetFPS()), 10, 35, 16, Color(150, 255, 150, 255));
+    DrawText("Bodies: " + str(len(bodies)), 10, 55, 16, Color(150, 200, 255, 255));
+    DrawText("Click to spawn shapes", 10, 75, 16, Color(255, 255, 150, 255));
+    DrawText("ESC to exit", 10, 95, 16, Color(200, 200, 200, 255));
+
+    EndDrawing();
+}
+world.destroy();
+CloseWindow();

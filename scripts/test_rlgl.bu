@@ -1,0 +1,89 @@
+// test_rlgl.bu - Test RLGL module (low-level OpenGL via raylib)
+import RLGL;
+using RLGL;
+
+InitWindow(800, 600, "RLGL Module Test");
+SetTargetFPS(60);
+
+var white = Color(255, 255, 255, 255);
+var gray = Color(200, 200, 200, 255);
+var dimGray = Color(150, 150, 150, 255);
+var frameCount = 0;
+
+while (!WindowShouldClose()) {
+    BeginDrawing();
+    ClearBackground(Color(20, 20, 30, 255));
+
+    DrawText("RLGL Module Test", 10, 10, 20, white);
+
+    // Test rlGetVersion
+    var ver = rlGetVersion();
+    DrawText("rlGetVersion: " + str(ver), 10, 40, 16, gray);
+
+    // Test rlGetFramebufferWidth/Height
+    var fbw = rlGetFramebufferWidth();
+    var fbh = rlGetFramebufferHeight();
+    DrawText("Framebuffer: " + str(fbw) + "x" + str(fbh), 10, 60, 16, gray);
+
+    // Test rlGetLineWidth
+    var lw = rlGetLineWidth();
+    DrawText("Line width: " + str(lw), 10, 80, 16, gray);
+
+    // Test rlIsStereoRenderEnabled
+    var stereo = rlIsStereoRenderEnabled();
+    DrawText("Stereo: " + str(stereo), 10, 100, 16, gray);
+
+    // Test rlGetTextureIdDefault / rlGetShaderIdDefault
+    var defTex = rlGetTextureIdDefault();
+    var defShd = rlGetShaderIdDefault();
+    DrawText("Default tex: " + str(defTex) + ", shader: " + str(defShd), 10, 120, 16, gray);
+
+    // Test immediate mode drawing with RLGL constants
+    rlDrawRenderBatchActive();
+
+    rlPushMatrix();
+    rlTranslatef(400, 350, 0);
+
+    // Draw a colored triangle using immediate mode
+    rlBegin(RL_TRIANGLES);
+        rlColor4f(1, 0, 0, 1);
+        rlVertex2f(-50, 50);
+        rlColor4f(0, 1, 0, 1);
+        rlVertex2f(50, 50);
+        rlColor4f(0, 0, 1, 1);
+        rlVertex2f(0, -50);
+    rlEnd();
+
+    rlPopMatrix();
+
+    // Test rlGetMatrixModelview (returns array of 16 floats)
+    var mv = rlGetMatrixModelview();
+    DrawText("Modelview[0]: " + str(mv[0]), 10, 150, 16, dimGray);
+
+    // Test smooth lines
+    rlEnableSmoothLines();
+    rlSetLineWidth(3);
+    rlBegin(RL_LINES);
+        rlColor4ub(255, 255, 0, 255);
+        rlVertex2f(100, 250);
+        rlVertex2f(700, 250);
+    rlEnd();
+    rlDisableSmoothLines();
+    rlSetLineWidth(1);
+
+    // Test blend mode constant access
+    DrawText("RL_BLEND_ALPHA=" + str(RL_BLEND_ALPHA) + " RL_BLEND_ADDITIVE=" + str(RL_BLEND_ADDITIVE), 10, 180, 14, dimGray);
+    DrawText("RL_LINES=" + str(RL_LINES) + " RL_TRIANGLES=" + str(RL_TRIANGLES) + " RL_QUADS=" + str(RL_QUADS), 10, 200, 14, dimGray);
+
+    rlCheckErrors();
+
+    frameCount = frameCount + 1;
+    if (frameCount > 120) {
+        break;
+    }
+
+    EndDrawing();
+}
+
+CloseWindow();
+print("RLGL module test completed OK");

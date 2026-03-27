@@ -1,0 +1,109 @@
+import OpenGl;
+using OpenGl;
+
+InitWindow(800, 600, "BuGL OpenGL 3.3 Core Test");
+SetTargetFPS(60);
+
+// Vertex shader
+var vs_src = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec3 aColor;
+out vec3 vColor;
+uniform float uAngle;
+void main() {
+    float c = cos(uAngle);
+    float s = sin(uAngle);
+    vec2 p = vec2(aPos.x * c - aPos.y * s, aPos.x * s + aPos.y * c);
+    gl_Position = vec4(p, 0.0, 1.0);
+    vColor = aColor;
+}
+";
+
+// Fragment shader
+var fs_src = @"
+#version 330 core
+in vec3 vColor;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(vColor, 1.0);
+}
+";
+
+// Compile shaders
+var vs = glCreateShader(GL_VERTEX_SHADER);
+glShaderSource(vs, vs_src);
+glCompileShader(vs);
+if (glGetShaderiv(vs, GL_COMPILE_STATUS) == 0) {
+    print("VS error: " + glGetShaderInfoLog(vs));
+}
+
+var fs = glCreateShader(GL_FRAGMENT_SHADER);
+glShaderSource(fs, fs_src);
+glCompileShader(fs);
+if (glGetShaderiv(fs, GL_COMPILE_STATUS) == 0) {
+    print("FS error: " + glGetShaderInfoLog(fs));
+}
+
+// Link program
+var prog = glCreateProgram();
+glAttachShader(prog, vs);
+glAttachShader(prog, fs);
+glLinkProgram(prog);
+if (glGetProgramiv(prog, GL_LINK_STATUS) == 0) {
+    print("Link error: " + glGetProgramInfoLog(prog));
+}
+glDeleteShader(vs);
+glDeleteShader(fs);
+
+var uAngle = glGetUniformLocation(prog, "uAngle");
+
+// Triangle vertex data: x, y, r, g, b
+var vertices = [
+     0.0,  0.6,   1.0, 0.0, 0.0,
+    -0.5, -0.4,   0.0, 1.0, 0.0,
+     0.5, -0.4,   0.0, 0.0, 1.0
+];
+
+// Create VAO + VBO
+var vao = glGenVertexArrays();
+var vbo = glGenBuffers();
+
+glBindVertexArray(vao);
+glBindBuffer(GL_ARRAY_BUFFER, vbo);
+glBufferData(GL_ARRAY_BUFFER, 15 * 4, vertices, GL_STATIC_DRAW);
+
+// Position: location 0, 2 floats, stride 20, offset 0
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 20, 0);
+glEnableVertexAttribArray(0);
+
+// Color: location 1, 3 floats, stride 20, offset 8
+glVertexAttribPointer(1, 3, GL_FLOAT, false, 20, 8);
+glEnableVertexAttribArray(1);
+
+glBindVertexArray(0);
+
+var angle = 0.0;
+
+while (!WindowShouldClose()) {
+    BeginDrawing();
+
+    glClearColor(0.08, 0.08, 0.12, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog);
+    glUniform1f(uAngle, angle);
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    glUseProgram(0);
+
+    angle = angle + 1.0 * GetFrameTime();
+
+    EndDrawing();
+}
+
+glDeleteBuffers(vbo);
+glDeleteVertexArrays(vao);
+glDeleteProgram(prog);
+CloseWindow();

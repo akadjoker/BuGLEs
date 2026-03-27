@@ -1,0 +1,128 @@
+// test_input_extra.bu — testa touch, gesture, IsKeyPressedRepeat
+
+InitWindow(800, 600, "Input Extra Test");
+SetTargetFPS(60);
+
+// habilitar todos os gestos
+SetGesturesEnabled(
+    GESTURE_TAP | GESTURE_DOUBLETAP | GESTURE_HOLD |
+    GESTURE_DRAG | GESTURE_SWIPE_RIGHT | GESTURE_SWIPE_LEFT |
+    GESTURE_SWIPE_UP | GESTURE_SWIPE_DOWN |
+    GESTURE_PINCH_IN | GESTURE_PINCH_OUT
+);
+
+var lastGesture = "None";
+var lastGestureTime = 0.0;
+var holdDuration = 0.0;
+var dragX = 0.0;
+var dragY = 0.0;
+var dragAngle = 0.0;
+var touchCount = 0;
+var keyRepeatCount = 0;
+var lastRepeatKey = "None";
+
+// nomes de gestos
+def gestureName(g)
+{
+    if (g == GESTURE_TAP) { return "TAP"; }
+    if (g == GESTURE_DOUBLETAP) { return "DOUBLE TAP"; }
+    if (g == GESTURE_HOLD) { return "HOLD"; }
+    if (g == GESTURE_DRAG) { return "DRAG"; }
+    if (g == GESTURE_SWIPE_RIGHT) { return "SWIPE RIGHT"; }
+    if (g == GESTURE_SWIPE_LEFT) { return "SWIPE LEFT"; }
+    if (g == GESTURE_SWIPE_UP) { return "SWIPE UP"; }
+    if (g == GESTURE_SWIPE_DOWN) { return "SWIPE DOWN"; }
+    if (g == GESTURE_PINCH_IN) { return "PINCH IN"; }
+    if (g == GESTURE_PINCH_OUT) { return "PINCH OUT"; }
+    return "NONE";
+}
+
+while (!WindowShouldClose())
+{
+    // detectar gestos
+    var detected = GetGestureDetected();
+    if (detected != GESTURE_NONE)
+    {
+        lastGesture = gestureName(detected);
+        lastGestureTime = GetTime();
+    }
+
+    holdDuration = GetGestureHoldDuration();
+    var (dx, dy) = GetGestureDragVector();
+    dragX = dx;
+    dragY = dy;
+    dragAngle = GetGestureDragAngle();
+
+    // touch
+    touchCount = GetTouchPointCount();
+
+    // IsKeyPressedRepeat — segurar SPACE
+    if (IsKeyPressedRepeat(KEY_SPACE))
+    {
+        keyRepeatCount = keyRepeatCount + 1;
+        lastRepeatKey = "SPACE";
+    }
+    if (IsKeyPressedRepeat(KEY_UP))
+    {
+        keyRepeatCount = keyRepeatCount + 1;
+        lastRepeatKey = "UP";
+    }
+    if (IsKeyPressedRepeat(KEY_DOWN))
+    {
+        keyRepeatCount = keyRepeatCount + 1;
+        lastRepeatKey = "DOWN";
+    }
+
+    BeginDrawing();
+    ClearBackground(Color(25, 25, 35, 255));
+
+    var white = Color(255, 255, 255, 255);
+    var green = Color(150, 255, 150, 255);
+    var yellow = Color(255, 255, 150, 255);
+    var cyan = Color(150, 200, 255, 255);
+
+    DrawText("Input Extra Test", 10, 10, 24, white);
+
+    // secao gestos
+    DrawText("-- GESTURES --", 10, 50, 18, yellow);
+    DrawText("Last gesture: " + lastGesture, 10, 75, 16, green);
+    DrawText("Hold duration: " + str(holdDuration), 10, 95, 16, green);
+    DrawText("Drag vector: " + str(dragX) + ", " + str(dragY), 10, 115, 16, green);
+    DrawText("Drag angle: " + str(dragAngle), 10, 135, 16, green);
+
+    // secao touch
+    DrawText("-- TOUCH --", 10, 170, 18, yellow);
+    DrawText("Touch points: " + str(touchCount), 10, 195, 16, green);
+    if (touchCount > 0)
+    {
+        for (var i = 0; i < touchCount; i++)
+        {
+            var (tx, ty) = GetTouchPosition(i);
+            var tid = GetTouchPointId(i);
+            DrawText("  Touch " + str(i) + " id=" + str(tid) + " pos=(" + str(tx) + "," + str(ty) + ")", 10, 215 + i * 18, 14, cyan);
+            DrawCircle(tx, ty, 15, Color(255, 100, 100, 128));
+        }
+    }
+    DrawText("GetTouchX: " + str(GetTouchX()) + " GetTouchY: " + str(GetTouchY()), 10, 275, 14, cyan);
+
+    // secao key repeat
+    DrawText("-- KEY REPEAT --", 10, 310, 18, yellow);
+    DrawText("Hold SPACE / UP / DOWN to test", 10, 335, 16, Color(200, 200, 200, 255));
+    DrawText("Repeat count: " + str(keyRepeatCount), 10, 355, 16, green);
+    DrawText("Last repeat: " + lastRepeatKey, 10, 375, 16, green);
+
+    // secao mouse (ja existia mas confirmar)
+    DrawText("-- MOUSE --", 10, 420, 18, yellow);
+    var (mx, my) = GetMousePosition();
+    var (mdx, mdy) = GetMouseDelta();
+    DrawText("Pos: " + str(mx) + ", " + str(my), 10, 445, 16, green);
+    DrawText("Delta: " + str(mdx) + ", " + str(mdy), 10, 465, 16, green);
+    DrawText("Wheel: " + str(GetMouseWheelMove()), 10, 485, 16, green);
+
+    DrawText("FPS: " + str(GetFPS()), 650, 10, 16, green);
+    DrawText("ESC to exit", 650, 30, 16, Color(200, 200, 200, 255));
+
+    EndDrawing();
+}
+
+CloseWindow();

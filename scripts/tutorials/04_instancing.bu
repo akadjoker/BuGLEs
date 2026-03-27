@@ -1,0 +1,160 @@
+// ============================================================
+// Tutorial 04 — Instancing (OpenGL 3.3 Core)
+// ============================================================
+// Desenha centenas de triângulos com UMA draw call.
+// Ensina: glDrawArraysInstanced, glVertexAttribDivisor,
+//         instance attributes (offset + cor por instância).
+// ============================================================
+
+import OpenGl;
+using OpenGl;
+
+InitWindow(800, 600, "Tutorial 04 - Instancing");
+SetTargetFPS(60);
+
+// ---- 1. Shaders ----
+var vs_src = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;       // Vértice do triângulo-base
+layout(location = 1) in vec2 aOffset;    // Offset por instância
+layout(location = 2) in vec3 aInstColor; // Cor por instância
+out vec3 vColor;
+uniform float uTime;
+void main() {
+    // Pequena escala + rotação baseada no instance ID
+    float angle = uTime + float(gl_InstanceID) * 0.3;
+    float c = cos(angle);
+    float s = sin(angle);
+    vec2 rotated = vec2(aPos.x * c - aPos.y * s, aPos.x * s + aPos.y * c);
+
+    float scale = 0.06;
+    vec2 pos = rotated * scale + aOffset;
+    gl_Position = vec4(pos, 0.0, 1.0);
+    vColor = aInstColor;
+}
+";
+
+var fs_src = @"
+#version 330 core
+in vec3 vColor;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(vColor, 1.0);
+}
+";
+
+def compileProgram(vsSrc, fsSrc) {
+    var vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, vsSrc);
+    glCompileShader(vs);
+    if (glGetShaderiv(vs, GL_COMPILE_STATUS) == 0) print("VS: " + glGetShaderInfoLog(vs));
+    var fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, fsSrc);
+    glCompileShader(fs);
+    if (glGetShaderiv(fs, GL_COMPILE_STATUS) == 0) print("FS: " + glGetShaderInfoLog(fs));
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0) print("Link: " + glGetProgramInfoLog(p));
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return p;
+}
+
+var prog = compileProgram(vs_src, fs_src);
+var uTime = glGetUniformLocation(prog, "uTime");
+
+// ---- 2. Triângulo base (unitário) ----
+var baseVerts = [
+     0.0,  1.0,
+    -0.866, -0.5,
+     0.866, -0.5
+];
+
+// ---- 3. Dados de instância: grid de triângulos ----
+var COLS = 15;
+var ROWS = 10;
+var COUNT = COLS * ROWS;
+
+var instanceData = [];  // offset.x, offset.y, r, g, b por instância
+for (var row = 0; row < ROWS; row = row + 1) {
+    for (var col = 0; col < COLS; col = col + 1) {
+        // Posição: grid centrado
+        var x = (col / (COLS - 1)) * 2.0 - 1.0;
+        var y = (row / (ROWS - 1)) * 2.0 - 1.0;
+        instanceData.push(x * 0.85);
+        instanceData.push(y * 0.85);
+
+        // Cor baseada na posição
+        var r = col / (COLS - 1);
+        var g = row / (ROWS - 1);
+        var b = 1.0 - (r + g) * 0.5;
+        instanceData.push(r);
+        instanceData.push(g);
+        instanceData.push(b);
+    }
+}
+
+// ---- 4. VAO + VBOs ----
+var vao = glGenVertexArrays();
+var vboBase = glGenBuffers();
+var vboInst = glGenBuffers();
+
+glBindVertexArray(vao);
+
+// VBO base: 6 floats (3 vertices * 2 components)
+glBindBuffer(GL_ARRAY_BUFFER, vboBase);
+glBufferData(GL_ARRAY_BUFFER, 6 * 4, baseVerts, GL_STATIC_DRAW);
+// location 0: posição base, 2 floats, stride=8
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 8, 0);
+glEnableVertexAttribArray(0);
+
+// VBO instância: COUNT * 5 floats (offset.xy + color.rgb)
+glBindBuffer(GL_ARRAY_BUFFER, vboInst);
+glBufferData(GL_ARRAY_BUFFER, COUNT * 5 * 4, instanceData, GL_STATIC_DRAW);
+
+// location 1: offset, 2 floats, stride=20, offset=0
+glVertexAttribPointer(1, 2, GL_FLOAT, false, 20, 0);
+glEnableVertexAttribArray(1);
+glVertexAttribDivisor(1, 1);  // <-- 1 por instância!
+
+// location 2: cor, 3 floats, stride=20, offset=8
+glVertexAttribPointer(2, 3, GL_FLOAT, false, 20, 8);
+glEnableVertexAttribArray(2);
+glVertexAttribDivisor(2, 1);  // <-- 1 por instância!
+
+glBindVertexArray(0);
+
+// ---- 5. Render Loop ----
+var time = 0.0;
+
+while (!WindowShouldClose()) {
+    time = time + GetFrameTime();
+
+    BeginDrawing();
+    glClearColor(0.02, 0.02, 0.05, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog);
+    glUniform1f(uTime, time);
+    glBindVertexArray(vao);
+
+    // UMA draw call para todos os triângulos!
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 3, COUNT);
+
+    glBindVertexArray(0);
+    glUseProgram(0);
+
+    DrawText("Tutorial 04 - Instancing (" + str(COUNT) + " triangles, 1 draw call)", 10, 10, 20, Color(255, 255, 255, 255));
+    DrawFPS(700, 10);
+
+    EndDrawing();
+}
+
+// ---- 6. Cleanup ----
+glDeleteBuffers(vboInst);
+glDeleteBuffers(vboBase);
+glDeleteVertexArrays(vao);
+glDeleteProgram(prog);
+CloseWindow();

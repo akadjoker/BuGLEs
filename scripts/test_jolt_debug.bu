@@ -1,0 +1,76 @@
+// test_jolt_debug.bu - Test Jolt Physics debug draw
+import Jolt;
+using Jolt;
+import JoltDebug;
+using JoltDebug;
+
+InitWindow(1024, 768, "Jolt Debug Draw Test");
+SetTargetFPS(60);
+
+// Create camera (GC managed, no need to destroy)
+var camera = Camera3D();
+camera.setPosition(0.0, 8.0, 15.0);
+camera.setTarget(0.0, 0.0, 0.0);
+camera.setUp(0.0, 1.0, 0.0);
+camera.setFovy(60.0);
+camera.setProjection(0);
+
+// Create world
+var world = JoltWorld();
+
+// Static floor (large box)
+var ground = world.createStaticBox(20.0, 0.5, 20.0, Vector3(0.0, -0.5, 0.0));
+ground.setFriction(0.8);
+
+// Dynamic objects
+var box1 = world.createBox(0.5, 0.5, 0.5, Vector3(0.0, 5.0, 0.0));
+var box2 = world.createBox(0.7, 0.3, 0.5, Vector3(1.5, 7.0, 0.5));
+var box3 = world.createBox(0.4, 0.6, 0.4, Vector3(-1.0, 9.0, -0.3));
+
+var sphere1 = world.createSphere(0.5, Vector3(0.0, 12.0, 0.0));
+var sphere2 = world.createSphere(0.3, Vector3(2.0, 10.0, 1.0));
+
+var capsule1 = world.createCapsule(0.5, 0.3, Vector3(-2.0, 8.0, 0.0));
+var cylinder1 = world.createCylinder(0.4, 0.5, Vector3(3.0, 6.0, -1.0));
+
+// Static obstacles
+var wall = world.createStaticBox(0.2, 2.0, 3.0, Vector3(5.0, 2.0, 0.0));
+
+world.optimizeBroadPhase();
+
+var frameCount = 0;
+var dt = 1.0 / 60.0;
+
+while (!WindowShouldClose()) {
+    // Step physics
+    world.step(dt);
+
+    BeginDrawing();
+    ClearBackground(Color(30, 30, 40, 255));
+
+    BeginMode3D(camera);
+
+    // Draw grid for reference
+    DrawGrid(40, 1.0);
+
+    // Debug draw the Jolt world!
+    // Default: shapes wireframe + constraints
+    world.debugDraw();
+
+    EndMode3D();
+
+    // HUD
+    DrawText("Jolt Debug Draw Test", 10, 10, 20, Color(255, 255, 255, 255));
+    DrawText("Bodies: " + str(world.getBodyCount()), 10, 35, 16, Color(200, 200, 200, 255));
+    DrawText("Active: " + str(world.getActiveBodyCount()), 10, 55, 16, Color(200, 200, 200, 255));
+    DrawText("Frame: " + str(frameCount), 10, 75, 16, Color(180, 180, 180, 255));
+
+    frameCount = frameCount + 1;
+    if (frameCount > 300) { break; }
+
+    EndDrawing();
+}
+
+world.destroy();
+CloseWindow();
+print("Jolt debug draw test completed OK");

@@ -1,0 +1,151 @@
+// test_window_state.bu — testa Window state functions
+
+InitWindow(800, 600, "Window State Test");
+SetTargetFPS(60);
+
+// SetExitKey — mudar exit key para Q em vez de ESC
+// (comentado para nao confundir, ESC è mais natural)
+// SetExitKey(KEY_Q);
+
+var opacity = 1.0;
+var msg = "";
+var msgTime = 0.0;
+
+def showMsg(text)
+{
+    msg = text;
+    msgTime = GetTime();
+}
+
+while (!WindowShouldClose())
+{
+    // testar IsWindowState
+    var isResizable = IsWindowState(FLAG_WINDOW_RESIZABLE);
+    var isFullscreen = IsWindowState(FLAG_FULLSCREEN_MODE);
+    var isMaximized = IsWindowMaximized();
+    var isMinimized = IsWindowMinimized();
+    var isFocused = IsWindowFocused();
+
+    // GetWindowPosition
+    var (winX, winY) = GetWindowPosition();
+
+    // GetWindowScaleDPI
+    var (dpiX, dpiY) = GetWindowScaleDPI();
+
+    // teclas para testar funcoes
+    if (IsKeyPressed(KEY_ONE))
+    {
+        // toggle resizable
+        if (isResizable)
+        {
+            ClearWindowState(FLAG_WINDOW_RESIZABLE);
+            showMsg("Resizable OFF");
+        }
+        else
+        {
+            SetWindowState(FLAG_WINDOW_RESIZABLE);
+            showMsg("Resizable ON");
+        }
+    }
+
+    if (IsKeyPressed(KEY_TWO))
+    {
+        SetWindowMaxSize(1024, 768);
+        showMsg("Max size: 1024x768");
+    }
+
+    if (IsKeyPressed(KEY_THREE))
+    {
+        // opacity
+        opacity = opacity - 0.1;
+        if (opacity < 0.2) { opacity = 1.0; }
+        SetWindowOpacity(opacity);
+        showMsg("Opacity: " + str(opacity));
+    }
+
+    if (IsKeyPressed(KEY_FOUR))
+    {
+        ToggleFullscreen();
+        showMsg("Toggle Fullscreen");
+    }
+
+    if (IsKeyPressed(KEY_FIVE))
+    {
+        SetWindowFocused();
+        showMsg("SetWindowFocused");
+    }
+
+    if (IsKeyPressed(KEY_SIX))
+    {
+        MaximizeWindow();
+        showMsg("MaximizeWindow");
+    }
+
+    if (IsKeyPressed(KEY_SEVEN))
+    {
+        RestoreWindow();
+        showMsg("RestoreWindow");
+    }
+
+    if (IsKeyPressed(KEY_EIGHT))
+    {
+        SetWindowSize(640, 480);
+        showMsg("SetWindowSize 640x480");
+    }
+
+    if (IsKeyPressed(KEY_NINE))
+    {
+        SetWindowSize(800, 600);
+        showMsg("SetWindowSize 800x600");
+    }
+
+    BeginDrawing();
+    ClearBackground(Color(25, 30, 35, 255));
+
+    var white = Color(255, 255, 255, 255);
+    var green = Color(150, 255, 150, 255);
+    var yellow = Color(255, 255, 150, 255);
+    var cyan = Color(150, 200, 255, 255);
+
+    DrawText("Window State Test", 10, 10, 24, white);
+
+    // estado
+    DrawText("-- STATE --", 10, 50, 18, yellow);
+    DrawText("Resizable: " + str(isResizable), 10, 75, 16, green);
+    DrawText("Fullscreen: " + str(isFullscreen), 10, 95, 16, green);
+    DrawText("Maximized: " + str(isMaximized), 10, 115, 16, green);
+    DrawText("Minimized: " + str(isMinimized), 10, 135, 16, green);
+    DrawText("Focused: " + str(isFocused), 10, 155, 16, green);
+    DrawText("Opacity: " + str(opacity), 10, 175, 16, green);
+
+    // info
+    DrawText("-- INFO --", 10, 210, 18, yellow);
+    DrawText("Position: " + str(winX) + ", " + str(winY), 10, 235, 16, cyan);
+    DrawText("DPI Scale: " + str(dpiX) + ", " + str(dpiY), 10, 255, 16, cyan);
+    DrawText("Screen: " + str(GetScreenWidth()) + "x" + str(GetScreenHeight()), 10, 275, 16, cyan);
+    DrawText("Render: " + str(GetRenderWidth()) + "x" + str(GetRenderHeight()), 10, 295, 16, cyan);
+    DrawText("Monitor: " + str(GetCurrentMonitor()) + " (" + str(GetMonitorCount()) + " total)", 10, 315, 16, cyan);
+
+    // comandos
+    DrawText("-- KEYS --", 10, 360, 18, yellow);
+    DrawText("1: Toggle Resizable", 10, 385, 14, Color(200, 200, 200, 255));
+    DrawText("2: SetMaxSize 1024x768", 10, 400, 14, Color(200, 200, 200, 255));
+    DrawText("3: Cycle Opacity", 10, 415, 14, Color(200, 200, 200, 255));
+    DrawText("4: Toggle Fullscreen", 10, 430, 14, Color(200, 200, 200, 255));
+    DrawText("5: SetWindowFocused", 10, 445, 14, Color(200, 200, 200, 255));
+    DrawText("6: Maximize  7: Restore", 10, 460, 14, Color(200, 200, 200, 255));
+    DrawText("8: Resize 640x480  9: Resize 800x600", 10, 475, 14, Color(200, 200, 200, 255));
+
+    // mensagem
+    if (GetTime() - msgTime < 2.0)
+    {
+        DrawRectangle(300, 550, 400, 30, Color(0, 100, 0, 200));
+        DrawText(msg, 310, 555, 18, Color(255, 255, 255, 255));
+    }
+
+    DrawText("FPS: " + str(GetFPS()), 700, 10, 16, green);
+
+    EndDrawing();
+}
+
+CloseWindow();

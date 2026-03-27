@@ -1,0 +1,139 @@
+// test_draw_textures.bu - Visual test for texture drawing
+// Generates procedural textures and draws them with all DrawTexture* variants
+
+InitWindow(800, 600, "Draw Textures Test");
+SetTargetFPS(60);
+
+var white = Color(255, 255, 255, 255);
+var gray = Color(180, 180, 180, 255);
+
+// Generate procedural images
+var imgChecked = GenImageChecked(64, 64, 8, 8, Color(255, 100, 100, 255), Color(40, 40, 60, 255));
+var imgPerlin = GenImagePerlinNoise(64, 64, 0, 0, 5.0);
+var imgGradL = GenImageGradientLinear(64, 64, 45, Color(255, 50, 50, 255), Color(50, 50, 255, 255));
+var imgGradR = GenImageGradientRadial(64, 64, 0.3, Color(255, 255, 200, 255), Color(20, 20, 80, 255));
+var imgNoise = GenImageWhiteNoise(64, 64, 0.5);
+var imgCell = GenImageCellular(64, 64, 8);
+
+// Tint the perlin noise green
+ImageColorTint(imgPerlin, Color(100, 255, 100, 255));
+
+// Make a composite canvas: draw shapes onto an image
+var imgCanvas = GenImageColor(64, 64, Color(30, 30, 50, 255));
+ImageDrawRectangle(imgCanvas, 4, 4, 56, 56, Color(60, 60, 100, 255));
+ImageDrawCircle(imgCanvas, 32, 32, 20, Color(255, 200, 50, 255));
+ImageDrawLine(imgCanvas, 0, 0, 63, 63, Color(255, 80, 80, 255));
+ImageDrawLine(imgCanvas, 63, 0, 0, 63, Color(80, 255, 80, 255));
+ImageDrawText(imgCanvas, "BU", 18, 22, 20, Color(255, 255, 255, 255));
+
+// Load all as GPU textures
+var texChecked = LoadTextureFromImage(imgChecked);
+var texPerlin = LoadTextureFromImage(imgPerlin);
+var texGradL = LoadTextureFromImage(imgGradL);
+var texGradR = LoadTextureFromImage(imgGradR);
+var texNoise = LoadTextureFromImage(imgNoise);
+var texCell = LoadTextureFromImage(imgCell);
+var texCanvas = LoadTextureFromImage(imgCanvas);
+
+// Unload CPU images (GPU textures remain)
+UnloadImage(imgChecked);
+UnloadImage(imgPerlin);
+UnloadImage(imgGradL);
+UnloadImage(imgGradR);
+UnloadImage(imgNoise);
+UnloadImage(imgCell);
+UnloadImage(imgCanvas);
+
+// Also create a scaled version via ImageCopy + ImageResize + ImageBlurGaussian
+var imgBlur = GenImageChecked(64, 64, 4, 4, Color(200, 50, 200, 255), Color(50, 200, 50, 255));
+ImageBlurGaussian(imgBlur, 8);
+var texBlur = LoadTextureFromImage(imgBlur);
+UnloadImage(imgBlur);
+
+var angle = 0.0;
+var frameCount = 0;
+
+while (!WindowShouldClose()) {
+    angle = angle + 1.0;
+    if (angle > 360.0) { angle = angle - 360.0; }
+
+    BeginDrawing();
+    ClearBackground(Color(20, 20, 30, 255));
+
+    DrawText("Texture Drawing Test - Procedural Textures", 10, 10, 20, white);
+
+    // Row 1: DrawTexture (simple x,y)
+    DrawText("DrawTexture:", 10, 50, 16, gray);
+    DrawTexture(texChecked, 20, 80, white);
+    DrawTexture(texPerlin, 110, 80, white);
+    DrawTexture(texGradL, 200, 80, white);
+    DrawTexture(texGradR, 290, 80, white);
+    DrawTexture(texNoise, 380, 80, white);
+    DrawTexture(texCell, 470, 80, white);
+    DrawTexture(texCanvas, 560, 80, white);
+    DrawTexture(texBlur, 650, 80, white);
+
+    // Labels
+    DrawText("Checked", 20, 150, 10, gray);
+    DrawText("Perlin", 110, 150, 10, gray);
+    DrawText("GradLin", 200, 150, 10, gray);
+    DrawText("GradRad", 290, 150, 10, gray);
+    DrawText("Noise", 380, 150, 10, gray);
+    DrawText("Cellular", 470, 150, 10, gray);
+    DrawText("Canvas", 560, 150, 10, gray);
+    DrawText("Blur", 650, 150, 10, gray);
+
+    // Row 2: DrawTextureEx (position + rotation + scale)
+    DrawText("DrawTextureEx (rotation + scale):", 10, 180, 16, gray);
+    DrawTextureEx(texChecked, 50, 220, angle, 1.5, white);
+    DrawTextureEx(texGradL, 220, 220, 0.0 - angle, 2.0, white);
+    DrawTextureEx(texCanvas, 420, 220, angle * 0.5, 1.5, Color(255, 255, 255, 180));
+
+    // Row 3: DrawTexturePro (source rect, dest rect, origin, rotation)
+    DrawText("DrawTexturePro (src/dst rects + rotation):", 10, 370, 16, gray);
+
+    // Sub-rect of checked texture, scaled up
+    var src1 = Rectangle(0, 0, 32, 32);
+    var dst1 = Rectangle(80, 420, 128, 128);
+    var org1 = Vector2(64, 64);
+    DrawTexturePro(texChecked, src1, dst1, org1, angle, white);
+
+    // Full perlin, stretched into wide rect
+    var src2 = Rectangle(0, 0, 64, 64);
+    var dst2 = Rectangle(300, 400, 200, 80);
+    var org2 = Vector2(0, 0);
+    DrawTexturePro(texPerlin, src2, dst2, org2, 0.0, white);
+
+    // Gradient radial with tint
+    var src3 = Rectangle(0, 0, 64, 64);
+    var dst3 = Rectangle(600, 420, 120, 120);
+    var org3 = Vector2(60, 60);
+    DrawTexturePro(texGradR, src3, dst3, org3, angle * 2.0, Color(255, 180, 100, 255));
+
+    // DrawTextureRec (source rect, position)
+    DrawText("DrawTextureRec (sub-region):", 10, 540, 16, gray);
+    var subRec = Rectangle(16, 16, 32, 32);
+    DrawTextureRec(texCanvas, subRec, Vector2(200, 555), white);
+    DrawTextureRec(texCell, Rectangle(0, 0, 32, 64), Vector2(260, 540), white);
+
+    // Frame counter for auto-close
+    frameCount = frameCount + 1;
+    if (frameCount > 180) {
+        break;
+    }
+
+    EndDrawing();
+}
+
+// Cleanup
+UnloadTexture(texChecked);
+UnloadTexture(texPerlin);
+UnloadTexture(texGradL);
+UnloadTexture(texGradR);
+UnloadTexture(texNoise);
+UnloadTexture(texCell);
+UnloadTexture(texCanvas);
+UnloadTexture(texBlur);
+
+CloseWindow();
+print("Draw textures test completed OK");

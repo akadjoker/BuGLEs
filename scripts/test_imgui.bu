@@ -1,0 +1,62 @@
+import ImGui;
+using ImGui;
+
+InitWindow(800, 600, "BuGL ImGui Test");
+SetTargetFPS(60);
+InitImGui();
+
+var counter = 0;
+var slider_val = 0.5;
+var check_val = true;
+var name = "BuGL";
+var show_demo = false;
+
+while (!WindowShouldClose()) {
+    BeginDrawing();
+    ClearBackground(Color(40, 40, 40, 255));
+
+    BeginImGui();
+
+    Begin("Hello ImGui!");
+    Text("Bem-vindo ao BuGL com ImGui!");
+    Text("FPS: " + str(GetFPS()));
+    Text("Frame Time: " + str(GetFrameTime()));
+
+    Separator();
+
+    if (Button("Click me!")) {
+        counter = counter + 1;
+    }
+    SameLine();
+    Text("Counter: " + str(counter));
+
+    var (_, sv) = SliderFloat("Slider", slider_val, 0.0, 1.0);
+    slider_val = sv;
+
+    var (_, cv) = Checkbox("Check me", check_val);
+    check_val = cv;
+
+    var (_, nm) = InputText("Name", name);
+    name = nm;
+
+    Spacing();
+    TextColored(0.0, 1.0, 0.0, 1.0, "Tudo a funcionar!");
+    BulletText("raylib + ImGui + BuLang");
+
+    Separator();
+    if (Button("Toggle Demo")) {
+        show_demo = !show_demo;
+    }
+
+    End();
+
+    if (show_demo) {
+        ShowDemoWindow();
+    }
+
+    EndImGui();
+    EndDrawing();
+}
+
+ShutdownImGui();
+CloseWindow();

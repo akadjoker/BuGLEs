@@ -1,0 +1,268 @@
+// test_texture_poly.bu - Test textured polygon drawing
+InitWindow(800, 600, "Textured Polygon Test");
+SetTargetFPS(60);
+
+// Disable backface culling so winding order doesn't matter
+DisableBackfaceCulling();
+
+var white = Color(255, 255, 255, 255);
+var gray = Color(180, 180, 180, 255);
+
+// Create textures
+var imgCheck = GenImageChecked(64, 64, 8, 8, Color(220, 60, 60, 255), Color(40, 40, 80, 255));
+var texCheck = LoadTextureFromImage(imgCheck);
+UnloadImage(imgCheck);
+
+var imgGrad = GenImageGradientRadial(64, 64, 0.3, Color(255, 255, 200, 255), Color(20, 50, 120, 255));
+var texGrad = LoadTextureFromImage(imgGrad);
+UnloadImage(imgGrad);
+
+var angle = 0.0;
+var frameCount = 0;
+
+while (!WindowShouldClose()) {
+    angle = angle + 0.5;
+    if (angle > 360.0) { angle = angle - 360.0; }
+
+    BeginDrawing();
+    ClearBackground(Color(20, 20, 30, 255));
+    DrawText("Textured Polygon Drawing (cull OFF)", 10, 10, 20, white);
+
+    // ========================================
+    // 1. Hexagon fan (center + 6 pts + close)
+    // ========================================
+    DrawText("DrawTexturePoly (hexagon fan):", 10, 40, 14, gray);
+
+    var cx = 120.0;
+    var cy = 150.0;
+    var hexR = 70.0;
+
+    var hexV = [];
+    var hexU = [];
+    hexV.push(cx);
+    hexV.push(cy);
+    hexU.push(0.5);
+    hexU.push(0.5);
+    var i = 0;
+    while (i < 7) {
+        var a = (i * 60.0 + angle) * 3.14159 / 180.0;
+        hexV.push(cx + cos(a) * hexR);
+        hexV.push(cy + sin(a) * hexR);
+        hexU.push(0.5 + cos(a) * 0.5);
+        hexU.push(0.5 + sin(a) * 0.5);
+        i = i + 1;
+    }
+    DrawTexturePoly(texCheck, hexV, hexU, 8, white);
+
+    // ========================================
+    // 2. Textured quad fan
+    // ========================================
+    DrawText("DrawTexturePoly (quad):", 260, 40, 14, gray);
+    var qV = [300.0, 70.0, 440.0, 70.0, 440.0, 210.0, 300.0, 210.0];
+    var qU = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+    DrawTexturePoly(texGrad, qV, qU, 4, white);
+
+    // ========================================
+    // 3. DrawTextureTriangles - L shaped concave polygon
+    //    Pre-triangulated: 4 triangles
+    //    Shape: L with cutout in top-right
+    // ========================================
+    DrawText("DrawTextureTriangles (L-shape):", 490, 40, 14, gray);
+
+    //  L-shape vertices:
+    //  0--1
+    //  |  |
+    //  |  2--3
+    //  |     |
+    //  5-----4
+    var lx = 520.0;
+    var ly = 70.0;
+    var ls = 60.0;
+    // Vertex positions (6 verts)
+    var lV = [
+        lx, ly,                     // 0: top-left
+        lx + ls, ly,                // 1: top-mid
+        lx + ls, ly + ls,           // 2: inner corner
+        lx + ls * 2.0, ly + ls,     // 3: mid-right
+        lx + ls * 2.0, ly + ls * 2.5, // 4: bottom-right
+        lx, ly + ls * 2.5           // 5: bottom-left
+    ];
+    // UVs (normalized to shape bounding box)
+    var lU = [
+        0.0, 0.0,           // 0
+        0.5, 0.0,           // 1
+        0.5, 0.4,           // 2
+        1.0, 0.4,           // 3
+        1.0, 1.0,           // 4
+        0.0, 1.0            // 5
+    ];
+    // Indices: 4 triangles
+    var lI = [0,1,5, 1,2,5, 2,4,5, 2,3,4];
+    DrawTextureTrianglesIndexed(texCheck, lV, lU, lI, 12, white);
+
+    // ========================================
+    // 4. DrawTextureTriangles - Arrow shape
+    //    Pre-triangulated
+    // ========================================
+    DrawText("DrawTextureTriangles (arrow):", 10, 260, 14, gray);
+
+    // Arrow pointing right:
+    //    1
+    //   /|
+    //  0 |  2
+    //   \| /
+    //    3
+    var ax = 50.0;
+    var ay = 350.0;
+    var aw = 180.0;
+    var ah = 120.0;
+    // 5 verts: left point, top-mid, right point, bot-mid, left point
+    var arV = [
+        ax, ay,                          // 0: left tip
+        ax + aw * 0.4, ay - ah * 0.5,    // 1: top
+        ax + aw, ay,                     // 2: right tip
+        ax + aw * 0.4, ay + ah * 0.5     // 3: bottom
+    ];
+    var arU = [
+        0.0, 0.5,
+        0.4, 0.0,
+        1.0, 0.5,
+        0.4, 1.0
+    ];
+    // 2 triangles
+    var arI = [0,1,2, 0,2,3];
+    DrawTextureTrianglesIndexed(texGrad, arV, arU, arI, 6, Color(255, 200, 200, 255));
+
+    // ========================================
+    // 5. Strip ribbon
+    // ========================================
+    DrawText("DrawTexturePolyStrip (ribbon):", 270, 260, 14, gray);
+
+    var sV = [];
+    var sU = [];
+    var k = 0;
+    var segs = 12;
+    while (k <= segs) {
+        var t = k * 1.0 / segs;
+        var sx = 280.0 + t * 480.0;
+        var wave = sin((t * 3.0 + angle * 0.03) * 3.14159) * 50.0;
+        sV.push(sx);
+        sV.push(310.0 + wave);
+        sU.push(t * 2.0);
+        sU.push(0.0);
+        sV.push(sx);
+        sV.push(400.0 + wave);
+        sU.push(t * 2.0);
+        sU.push(1.0);
+        k = k + 1;
+    }
+    var stripCount = (segs + 1) * 2;
+    DrawTexturePolyStrip(texCheck, sV, sU, stripCount, white);
+
+    // ========================================
+    // 6. DrawTextureTriangles (direct, no index)
+    //    Star shape - 5 triangles from center
+    // ========================================
+    DrawText("DrawTextureTriangles (star):", 10, 440, 14, gray);
+
+    var scx = 130.0;
+    var scy = 520.0;
+    var sr1 = 70.0;
+    var sr2 = 30.0;
+
+    var starV = [];
+    var starU = [];
+    var si = 0;
+    while (si < 5) {
+        var a1 = (si * 72.0 - 90.0 + angle) * 3.14159 / 180.0;
+        var a2 = ((si + 0.5) * 72.0 - 90.0 + angle) * 3.14159 / 180.0;
+        var a3 = ((si + 1.0) * 72.0 - 90.0 + angle) * 3.14159 / 180.0;
+
+        // Triangle: center, outer point, inner point, then inner, outer next
+        // Tri 1: center -> outer(i) -> inner(i+0.5)
+        starV.push(scx);
+        starV.push(scy);
+        starU.push(0.5);
+        starU.push(0.5);
+
+        starV.push(scx + cos(a1) * sr1);
+        starV.push(scy + sin(a1) * sr1);
+        starU.push(0.5 + cos(a1) * 0.5);
+        starU.push(0.5 + sin(a1) * 0.5);
+
+        starV.push(scx + cos(a2) * sr2);
+        starV.push(scy + sin(a2) * sr2);
+        starU.push(0.5 + cos(a2) * 0.2);
+        starU.push(0.5 + sin(a2) * 0.2);
+
+        // Tri 2: center -> inner(i+0.5) -> outer(i+1)
+        starV.push(scx);
+        starV.push(scy);
+        starU.push(0.5);
+        starU.push(0.5);
+
+        starV.push(scx + cos(a2) * sr2);
+        starV.push(scy + sin(a2) * sr2);
+        starU.push(0.5 + cos(a2) * 0.2);
+        starU.push(0.5 + sin(a2) * 0.2);
+
+        starV.push(scx + cos(a3) * sr1);
+        starV.push(scy + sin(a3) * sr1);
+        starU.push(0.5 + cos(a3) * 0.5);
+        starU.push(0.5 + sin(a3) * 0.5);
+
+        si = si + 1;
+    }
+    DrawTextureTriangles(texGrad, starV, starU, 30, Color(255, 255, 180, 255));
+
+    // ========================================
+    // 7. Concave irregular polygon (indexed)
+    // ========================================
+    DrawText("Indexed (concave poly):", 280, 440, 14, gray);
+
+    // T-shape
+    //  0---1---2---3
+    //      |   |
+    //      4---5
+    var tx = 320.0;
+    var ty = 470.0;
+    var tw = 40.0;
+    var tV = [
+        tx, ty,                       // 0
+        tx + tw, ty,                  // 1
+        tx + tw * 2.0, ty,            // 2
+        tx + tw * 3.0, ty,            // 3
+        tx + tw, ty + tw * 2.0,       // 4
+        tx + tw * 2.0, ty + tw * 2.0, // 5
+        tx, ty + tw,                  // 6
+        tx + tw * 3.0, ty + tw        // 7
+    ];
+    var tU2 = [
+        0.0, 0.0,
+        0.33, 0.0,
+        0.66, 0.0,
+        1.0, 0.0,
+        0.33, 1.0,
+        0.66, 1.0,
+        0.0, 0.33,
+        1.0, 0.33
+    ];
+    // 4 triangles: top bar + stem
+    var tI = [0,1,6, 1,7,6, 2,3,7, 1,5,4];
+    DrawTextureTrianglesIndexed(texCheck, tV, tU2, tI, 12, Color(200, 255, 200, 255));
+
+    // Info
+    var (texW, texH) = GetTextureSize(texCheck);
+    DrawText("Globals: texCheck " + str(texW) + "x" + str(texH), 550, 570, 12, gray);
+
+    frameCount = frameCount + 1;
+    if (frameCount > 300) { break; }
+
+    EndDrawing();
+}
+
+EnableBackfaceCulling();
+UnloadTexture(texCheck);
+UnloadTexture(texGrad);
+CloseWindow();
+print("Textured polygon test completed OK");

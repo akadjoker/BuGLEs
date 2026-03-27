@@ -1,0 +1,111 @@
+// ============================================================
+// Tutorial 01 — Hello Triangle (OpenGL 3.3 Core)
+// ============================================================
+// O mais simples possível: um triângulo colorido.
+// Ensina: shader compile/link, VAO/VBO, vertex attributes.
+// ============================================================
+
+import OpenGl;
+using OpenGl;
+
+InitWindow(800, 600, "Tutorial 01 - Hello Triangle");
+SetTargetFPS(60);
+
+// ---- 1. Shaders ----
+var vs_src = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec3 aColor;
+out vec3 vColor;
+void main() {
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    vColor = aColor;
+}
+";
+
+var fs_src = @"
+#version 330 core
+in vec3 vColor;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(vColor, 1.0);
+}
+";
+
+// Helper: compila VS+FS e linka num programa
+def compileProgram(vsSrc, fsSrc) {
+    var vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, vsSrc);
+    glCompileShader(vs);
+    if (glGetShaderiv(vs, GL_COMPILE_STATUS) == 0) print("VS: " + glGetShaderInfoLog(vs));
+
+    var fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, fsSrc);
+    glCompileShader(fs);
+    if (glGetShaderiv(fs, GL_COMPILE_STATUS) == 0) print("FS: " + glGetShaderInfoLog(fs));
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0) print("Link: " + glGetProgramInfoLog(p));
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return p;
+}
+
+var prog = compileProgram(vs_src, fs_src);
+
+// ---- 2. Vertex Data ----
+// Cada vértice: x, y, r, g, b
+var vertices = [
+     0.0,  0.5,   1.0, 0.0, 0.0,   // topo      - vermelho
+    -0.5, -0.5,   0.0, 1.0, 0.0,   // esq       - verde
+     0.5, -0.5,   0.0, 0.0, 1.0    // dir       - azul
+];
+
+// ---- 3. VAO + VBO ----
+var vao = glGenVertexArrays();
+var vbo = glGenBuffers();
+
+glBindVertexArray(vao);
+glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+// 15 floats * 4 bytes = 60 bytes
+glBufferData(GL_ARRAY_BUFFER, 15 * 4, vertices, GL_STATIC_DRAW);
+
+// Atributo 0: posição (2 floats, stride=20, offset=0)
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 20, 0);
+glEnableVertexAttribArray(0);
+
+// Atributo 1: cor (3 floats, stride=20, offset=8)
+glVertexAttribPointer(1, 3, GL_FLOAT, false, 20, 8);
+glEnableVertexAttribArray(1);
+
+glBindVertexArray(0);
+
+// ---- 4. Render Loop ----
+while (!WindowShouldClose()) {
+    BeginDrawing();
+
+    glClearColor(0.1, 0.1, 0.15, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(prog);
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    glUseProgram(0);
+
+    // Podemos misturar raylib por cima!
+    DrawText("Tutorial 01 - Hello Triangle", 10, 10, 20, Color(255, 255, 255, 255));
+    DrawFPS(700, 10);
+
+    EndDrawing();
+}
+
+// ---- 5. Cleanup ----
+glDeleteBuffers(vbo);
+glDeleteVertexArrays(vao);
+glDeleteProgram(prog);
+CloseWindow();

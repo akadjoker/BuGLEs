@@ -1,0 +1,16 @@
+// Inicializa a janela (largura, altura, titulo)
+InitWindow(800, 600, "BuGL Raylib Test");
+SetTargetFPS(60);
+
+// Loop principal
+while (!WindowShouldClose()) {
+    BeginDrawing();
+    ClearBackground(Color(26, 38, 64, 255));
+
+    // Aqui podemos desenhar coisas no futuro
+
+    EndDrawing();
+}
+
+CloseWindow();
+print("Janela fechou com sucesso!");

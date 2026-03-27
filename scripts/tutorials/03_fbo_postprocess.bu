@@ -1,0 +1,233 @@
+// ============================================================
+// Tutorial 03 — FBO Post-Processing (OpenGL 3.3 Core)
+// ============================================================
+// Render to texture (FBO), depois aplica efeito na tela.
+// Ensina: Framebuffer, render-to-texture, fullscreen quad,
+//         post-process shaders (inversão de cor).
+// ============================================================
+
+import OpenGl;
+using OpenGl;
+
+InitWindow(800, 600, "Tutorial 03 - FBO Post-Processing");
+SetTargetFPS(60);
+
+// ---- 1. Scene Shader (triângulo colorido) ----
+var scene_vs = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec3 aColor;
+out vec3 vColor;
+uniform float uTime;
+void main() {
+    float c = cos(uTime);
+    float s = sin(uTime);
+    vec2 p = vec2(aPos.x * c - aPos.y * s, aPos.x * s + aPos.y * c);
+    gl_Position = vec4(p, 0.0, 1.0);
+    vColor = aColor;
+}
+";
+
+var scene_fs = @"
+#version 330 core
+in vec3 vColor;
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(vColor, 1.0);
+}
+";
+
+def compileProgram(vsSrc, fsSrc) {
+    var vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, vsSrc);
+    glCompileShader(vs);
+    if (glGetShaderiv(vs, GL_COMPILE_STATUS) == 0) print("VS: " + glGetShaderInfoLog(vs));
+    var fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, fsSrc);
+    glCompileShader(fs);
+    if (glGetShaderiv(fs, GL_COMPILE_STATUS) == 0) print("FS: " + glGetShaderInfoLog(fs));
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0) print("Link: " + glGetProgramInfoLog(p));
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return p;
+}
+
+var sceneProg = compileProgram(scene_vs, scene_fs);
+var uTime = glGetUniformLocation(sceneProg, "uTime");
+
+// ---- 2. Post-Process Shader (fullscreen quad) ----
+var post_vs = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+out vec2 vUV;
+void main() {
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    vUV = aUV;
+}
+";
+
+// Efeito: inversão de cor + vignette
+var post_fs = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uScreen;
+uniform int uEffect;  // 0=normal, 1=invert, 2=grayscale, 3=vignette
+void main() {
+    vec4 col = texture(uScreen, vUV);
+
+    if (uEffect == 1) {
+        // Inversão
+        col.rgb = 1.0 - col.rgb;
+    } else if (uEffect == 2) {
+        // Grayscale
+        float g = dot(col.rgb, vec3(0.299, 0.587, 0.114));
+        col.rgb = vec3(g);
+    } else if (uEffect == 3) {
+        // Vignette
+        vec2 uv = vUV * 2.0 - 1.0;
+        float d = 1.0 - dot(uv, uv) * 0.5;
+        col.rgb *= d;
+    }
+
+    FragColor = col;
+}
+";
+
+var postProg = compileProgram(post_vs, post_fs);
+var uScreen = glGetUniformLocation(postProg, "uScreen");
+var uEffect = glGetUniformLocation(postProg, "uEffect");
+
+// ---- 3. Scene Triangle VAO ----
+var triVerts = [
+     0.0,  0.6,   1.0, 0.2, 0.2,
+    -0.5, -0.4,   0.2, 1.0, 0.2,
+     0.5, -0.4,   0.2, 0.2, 1.0
+];
+var triVAO = glGenVertexArrays();
+var triVBO = glGenBuffers();
+glBindVertexArray(triVAO);
+glBindBuffer(GL_ARRAY_BUFFER, triVBO);
+glBufferData(GL_ARRAY_BUFFER, 15 * 4, triVerts, GL_STATIC_DRAW);
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 20, 0);
+glEnableVertexAttribArray(0);
+glVertexAttribPointer(1, 3, GL_FLOAT, false, 20, 8);
+glEnableVertexAttribArray(1);
+glBindVertexArray(0);
+
+// ---- 4. Fullscreen Quad VAO ----
+var quadVerts = [
+    -1.0,  1.0,  0.0, 1.0,
+     1.0,  1.0,  1.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0,  1.0,  0.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0, -1.0,  0.0, 0.0
+];
+var quadVAO = glGenVertexArrays();
+var quadVBO = glGenBuffers();
+glBindVertexArray(quadVAO);
+glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+glBufferData(GL_ARRAY_BUFFER, 24 * 4, quadVerts, GL_STATIC_DRAW);
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 16, 0);
+glEnableVertexAttribArray(0);
+glVertexAttribPointer(1, 2, GL_FLOAT, false, 16, 8);
+glEnableVertexAttribArray(1);
+glBindVertexArray(0);
+
+// ---- 5. Criar FBO + Texture + Renderbuffer ----
+var fbW = 800;
+var fbH = 600;
+
+var fbo = glGenFramebuffers();
+glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+// Color attachment (textura)
+var colorTex = glGenTextures();
+glBindTexture(GL_TEXTURE_2D, colorTex);
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fbW, fbH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTex, 0);
+
+// Depth renderbuffer
+var rbo = glGenRenderbuffers();
+glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, fbW, fbH);
+glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rbo);
+
+// Verificar
+var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+if (status != GL_FRAMEBUFFER_COMPLETE) {
+    print("FBO incomplete! Status: " + str(status));
+}
+glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+// ---- 6. Render Loop ----
+var time = 0.0;
+var effect = 0;
+
+while (!WindowShouldClose()) {
+    time = time + GetFrameTime();
+
+    // Mudar efeito com teclas 1-4
+    if (IsKeyPressed(KEY_ONE))   effect = 0;  // Normal
+    if (IsKeyPressed(KEY_TWO))   effect = 1;  // Invert
+    if (IsKeyPressed(KEY_THREE)) effect = 2;  // Grayscale
+    if (IsKeyPressed(KEY_FOUR))  effect = 3;  // Vignette
+
+    BeginDrawing();
+
+    // ---- PASS 1: Render cena ao FBO ----
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glViewport(0, 0, fbW, fbH);
+    glClearColor(0.05, 0.05, 0.1, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(sceneProg);
+    glUniform1f(uTime, time);
+    glBindVertexArray(triVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    glUseProgram(0);
+
+    // ---- PASS 2: Render FBO texture ao ecrã com post-process ----
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 800, 600);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(postProg);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, colorTex);
+    glUniform1i(uScreen, 0);
+    glUniform1i(uEffect, effect);
+    glBindVertexArray(quadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+    glUseProgram(0);
+
+    // Raylib overlay
+    var names = ["Normal", "Invert", "Grayscale", "Vignette"];
+    DrawText("Tutorial 03 - Post-Processing: " + names[effect], 10, 10, 20, Color(255, 255, 255, 255));
+    DrawText("Press 1/2/3/4 to change effect", 10, 35, 16, Color(180, 180, 180, 255));
+    DrawFPS(700, 10);
+
+    EndDrawing();
+}
+
+// ---- 7. Cleanup ----
+glDeleteRenderbuffers(rbo);
+glDeleteTextures(colorTex);
+glDeleteFramebuffers(fbo);
+glDeleteBuffers(quadVBO);
+glDeleteVertexArrays(quadVAO);
+glDeleteBuffers(triVBO);
+glDeleteVertexArrays(triVAO);
+glDeleteProgram(postProg);
+glDeleteProgram(sceneProg);
+CloseWindow();

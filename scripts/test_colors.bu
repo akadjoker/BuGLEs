@@ -1,0 +1,99 @@
+// test_colors.bu — testa color helpers
+
+InitWindow(800, 600, "Color Helpers Test");
+SetTargetFPS(60);
+
+// cores base (nao usar nomes que colidam com globals)
+var myRed = Color(255, 0, 0, 255);
+var myGreen = Color(0, 255, 0, 255);
+var myBlue = Color(0, 0, 255, 255);
+var myWhite = Color(255, 255, 255, 255);
+var myOrange = Color(255, 165, 0, 255);
+
+// ColorToInt
+var redInt = ColorToInt(myRed);
+print("Red as int: " + str(redInt));
+
+// ColorToHSV  -> retorna (h, s, v)
+var (rh, rs, rv) = ColorToHSV(myRed);
+print("Red HSV: h=" + str(rh) + " s=" + str(rs) + " v=" + str(rv));
+
+// ColorNormalize -> retorna (r, g, b, a)
+var (nr, ng, nb, na) = ColorNormalize(myOrange);
+print("Orange normalized: " + str(nr) + ", " + str(ng) + ", " + str(nb) + ", " + str(na));
+
+// ColorFromHSV retorna (r,g,b,a) ints
+var (hr, hg, hb, ha) = ColorFromHSV(120.0, 1.0, 1.0);
+print("HSV(120,1,1) = r=" + str(hr) + " g=" + str(hg) + " b=" + str(hb));
+
+// GetColor from hex retorna (r,g,b,a) ints
+var (gr, gg, gb, ga) = GetColor(0xFF00FFFF);
+print("0xFF00FFFF = r=" + str(gr) + " g=" + str(gg) + " b=" + str(gb));
+
+while (!WindowShouldClose())
+{
+    BeginDrawing();
+    ClearBackground(Color(20, 20, 25, 255));
+
+    DrawText("Color Helpers Test", 10, 10, 24, myWhite);
+
+    // fila de cores base
+    DrawRectangle(20, 60, 80, 80, myRed);
+    DrawText("RED", 35, 145, 16, myWhite);
+
+    DrawRectangle(120, 60, 80, 80, myGreen);
+    DrawText("GREEN", 125, 145, 16, myWhite);
+
+    DrawRectangle(220, 60, 80, 80, myBlue);
+    DrawText("BLUE", 235, 145, 16, myWhite);
+
+    DrawRectangle(320, 60, 80, 80, myOrange);
+    DrawText("ORANGE", 320, 145, 16, myWhite);
+
+    // ColorAlpha - transparencias
+    DrawText("ColorAlpha (fade):", 20, 180, 18, myWhite);
+    for (var i = 0; i < 10; i++)
+    {
+        var c = Color(255, 0, 0, 255);
+        var alpha = (i + 1) * 0.1;
+        ColorAlpha(c, alpha);
+        DrawRectangle(20 + i * 50, 210, 45, 45, c);
+    }
+
+    // ColorFromHSV - arco iris
+    DrawText("ColorFromHSV (rainbow):", 20, 280, 18, myWhite);
+    for (var i = 0; i < 36; i++)
+    {
+        var hue = i * 10.0;
+        var (cr, cg, cb, ca) = ColorFromHSV(hue, 1.0, 1.0);
+        var rc = Color(cr, cg, cb, 255);
+        DrawRectangle(20 + i * 20, 310, 18, 45, rc);
+    }
+
+    // ColorBrightness
+    DrawText("ColorBrightness (-1 to +1):", 20, 380, 18, myWhite);
+    for (var i = 0; i < 11; i++)
+    {
+        var c2 = Color(0, 120, 255, 255);
+        var factor = -1.0 + i * 0.2;
+        ColorBrightness(c2, factor);
+        DrawRectangle(20 + i * 50, 410, 45, 45, c2);
+    }
+
+    // ColorContrast
+    DrawText("ColorContrast (-1 to +1):", 20, 480, 18, myWhite);
+    for (var i = 0; i < 11; i++)
+    {
+        var c3 = Color(128, 100, 200, 255);
+        var factor2 = -1.0 + i * 0.2;
+        ColorContrast(c3, factor2);
+        DrawRectangle(20 + i * 50, 510, 45, 45, c3);
+    }
+
+    DrawText("FPS: " + str(GetFPS()), 650, 10, 16, Color(150, 255, 150, 255));
+    DrawText("ESC to exit", 650, 30, 16, Color(200, 200, 200, 255));
+
+    EndDrawing();
+}
+
+CloseWindow();
