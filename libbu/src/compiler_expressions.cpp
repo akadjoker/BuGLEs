@@ -298,8 +298,8 @@ void Compiler::fstringExpression(bool canAssign)
     // previous.lexeme contains the raw f-string content with {expr} markers
     // We parse it into segments: literal strings and {expressions}
     // Result: "literal" + str(expr) + "literal" + str(expr) + ...
-    // We use OP_ADD for concatenation (already handles string + any type)
-    // and OP_TOSTRING to convert expression results to string
+    // We emit all segments first and then OP_CONCAT_N once
+    // to avoid O(n) opcode chaining.
 
     const std::string &content = previous.lexeme;
     size_t len = content.length();
@@ -332,7 +332,6 @@ void Compiler::fstringExpression(bool canAssign)
             if (!literal.empty() || segmentCount == 0)
             {
                 emitConstant(vm_->makeString(literal.c_str()));
-                if (segmentCount > 0) emitByte(OP_ADD);
                 segmentCount++;
             }
             break;
@@ -345,7 +344,6 @@ void Compiler::fstringExpression(bool canAssign)
             // Remove sentinel chars
             literal.erase(std::remove(literal.begin(), literal.end(), '\x01'), literal.end());
             emitConstant(vm_->makeString(literal.c_str()));
-            if (segmentCount > 0) emitByte(OP_ADD);
             segmentCount++;
         }
 
@@ -416,7 +414,6 @@ void Compiler::fstringExpression(bool canAssign)
         current = savedCurrent;
         previous = savedPrevious;
 
-        if (segmentCount > 0) emitByte(OP_ADD);
         segmentCount++;
 
         pos = braceEnd + 1; // skip past }
@@ -426,6 +423,15 @@ void Compiler::fstringExpression(bool canAssign)
     if (segmentCount == 0)
     {
         emitConstant(vm_->makeString(""));
+    }
+    else if (segmentCount > 1)
+    {
+        if (segmentCount > 255)
+        {
+            error("Too many segments in f-string (max 255)");
+            return;
+        }
+        emitBytes(OP_CONCAT_N, (uint8_t)segmentCount);
     }
 }
 

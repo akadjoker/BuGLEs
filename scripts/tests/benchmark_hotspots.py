@@ -6,6 +6,8 @@ import time
 N_RET = 5_000_000
 N_STR = 500_000
 N_MAP = 200_000
+N_ARR = 40_000
+N_OBJ = 40_000
 
 
 def inc(x):
@@ -92,9 +94,48 @@ def bench_map_string_keys(n):
         i = i + 1
     return s
 
+class BenchPoint:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+
+def bench_array_index_rw(n):
+    arr = []
+    i = 0
+    while i < n:
+        arr.append(i)
+        i = i + 1
+
+    s = 0
+    i = 0
+    while i < n:
+        v = arr[i]
+        arr[i] = v + 1
+        s = s + arr[i]
+        i = i + 1
+    return s
+
+
+def bench_class_array_index(n):
+    arr = []
+    i = 0
+    while i < n:
+        arr.append(BenchPoint(i, i + 1))
+        i = i + 1
+
+    s = 0
+    i = 0
+    while i < n:
+        p = arr[i]
+        s = s + p.x + p.y
+        p.x = p.x + 1
+        i = i + 1
+    return s
+
 
 print("=== Python Hotspots Benchmark ===")
-print(f"N_RET={N_RET} N_STR={N_STR} N_MAP={N_MAP}")
+print(f"N_RET={N_RET} N_STR={N_STR} N_MAP={N_MAP} N_ARR={N_ARR} N_OBJ={N_OBJ}")
 print()
 
 t0 = time.perf_counter()
@@ -132,8 +173,17 @@ r7 = bench_map_string_keys(N_MAP)
 t13 = time.perf_counter()
 print(f"7. Map string keys:       {t13 - t12:.4f} s")
 
-print()
-total = (t1 - t0) + (t3 - t2) + (t5 - t4) + (t7 - t6) + (t9 - t8) + (t11 - t10) + (t13 - t12)
-print(f"TOTAL:                    {total:.4f} s")
-print(f"checksum: {r1 + r2 + r3 + r4 + r5 + r6 + r7}")
+t14 = time.perf_counter()
+r8 = bench_array_index_rw(N_ARR)
+t15 = time.perf_counter()
+print(f"8. Array index R/W:       {t15 - t14:.4f} s")
 
+t16 = time.perf_counter()
+r9 = bench_class_array_index(N_OBJ)
+t17 = time.perf_counter()
+print(f"9. Class array index:     {t17 - t16:.4f} s")
+
+print()
+total = (t1 - t0) + (t3 - t2) + (t5 - t4) + (t7 - t6) + (t9 - t8) + (t11 - t10) + (t13 - t12) + (t15 - t14) + (t17 - t16)
+print(f"TOTAL:                    {total:.4f} s")
+print(f"checksum: {r1 + r2 + r3 + r4 + r5 + r6 + r7 + r8 + r9}")

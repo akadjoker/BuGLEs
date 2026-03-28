@@ -190,6 +190,8 @@ size_t Debug::disassembleInstruction(const Code &chunk, size_t offset)
     return simpleInstruction("OP_GET_ID", offset);
   case OP_TOSTRING:
     return simpleInstruction("OP_TOSTRING", offset);
+  case OP_CONCAT_N:
+    return byteInstruction("OP_CONCAT_N", chunk, offset);
 
   case OP_CLOSURE:
   {

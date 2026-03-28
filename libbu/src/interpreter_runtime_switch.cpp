@@ -38,6 +38,7 @@
 #include <climits> // INT32_MIN
 #include <algorithm> // std::sort
 #include <cctype> // isdigit, isalpha, etc.
+#include <cstdio>
 #include <new>
 #include <ctime>
 
@@ -78,6 +79,36 @@ static FORCE_INLINE bool toInt32(const Value &v, int32_t &out)
     case ValueType::UINT: out = (int32_t)v.as.unsignedInteger; return true;
     default:              return false;
     }
+}
+
+static FORCE_INLINE String *concatStringAndBuffer(StringPool &pool, String *left, const char *right, size_t rightLen)
+{
+    size_t leftLen = left->length();
+    size_t totalLen = leftLen + rightLen;
+    char *temp = (char *)aAlloc(totalLen + 1);
+
+    memcpy(temp, left->chars(), leftLen);
+    memcpy(temp + leftLen, right, rightLen);
+    temp[totalLen] = '\0';
+
+    String *result = pool.createNoLookup(temp, (uint32)totalLen);
+    aFree(temp);
+    return result;
+}
+
+static FORCE_INLINE String *concatBufferAndString(StringPool &pool, const char *left, size_t leftLen, String *right)
+{
+    size_t rightLen = right->length();
+    size_t totalLen = leftLen + rightLen;
+    char *temp = (char *)aAlloc(totalLen + 1);
+
+    memcpy(temp, left, leftLen);
+    memcpy(temp + leftLen, right->chars(), rightLen);
+    temp[totalLen] = '\0';
+
+    String *result = pool.createNoLookup(temp, (uint32)totalLen);
+    aFree(temp);
+    return result;
 }
 
 static const char* getValueTypeName(const Value &v)
@@ -445,38 +476,67 @@ ProcessResult Interpreter::run_process(Process *process)
                 }
                 else if (b.isInt())
                 {
-                    String *right = stringPool.toString(b.asInt());
-                    PUSH(makeString(stringPool.concat(a.asString(), right)));
+                    char buf[32];
+                    int n = snprintf(buf, sizeof(buf), "%d", b.asInt());
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for int");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatStringAndBuffer(stringPool, a.asString(), buf, (size_t)n)));
                     break;
                 }
                 else if (b.isUInt())
                 {
-                    String *right = stringPool.toString(b.asUInt());
-                    PUSH(makeString(stringPool.concat(a.asString(), right)));
+                    char buf[32];
+                    int n = snprintf(buf, sizeof(buf), "%u", b.asUInt());
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for uint");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatStringAndBuffer(stringPool, a.asString(), buf, (size_t)n)));
                     break;
                 }
                 else if (b.isDouble())
                 {
-                    String *right = stringPool.toString(b.asDouble());
-                    PUSH(makeString(stringPool.concat(a.asString(), right)));
+                    char buf[64];
+                    int n = snprintf(buf, sizeof(buf), "%.6f", b.asDouble());
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for double");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatStringAndBuffer(stringPool, a.asString(), buf, (size_t)n)));
                     break;
                 }
                 else if (b.isBool())
                 {
-                    String *right = stringPool.toString(b.asBool());
-                    PUSH(makeString(stringPool.concat(a.asString(), right)));
+                    char buf[2];
+                    int n = snprintf(buf, sizeof(buf), "%d", b.asBool() ? 1 : 0);
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for bool");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatStringAndBuffer(stringPool, a.asString(), buf, (size_t)n)));
                     break;
                 }
                 else if (b.isNil())
                 {
-                    String *right = createString("nil");
-                    PUSH(makeString(stringPool.concat(a.asString(), right)));
+                    PUSH(makeString(concatStringAndBuffer(stringPool, a.asString(), "nil", 3)));
                     break;
                 }
                 else if (b.isByte())
                 {
-                    String *right = stringPool.toString(b.asByte());
-                    PUSH(makeString(stringPool.concat(a.asString(), right)));
+                    char buf[8];
+                    int n = snprintf(buf, sizeof(buf), "%u", (unsigned)b.asByte());
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for byte");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatStringAndBuffer(stringPool, a.asString(), buf, (size_t)n)));
                     break;
                 }
             }
@@ -490,38 +550,67 @@ ProcessResult Interpreter::run_process(Process *process)
             {
                 if (a.isInt())
                 {
-                    String *left = stringPool.toString(a.asInt());
-                    PUSH(makeString(stringPool.concat(left, b.asString())));
+                    char buf[32];
+                    int n = snprintf(buf, sizeof(buf), "%d", a.asInt());
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for int");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatBufferAndString(stringPool, buf, (size_t)n, b.asString())));
                     break;
                 }
                 else if (a.isDouble())
                 {
-                    String *left = stringPool.toString(a.asDouble());
-                    PUSH(makeString(stringPool.concat(left, b.asString())));
+                    char buf[64];
+                    int n = snprintf(buf, sizeof(buf), "%.6f", a.asDouble());
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for double");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatBufferAndString(stringPool, buf, (size_t)n, b.asString())));
                     break;
                 }
                 else if (a.isUInt())
                 {
-                    String *left = stringPool.toString(a.asUInt());
-                    PUSH(makeString(stringPool.concat(left, b.asString())));
+                    char buf[32];
+                    int n = snprintf(buf, sizeof(buf), "%u", a.asUInt());
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for uint");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatBufferAndString(stringPool, buf, (size_t)n, b.asString())));
                     break;
                 }
                 else if (a.isBool())
                 {
-                    String *left = stringPool.toString(a.asBool());
-                    PUSH(makeString(stringPool.concat(left, b.asString())));
+                    char buf[2];
+                    int n = snprintf(buf, sizeof(buf), "%d", a.asBool() ? 1 : 0);
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for bool");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatBufferAndString(stringPool, buf, (size_t)n, b.asString())));
                     break;
                 }
                 else if (a.isNil())
                 {
-                    String *left = createString("nil");
-                    PUSH(makeString(stringPool.concat(left, b.asString())));
+                    PUSH(makeString(concatBufferAndString(stringPool, "nil", 3, b.asString())));
                     break;
                 }
                 else if (a.isByte())
                 {
-                    String *left = stringPool.toString(a.asByte());
-                    PUSH(makeString(stringPool.concat(left, b.asString())));
+                    char buf[8];
+                    int n = snprintf(buf, sizeof(buf), "%u", (unsigned)a.asByte());
+                    if (UNLIKELY(n < 0))
+                    {
+                        runtimeError("Failed string conversion for byte");
+                        return {ProcessResult::ERROR, 0};
+                    }
+                    PUSH(makeString(concatBufferAndString(stringPool, buf, (size_t)n, b.asString())));
                     break;
                 }
             }
@@ -1540,13 +1629,9 @@ ProcessResult Interpreter::run_process(Process *process)
         case OP_RETURN_N:
         {
             uint8_t count = READ_BYTE();
-
-            // Save the N return values (they're on top of stack)
-            Value results[256];
-            for (int i = count - 1; i >= 0; i--)
-            {
-                results[i] = POP();
-            }
+            Value *results = fiber->stackTop - count;
+            // Logical pop of N return values in O(1), keeping contiguous source.
+            fiber->stackTop = results;
 
             if (hasFatalError_)
             {
@@ -1607,23 +1692,36 @@ ProcessResult Interpreter::run_process(Process *process)
                 fiber->frameCount == callReturnTargetFrameCount_)
             {
                 CallFrame *finished = &fiber->frames[fiber->frameCount];
-                fiber->stackTop = finished->slots;
-                for (int i = 0; i < count; i++)
+                Value *dst = finished->slots;
+                switch (count)
                 {
-                    *fiber->stackTop++ = results[i];
+                case 1: dst[0] = results[0]; break;
+                case 2: dst[0] = results[0]; dst[1] = results[1]; break;
+                case 3: dst[0] = results[0]; dst[1] = results[1]; dst[2] = results[2]; break;
+                case 4: dst[0] = results[0]; dst[1] = results[1]; dst[2] = results[2]; dst[3] = results[3]; break;
+                default:
+                    memmove(dst, results, sizeof(Value) * count);
+                    break;
                 }
+                fiber->stackTop = dst + count;
                 fiber->lastCallReturnCount = count;
                 return {ProcessResult::CALL_RETURN, 0};
             }
 
             if (fiber->frameCount == 0)
             {
-                fiber->stackTop = fiber->stack;
-                // Push all return values
-                for (int i = 0; i < count; i++)
+                Value *dst = fiber->stack;
+                switch (count)
                 {
-                    *fiber->stackTop++ = results[i];
+                case 1: dst[0] = results[0]; break;
+                case 2: dst[0] = results[0]; dst[1] = results[1]; break;
+                case 3: dst[0] = results[0]; dst[1] = results[1]; dst[2] = results[2]; break;
+                case 4: dst[0] = results[0]; dst[1] = results[1]; dst[2] = results[2]; dst[3] = results[3]; break;
+                default:
+                    memmove(dst, results, sizeof(Value) * count);
+                    break;
                 }
+                fiber->stackTop = dst + count;
 
                 fiber->state = ProcessState::DEAD;
 
@@ -1637,13 +1735,18 @@ ProcessResult Interpreter::run_process(Process *process)
             }
 
             CallFrame *finished = &fiber->frames[fiber->frameCount];
-            fiber->stackTop = finished->slots;
-
-            // Push all return values onto the stack
-            for (int i = 0; i < count; i++)
+            Value *dst = finished->slots;
+            switch (count)
             {
-                *fiber->stackTop++ = results[i];
+            case 1: dst[0] = results[0]; break;
+            case 2: dst[0] = results[0]; dst[1] = results[1]; break;
+            case 3: dst[0] = results[0]; dst[1] = results[1]; dst[2] = results[2]; break;
+            case 4: dst[0] = results[0]; dst[1] = results[1]; dst[2] = results[2]; dst[3] = results[3]; break;
+            default:
+                memmove(dst, results, sizeof(Value) * count);
+                break;
             }
+            fiber->stackTop = dst + count;
             fiber->lastCallReturnCount = count;
 
             LOAD_FRAME();
@@ -5692,6 +5795,56 @@ ProcessResult Interpreter::run_process(Process *process)
                 valueToBuffer(val, buf, sizeof(buf));
                 PUSH(makeString(buf));
             }
+            break;
+        }
+
+        case OP_CONCAT_N:
+        {
+            uint8_t count = READ_BYTE();
+            if (count == 0)
+            {
+                PUSH(makeString(""));
+                break;
+            }
+
+            Value *base = fiber->stackTop - count;
+            size_t totalLen = 0;
+
+            for (uint8_t i = 0; i < count; i++)
+            {
+                if (!base[i].isString())
+                {
+                    runtimeError("concat_n expects string values");
+                    return {ProcessResult::ERROR, 0};
+                }
+                totalLen += base[i].asString()->length();
+            }
+
+            if (totalLen > 0xFFFFFFFFu)
+            {
+                runtimeError("String concat too large");
+                return {ProcessResult::ERROR, 0};
+            }
+
+            char *temp = (char *)aAlloc(totalLen + 1);
+            size_t offset = 0;
+            for (uint8_t i = 0; i < count; i++)
+            {
+                String *s = base[i].asString();
+                size_t l = s->length();
+                if (l > 0)
+                {
+                    memcpy(temp + offset, s->chars(), l);
+                    offset += l;
+                }
+            }
+            temp[totalLen] = '\0';
+
+            String *result = stringPool.createNoLookup(temp, (uint32)totalLen);
+            aFree(temp);
+
+            fiber->stackTop = base;
+            PUSH(makeString(result));
             break;
         }
 

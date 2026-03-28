@@ -144,4 +144,7 @@ enum Opcode : uint8
     // Debug (94) — never emitted by compiler, injected at runtime by debugger
     OP_BREAKPOINT = 94,
 
+    // String batch concat (95)
+    OP_CONCAT_N = 95, // Concat N top stack values into one string
+
 };
