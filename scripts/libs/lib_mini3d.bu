@@ -1,0 +1,1353 @@
+// ================================================================
+// lib_mini3d.bu
+//
+// Script-first mini engine with modern GPU path:
+// - Mesh/Surface API (Blitz-like)
+// - VAO/VBO/EBO upload
+// - Shader-based rendering (OpenGL)
+// - Procedural primitives: box, terrain, water, skybox
+// ================================================================
+
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+
+
+// ============================================================
+// Math helpers
+// ============================================================
+
+def miniClamp(v, a, b)
+{
+    if (v < a) return a;
+    if (v > b) return b;
+    return v;
+}
+
+
+def miniNormalize3(x, y, z)
+{
+    var l = sqrt(x*x + y*y + z*z);
+    if (l > 0.000001) return (x/l, y/l, z/l);
+    return (0.0, 1.0, 0.0);
+}
+
+
+def miniCross(ax, ay, az, bx, by, bz)
+{
+    var cx = ay*bz - az*by;
+    var cy = az*bx - ax*bz;
+    var cz = ax*by - ay*bx;
+    return (cx, cy, cz);
+}
+
+
+// ============================================================
+// GL shader helpers
+// ============================================================
+
+def miniCompileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+
+    return s;
+}
+
+
+def miniLinkProgram(vsSrc, fsSrc)
+{
+    var vs = miniCompileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+
+    var fs = miniCompileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Program link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+
+    return p;
+}
+
+
+// ============================================================
+// Material
+// ============================================================
+
+class Material
+{
+    var name;
+    var textureId; // OpenGL texture handle (0 = none)
+
+    var doubleSided;
+    var wireframe;
+
+    def init(name)
+    {
+        self.name = name;
+        self.textureId = 0;
+
+        self.doubleSided = false;
+        self.wireframe = false;
+    }
+}
+
+
+// ============================================================
+// Surface
+// ============================================================
+
+class Surface
+{
+    var name;
+
+    var positions; // float array x,y,z
+    var normals;   // float array nx,ny,nz
+    var uvs;       // float array u,v
+    var colors;    // float array r,g,b,a
+    var indices;   // int array
+
+    var materialId; // index into Mesh.materials
+
+    // GPU
+    var uploaded;
+    var vao;
+    var vbo;
+    var ebo;
+    var indexCount;
+    var dynamicGpu;
+
+    // Optional direct buffers for hot paths (terrain, streaming meshes)
+    var useDirectBuffers;
+    var interleaved;
+    var indexBuffer;
+    var vertexCapacity;
+    var indexCapacity;
+    var vertexWrite;
+    var indexWrite;
+
+    def init(name)
+    {
+        self.name = name;
+
+        self.positions = [];
+        self.normals = [];
+        self.uvs = [];
+        self.colors = [];
+        self.indices = [];
+
+        self.materialId = 0;
+
+        self.uploaded = false;
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.indexCount = 0;
+        self.dynamicGpu = false;
+
+        self.useDirectBuffers = false;
+        self.interleaved = nil;
+        self.indexBuffer = nil;
+        self.vertexCapacity = 0;
+        self.indexCapacity = 0;
+        self.vertexWrite = 0;
+        self.indexWrite = 0;
+    }
+
+    def setDynamicGpu(flag)
+    {
+        self.dynamicGpu = flag;
+    }
+
+    def allocateDirect(vertexCapacity, indexCapacity)
+    {
+        self.useDirectBuffers = true;
+        self.vertexCapacity = vertexCapacity;
+        self.indexCapacity = indexCapacity;
+        self.vertexWrite = 0;
+        self.indexWrite = 0;
+
+        self.interleaved = Float32Array(vertexCapacity * 12);
+        self.indexBuffer = Uint32Array(indexCapacity);
+
+        self.positions = [];
+        self.normals = [];
+        self.uvs = [];
+        self.colors = [];
+        self.indices = [];
+    }
+
+    def clearDirect()
+    {
+        self.vertexWrite = 0;
+        self.indexWrite = 0;
+    }
+
+    def setVertexAt(i, x, y, z, nx, ny, nz, u, v, r, g, b, a)
+    {
+        if (!self.useDirectBuffers) return false;
+        if (i < 0 || i >= self.vertexCapacity) return false;
+
+        var base = i * 12;
+        self.interleaved[base + 0] = x;
+        self.interleaved[base + 1] = y;
+        self.interleaved[base + 2] = z;
+        self.interleaved[base + 3] = nx;
+        self.interleaved[base + 4] = ny;
+        self.interleaved[base + 5] = nz;
+        self.interleaved[base + 6] = u;
+        self.interleaved[base + 7] = v;
+        self.interleaved[base + 8] = r;
+        self.interleaved[base + 9] = g;
+        self.interleaved[base + 10] = b;
+        self.interleaved[base + 11] = a;
+
+        var next = i + 1;
+        if (next > self.vertexWrite) self.vertexWrite = next;
+        return true;
+    }
+
+    def setTriangleAt(triIndex, i0, i1, i2)
+    {
+        if (!self.useDirectBuffers) return false;
+        var base = triIndex * 3;
+        if (base < 0 || base + 2 >= self.indexCapacity) return false;
+
+        self.indexBuffer[base + 0] = i0;
+        self.indexBuffer[base + 1] = i1;
+        self.indexBuffer[base + 2] = i2;
+
+        var next = base + 3;
+        if (next > self.indexWrite) self.indexWrite = next;
+        return true;
+    }
+
+    def addDirectVertex(x, y, z, nx, ny, nz, u, v, r, g, b, a)
+    {
+        var idx = self.vertexWrite;
+        if (!self.setVertexAt(idx, x, y, z, nx, ny, nz, u, v, r, g, b, a)) return -1;
+        return idx;
+    }
+
+    def addDirectTriangle(i0, i1, i2)
+    {
+        if (!self.useDirectBuffers) return false;
+        var triIndex = self.indexWrite / 3;
+        return self.setTriangleAt(triIndex, i0, i1, i2);
+    }
+
+    def addVertex(x, y, z, u, v, r, g, b, a)
+    {
+        if (self.useDirectBuffers)
+        {
+            return self.addDirectVertex(x, y, z, 0.0, 1.0, 0.0, u, v, r, g, b, a);
+        }
+
+        self.positions.push(x); self.positions.push(y); self.positions.push(z);
+        self.normals.push(0.0); self.normals.push(1.0); self.normals.push(0.0);
+        self.uvs.push(u); self.uvs.push(v);
+        self.colors.push(r); self.colors.push(g); self.colors.push(b); self.colors.push(a);
+        return self.vertexCount() - 1;
+    }
+
+    def addTriangle(i0, i1, i2)
+    {
+        if (self.useDirectBuffers)
+        {
+            self.addDirectTriangle(i0, i1, i2);
+            return;
+        }
+
+        self.indices.push(i0);
+        self.indices.push(i1);
+        self.indices.push(i2);
+    }
+
+    def vertexCount()
+    {
+        if (self.useDirectBuffers) return self.vertexWrite;
+        return len(self.positions) / 3;
+    }
+
+    def triangleCount()
+    {
+        if (self.useDirectBuffers) return self.indexWrite / 3;
+        return len(self.indices) / 3;
+    }
+
+    def setColorAll(r, g, b, a)
+    {
+        var vc = self.vertexCount();
+        for (var i = 0; i < vc; i = i + 1)
+        {
+            var c = i * 4;
+            self.colors[c + 0] = r;
+            self.colors[c + 1] = g;
+            self.colors[c + 2] = b;
+            self.colors[c + 3] = a;
+        }
+    }
+
+    def recalcNormals()
+    {
+        var vc = self.vertexCount();
+        self.normals = [];
+        for (var i = 0; i < vc; i = i + 1)
+        {
+            self.normals.push(0.0);
+            self.normals.push(0.0);
+            self.normals.push(0.0);
+        }
+
+        for (var i = 0; i < len(self.indices); i = i + 3)
+        {
+            var i0 = self.indices[i + 0];
+            var i1 = self.indices[i + 1];
+            var i2 = self.indices[i + 2];
+
+            var p0 = i0 * 3;
+            var p1 = i1 * 3;
+            var p2 = i2 * 3;
+
+            var x0 = self.positions[p0 + 0];
+            var y0 = self.positions[p0 + 1];
+            var z0 = self.positions[p0 + 2];
+
+            var x1 = self.positions[p1 + 0];
+            var y1 = self.positions[p1 + 1];
+            var z1 = self.positions[p1 + 2];
+
+            var x2 = self.positions[p2 + 0];
+            var y2 = self.positions[p2 + 1];
+            var z2 = self.positions[p2 + 2];
+
+            var e1x = x1 - x0; var e1y = y1 - y0; var e1z = z1 - z0;
+            var e2x = x2 - x0; var e2y = y2 - y0; var e2z = z2 - z0;
+            var (nx, ny, nz) = miniCross(e1x, e1y, e1z, e2x, e2y, e2z);
+
+            self.normals[p0 + 0] = self.normals[p0 + 0] + nx;
+            self.normals[p0 + 1] = self.normals[p0 + 1] + ny;
+            self.normals[p0 + 2] = self.normals[p0 + 2] + nz;
+
+            self.normals[p1 + 0] = self.normals[p1 + 0] + nx;
+            self.normals[p1 + 1] = self.normals[p1 + 1] + ny;
+            self.normals[p1 + 2] = self.normals[p1 + 2] + nz;
+
+            self.normals[p2 + 0] = self.normals[p2 + 0] + nx;
+            self.normals[p2 + 1] = self.normals[p2 + 1] + ny;
+            self.normals[p2 + 2] = self.normals[p2 + 2] + nz;
+        }
+
+        for (var i = 0; i < vc; i = i + 1)
+        {
+            var p = i * 3;
+            var (nx, ny, nz) = miniNormalize3(self.normals[p + 0], self.normals[p + 1], self.normals[p + 2]);
+            self.normals[p + 0] = nx;
+            self.normals[p + 1] = ny;
+            self.normals[p + 2] = nz;
+        }
+    }
+
+    def buildInterleaved()
+    {
+        if (self.useDirectBuffers) return self.interleaved;
+
+        var vc = self.vertexCount();
+        var out = Float32Array(vc * 12);
+
+        for (var i = 0; i < vc; i = i + 1)
+        {
+            var p = i * 3;
+            var t = i * 2;
+            var c = i * 4;
+
+            var x = self.positions[p + 0];
+            var y = self.positions[p + 1];
+            var z = self.positions[p + 2];
+
+            var nx = 0.0; var ny = 1.0; var nz = 0.0;
+            if (p + 2 < len(self.normals))
+            {
+                nx = self.normals[p + 0];
+                ny = self.normals[p + 1];
+                nz = self.normals[p + 2];
+            }
+
+            var u = 0.0; var v = 0.0;
+            if (t + 1 < len(self.uvs))
+            {
+                u = self.uvs[t + 0];
+                v = self.uvs[t + 1];
+            }
+
+            var r = 1.0; var g = 1.0; var b = 1.0; var a = 1.0;
+            if (c + 3 < len(self.colors))
+            {
+                r = self.colors[c + 0];
+                g = self.colors[c + 1];
+                b = self.colors[c + 2];
+                a = self.colors[c + 3];
+            }
+
+            out.add(x, y, z, nx, ny, nz, u, v, r, g, b, a);
+        }
+
+        return out;
+    }
+
+    def upload()
+    {
+        if (self.uploaded) return true;
+        if (self.indexCountBytes() < 12 || self.vertexCount() <= 0) return false;
+
+        var verts = self.buildInterleaved();
+        var idx = self.buildIndexBuffer();
+        var usage = GL_STATIC_DRAW;
+        if (self.dynamicGpu) usage = GL_DYNAMIC_DRAW;
+
+        self.vao = glGenVertexArrays();
+        self.vbo = glGenBuffers();
+        self.ebo = glGenBuffers();
+
+        glBindVertexArray(self.vao);
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, usage);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.byteLength(), idx, usage);
+
+        var stride = 12 * 4;
+
+        // layout(location=0) vec3 aPos
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, stride, 0);
+
+        // layout(location=1) vec3 aNormal
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, false, stride, 3 * 4);
+
+        // layout(location=2) vec2 aUV
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, false, stride, 6 * 4);
+
+        // layout(location=3) vec4 aColor
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 4, GL_FLOAT, false, stride, 8 * 4);
+
+        glBindVertexArray(0);
+
+        self.indexCount = self.indexElementCount();
+        self.uploaded = true;
+        return true;
+    }
+
+    def updateGpu()
+    {
+        if (!self.uploaded) return self.upload();
+
+        var verts = self.buildInterleaved();
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        if (self.useDirectBuffers) glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_DYNAMIC_DRAW);
+        else glBufferSubData(GL_ARRAY_BUFFER, 0, verts.byteLength(), verts);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        return true;
+    }
+
+    def updateIndicesGpu()
+    {
+        if (!self.uploaded) return self.upload();
+
+        var idx = self.buildIndexBuffer();
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.byteLength(), idx, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        self.indexCount = self.indexElementCount();
+        return true;
+    }
+
+    def updateGpuFull()
+    {
+        if (!self.uploaded) return self.upload();
+
+        var verts = self.buildInterleaved();
+        var idx = self.buildIndexBuffer();
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.byteLength(), idx, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+        self.indexCount = self.indexElementCount();
+        return true;
+    }
+
+    def buildIndexBuffer()
+    {
+        if (self.useDirectBuffers) return self.indexBuffer;
+        return Uint32Array(self.indices);
+    }
+
+    def indexElementCount()
+    {
+        if (self.useDirectBuffers) return self.indexWrite;
+        return len(self.indices);
+    }
+
+    def indexCountBytes()
+    {
+        return self.indexElementCount() * 4;
+    }
+
+    def destroy()
+    {
+        if (!self.uploaded) return;
+        glDeleteBuffers(self.vbo);
+        glDeleteBuffers(self.ebo);
+        glDeleteVertexArrays(self.vao);
+        self.vbo = 0; self.ebo = 0; self.vao = 0;
+        self.indexCount = 0;
+        self.uploaded = false;
+    }
+}
+
+
+// ============================================================
+// Mesh / Entity / Scene
+// ============================================================
+
+class Mesh
+{
+    var surfaces;
+    var materials;
+
+    def init()
+    {
+        self.surfaces = [];
+        self.materials = [];
+        self.addMaterial("default");
+    }
+
+    def addMaterial(name)
+    {
+        var m = Material(name);
+        self.materials.push(m);
+        return len(self.materials) - 1;
+    }
+
+    def getMaterial(materialId)
+    {
+        if (len(self.materials) <= 0)
+        {
+            self.addMaterial("default");
+            return self.materials[0];
+        }
+
+        if (materialId < 0 || materialId >= len(self.materials))
+            return self.materials[0];
+
+        return self.materials[materialId];
+    }
+
+    def addSurface(name)
+    {
+        return self.addSurfaceWithMaterial(name, 0);
+    }
+
+    def addSurfaceWithMaterial(name, materialId)
+    {
+        var s = Surface(name);
+        s.materialId = materialId;
+        self.surfaces.push(s);
+        return s;
+    }
+
+    def setSurfaceMaterial(surface, materialId)
+    {
+        if (surface == nil) return;
+        surface.materialId = materialId;
+    }
+
+    def setMaterialTexture(materialId, textureId)
+    {
+        var m = self.getMaterial(materialId);
+        m.textureId = textureId;
+    }
+
+    def upload()
+    {
+        for (var i = 0; i < len(self.surfaces); i = i + 1)
+            self.surfaces[i].upload();
+    }
+
+    def destroy()
+    {
+        for (var i = 0; i < len(self.surfaces); i = i + 1)
+            self.surfaces[i].destroy();
+    }
+
+    def surfaceCount() { return len(self.surfaces); }
+
+    def triangleCount()
+    {
+        var t = 0;
+        for (var i = 0; i < len(self.surfaces); i = i + 1)
+            t = t + self.surfaces[i].triangleCount();
+        return t;
+    }
+
+    def render(renderer)
+    {
+        if (renderer == nil) return;
+
+        var surfaces = self.surfaces;
+        var lastMaterialId = -1;
+        for (var i = 0; i < len(surfaces); i = i + 1)
+        {
+            var s = surfaces[i];
+            if (!s.uploaded)
+            {
+                if (!s.upload()) continue;
+            }
+
+            if (s.materialId != lastMaterialId)
+            {
+                var mat = self.getMaterial(s.materialId);
+                renderer.bindMaterial(mat);
+                lastMaterialId = s.materialId;
+            }
+
+            renderer.drawSurface(s);
+        }
+    }
+}
+
+
+class Entity
+{
+    var name;
+    var mesh;
+
+    var positionX, positionY, positionZ;
+    var rotationX, rotationY, rotationZ; // degrees
+    var scaleX, scaleY, scaleZ;
+
+    var visible;
+
+    def init(name, mesh)
+    {
+        self.name = name;
+        self.mesh = mesh;
+
+        self.positionX = 0.0; self.positionY = 0.0; self.positionZ = 0.0;
+        self.rotationX = 0.0; self.rotationY = 0.0; self.rotationZ = 0.0;
+        self.scaleX = 1.0; self.scaleY = 1.0; self.scaleZ = 1.0;
+
+        self.visible = true;
+    }
+
+    def draw(renderer, timeSec)
+    {
+        if (renderer == nil || !self.visible || self.mesh == nil) return;
+
+        rlPushMatrix();
+        rlTranslatef(self.positionX, self.positionY, self.positionZ);
+        rlRotatef(self.rotationX, 1.0, 0.0, 0.0);
+        rlRotatef(self.rotationY, 0.0, 1.0, 0.0);
+        rlRotatef(self.rotationZ, 0.0, 0.0, 1.0);
+        rlScalef(self.scaleX, self.scaleY, self.scaleZ);
+        var model = rlGetMatrixTransform();
+        rlPopMatrix();
+
+        renderer.beginEntityPass(model);
+        self.mesh.render(renderer);
+        renderer.endEntityPass();
+    }
+}
+
+
+class Water
+{
+    var name;
+    var mesh;
+    var positionX, positionY, positionZ;
+    var rotationX, rotationY, rotationZ;
+    var scaleX, scaleY, scaleZ;
+    var visible;
+
+    var waveEnabled;
+    var waveAmp;
+    var waveFreq;
+    var waveSpeed;
+
+    def init(name, mesh)
+    {
+        self.name = name;
+        self.mesh = mesh;
+
+        self.positionX = 0.0; self.positionY = 0.0; self.positionZ = 0.0;
+        self.rotationX = 0.0; self.rotationY = 0.0; self.rotationZ = 0.0;
+        self.scaleX = 1.0; self.scaleY = 1.0; self.scaleZ = 1.0;
+
+        self.visible = true;
+        self.waveEnabled = true;
+        self.waveAmp = 0.22;
+        self.waveFreq = 0.22;
+        self.waveSpeed = 1.8;
+    }
+
+    def draw(renderer, timeSec)
+    {
+        if (renderer == nil || !self.visible || self.mesh == nil) return;
+
+        rlPushMatrix();
+        rlTranslatef(self.positionX, self.positionY, self.positionZ);
+        rlRotatef(self.rotationX, 1.0, 0.0, 0.0);
+        rlRotatef(self.rotationY, 0.0, 1.0, 0.0);
+        rlRotatef(self.rotationZ, 0.0, 0.0, 1.0);
+        rlScalef(self.scaleX, self.scaleY, self.scaleZ);
+        var model = rlGetMatrixTransform();
+        rlPopMatrix();
+
+        renderer.beginWaterPass(model, self.waveEnabled, self.waveAmp, self.waveFreq, self.waveSpeed);
+        self.mesh.render(renderer);
+        renderer.endWaterPass();
+    }
+}
+
+
+class Skybox
+{
+    var name;
+    var mesh;
+    var positionX, positionY, positionZ;
+    var rotationX, rotationY, rotationZ;
+    var scaleX, scaleY, scaleZ;
+    var visible;
+
+    def init(name, mesh)
+    {
+        self.name = name;
+        self.mesh = mesh;
+
+        self.positionX = 0.0; self.positionY = 0.0; self.positionZ = 0.0;
+        self.rotationX = 0.0; self.rotationY = 0.0; self.rotationZ = 0.0;
+        self.scaleX = 1.0; self.scaleY = 1.0; self.scaleZ = 1.0;
+
+        self.visible = true;
+    }
+
+    def draw(renderer, timeSec)
+    {
+        if (renderer == nil || !self.visible || self.mesh == nil) return;
+
+        rlPushMatrix();
+        rlTranslatef(self.positionX, self.positionY, self.positionZ);
+        rlRotatef(self.rotationX, 1.0, 0.0, 0.0);
+        rlRotatef(self.rotationY, 0.0, 1.0, 0.0);
+        rlRotatef(self.rotationZ, 0.0, 0.0, 1.0);
+        rlScalef(self.scaleX, self.scaleY, self.scaleZ);
+        var model = rlGetMatrixTransform();
+        rlPopMatrix();
+
+        renderer.beginSkyboxPass(model);
+        self.mesh.render(renderer);
+        renderer.endSkyboxPass();
+    }
+}
+
+
+class Scene
+{
+    var meshes;
+    var entities;
+    var waters;
+    var skyboxes;
+    var timeSec;
+
+    def init()
+    {
+        self.meshes = [];
+        self.entities = [];
+        self.waters = [];
+        self.skyboxes = [];
+        self.timeSec = 0.0;
+    }
+
+    def findMesh(mesh)
+    {
+        if (mesh == nil) return -1;
+        for (var i = 0; i < len(self.meshes); i = i + 1)
+        {
+            if (self.meshes[i] == mesh) return i;
+        }
+        return -1;
+    }
+
+    def addMesh(mesh)
+    {
+        if (mesh == nil) return -1;
+        var idx = self.findMesh(mesh);
+        if (idx >= 0) return idx;
+        self.meshes.push(mesh);
+        return len(self.meshes) - 1;
+    }
+
+    def createMesh()
+    {
+        var m = Mesh();
+        self.meshes.push(m);
+        return m;
+    }
+
+    def getMesh(index)
+    {
+        if (index < 0 || index >= len(self.meshes)) return nil;
+        return self.meshes[index];
+    }
+
+    def meshCount()
+    {
+        return len(self.meshes);
+    }
+
+    def createEntity(mesh, name)
+    {
+        if (mesh != nil) self.addMesh(mesh);
+        var e = Entity(name, mesh);
+        self.entities.push(e);
+        return e;
+    }
+
+    def createEntityByMeshIndex(index, name)
+    {
+        var mesh = self.getMesh(index);
+        return self.createEntity(mesh, name);
+    }
+
+    def createWater(mesh, name, waveAmp, waveFreq, waveSpeed)
+    {
+        if (mesh != nil) self.addMesh(mesh);
+        var w = Water(name, mesh);
+        w.waveEnabled = true;
+        w.waveAmp = waveAmp;
+        w.waveFreq = waveFreq;
+        w.waveSpeed = waveSpeed;
+        self.waters.push(w);
+        return w;
+    }
+
+    def createSkybox(mesh, name)
+    {
+        if (mesh != nil) self.addMesh(mesh);
+        var s = Skybox(name, mesh);
+        self.skyboxes.push(s);
+        return s;
+    }
+
+    def entityCount()
+    {
+        return len(self.entities);
+    }
+
+    def update(dt)
+    {
+        self.timeSec = self.timeSec + dt;
+    }
+
+    def draw(renderer)
+    {
+        if (renderer == nil) return;
+        for (var i = 0; i < len(self.skyboxes); i = i + 1)
+            self.skyboxes[i].draw(renderer, self.timeSec);
+        for (var i = 0; i < len(self.entities); i = i + 1)
+            self.entities[i].draw(renderer, self.timeSec);
+        for (var i = 0; i < len(self.waters); i = i + 1)
+            self.waters[i].draw(renderer, self.timeSec);
+    }
+}
+
+
+// ============================================================
+// Renderer (shader + draw)
+// ============================================================
+
+class Renderer
+{
+    var program;
+
+    var uModel;
+    var uView;
+    var uProj;
+    var uTime;
+    var uLightDir;
+    var uWaveAmp;
+    var uWaveFreq;
+    var uWaveSpeed;
+    var uIsSky;
+    var uUseTex;
+    var uTex0;
+
+    var stateCullDisabled;
+    var stateTextureId;
+    var stateUseTex;
+
+    def init()
+    {
+        self.program = 0;
+        self.uModel = -1;
+        self.uView = -1;
+        self.uProj = -1;
+        self.uTime = -1;
+        self.uLightDir = -1;
+        self.uWaveAmp = -1;
+        self.uWaveFreq = -1;
+        self.uWaveSpeed = -1;
+        self.uIsSky = -1;
+        self.uUseTex = -1;
+        self.uTex0 = -1;
+
+        self.stateCullDisabled = -1;
+        self.stateTextureId = -2;
+        self.stateUseTex = -1;
+    }
+
+    def setup()
+    {
+        var vs = @"#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(location = 3) in vec4 aColor;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+uniform float uTime;
+uniform float uWaveAmp;
+uniform float uWaveFreq;
+uniform float uWaveSpeed;
+uniform float uIsSky;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+out vec4 vColor;
+out float vIsSky;
+
+void main()
+{
+    vec3 p = aPos;
+    if (uWaveAmp > 0.0)
+        p.y += sin(uTime*uWaveSpeed + p.x*uWaveFreq + p.z*uWaveFreq)*uWaveAmp;
+
+    vec4 w = uModel * vec4(p, 1.0);
+    vWorldPos = w.xyz;
+
+    mat3 nmat = mat3(transpose(inverse(uModel)));
+    vNormal = normalize(nmat * aNormal);
+
+    vUV = aUV;
+    vColor = aColor;
+    vIsSky = uIsSky;
+
+    gl_Position = uProj * uView * w;
+}
+";
+
+        var fs = @"#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+in vec4 vColor;
+in float vIsSky;
+
+uniform vec3 uLightDir;
+uniform float uUseTex;
+uniform sampler2D uTex0;
+
+out vec4 FragColor;
+
+void main()
+{
+    if (vIsSky > 0.5)
+    {
+        float t = clamp(normalize(vWorldPos).y*0.5 + 0.5, 0.0, 1.0);
+        vec3 top = vec3(0.43, 0.65, 0.98);
+        vec3 bot = vec3(0.08, 0.14, 0.28);
+        vec3 col = mix(bot, top, t);
+        FragColor = vec4(col, 1.0);
+        return;
+    }
+
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-uLightDir);
+    float diff = max(dot(N, L), 0.0);
+
+    vec3 base = vColor.rgb;
+    float alpha = vColor.a;
+    if (uUseTex > 0.5)
+    {
+        vec4 texel = texture(uTex0, vUV);
+        base *= texel.rgb;
+        alpha *= texel.a;
+    }
+
+    vec3 ambient = base * 0.28;
+    vec3 lit = base * (0.28 + 0.72*diff);
+
+    FragColor = vec4(lit + ambient*0.2, alpha);
+}
+";
+
+        self.program = miniLinkProgram(vs, fs);
+        if (self.program <= 0) return false;
+
+        self.uModel = glGetUniformLocation(self.program, "uModel");
+        self.uView = glGetUniformLocation(self.program, "uView");
+        self.uProj = glGetUniformLocation(self.program, "uProj");
+        self.uTime = glGetUniformLocation(self.program, "uTime");
+        self.uLightDir = glGetUniformLocation(self.program, "uLightDir");
+        self.uWaveAmp = glGetUniformLocation(self.program, "uWaveAmp");
+        self.uWaveFreq = glGetUniformLocation(self.program, "uWaveFreq");
+        self.uWaveSpeed = glGetUniformLocation(self.program, "uWaveSpeed");
+        self.uIsSky = glGetUniformLocation(self.program, "uIsSky");
+        self.uUseTex = glGetUniformLocation(self.program, "uUseTex");
+        self.uTex0 = glGetUniformLocation(self.program, "uTex0");
+
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+
+        return true;
+    }
+
+    def beginFrame(timeSec)
+    {
+        // Must be called inside BeginMode3D(cam)
+        rlDrawRenderBatchActive();
+
+        var view = rlGetMatrixModelview();
+        var proj = rlGetMatrixProjection();
+
+        glUseProgram(self.program);
+
+        if (self.uView >= 0) glUniformMatrix4fv(self.uView, 1, false, view);
+        if (self.uProj >= 0) glUniformMatrix4fv(self.uProj, 1, false, proj);
+        if (self.uTime >= 0) glUniform1f(self.uTime, timeSec);
+        if (self.uLightDir >= 0) glUniform3f(self.uLightDir, -0.45, -1.0, 0.35);
+        if (self.uTex0 >= 0) glUniform1i(self.uTex0, 0);
+
+        self.stateCullDisabled = -1;
+        self.stateTextureId = -2;
+        self.stateUseTex = -1;
+    }
+
+    def endFrame()
+    {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindVertexArray(0);
+        glUseProgram(0);
+    }
+
+    def beginEntityPass(model)
+    {
+        if (self.uModel >= 0) glUniformMatrix4fv(self.uModel, 1, false, model);
+        glEnable(GL_DEPTH_TEST);
+
+        if (self.uWaveAmp >= 0) glUniform1f(self.uWaveAmp, 0.0);
+        if (self.uWaveFreq >= 0) glUniform1f(self.uWaveFreq, 0.22);
+        if (self.uWaveSpeed >= 0) glUniform1f(self.uWaveSpeed, 1.0);
+        if (self.uIsSky >= 0) glUniform1f(self.uIsSky, 0.0);
+    }
+
+    def endEntityPass()
+    {
+    }
+
+    def beginWaterPass(model, waveEnabled, waveAmp, waveFreq, waveSpeed)
+    {
+        if (self.uModel >= 0) glUniformMatrix4fv(self.uModel, 1, false, model);
+        glEnable(GL_DEPTH_TEST);
+
+        if (self.uWaveAmp >= 0)
+        {
+            if (waveEnabled) glUniform1f(self.uWaveAmp, waveAmp);
+            else glUniform1f(self.uWaveAmp, 0.0);
+        }
+        if (self.uWaveFreq >= 0) glUniform1f(self.uWaveFreq, waveFreq);
+        if (self.uWaveSpeed >= 0) glUniform1f(self.uWaveSpeed, waveSpeed);
+        if (self.uIsSky >= 0) glUniform1f(self.uIsSky, 0.0);
+    }
+
+    def endWaterPass()
+    {
+    }
+
+    def beginSkyboxPass(model)
+    {
+        if (self.uModel >= 0) glUniformMatrix4fv(self.uModel, 1, false, model);
+        glDisable(GL_DEPTH_TEST);
+
+        if (self.uWaveAmp >= 0) glUniform1f(self.uWaveAmp, 0.0);
+        if (self.uWaveFreq >= 0) glUniform1f(self.uWaveFreq, 0.22);
+        if (self.uWaveSpeed >= 0) glUniform1f(self.uWaveSpeed, 1.0);
+        if (self.uIsSky >= 0) glUniform1f(self.uIsSky, 1.0);
+    }
+
+    def endSkyboxPass()
+    {
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    def bindMaterial(mat)
+    {
+        if (mat == nil) return;
+
+        var cullDisabled = mat.doubleSided;
+        if (self.stateCullDisabled != cullDisabled)
+        {
+            if (cullDisabled) glDisable(GL_CULL_FACE);
+            else glEnable(GL_CULL_FACE);
+            self.stateCullDisabled = cullDisabled;
+        }
+
+        var textureId = mat.textureId;
+        var useTex = 0.0;
+        if (textureId > 0) useTex = 1.0;
+
+        if (self.stateTextureId != textureId)
+        {
+            glActiveTexture(GL_TEXTURE0);
+            if (textureId > 0) glBindTexture(GL_TEXTURE_2D, textureId);
+            else glBindTexture(GL_TEXTURE_2D, 0);
+            self.stateTextureId = textureId;
+        }
+
+        if (self.uUseTex >= 0 && self.stateUseTex != useTex)
+        {
+            glUniform1f(self.uUseTex, useTex);
+            self.stateUseTex = useTex;
+        }
+    }
+
+    def drawSurface(surface)
+    {
+        if (surface == nil) return;
+
+        glBindVertexArray(surface.vao);
+        glDrawElements(GL_TRIANGLES, surface.indexCount, GL_UNSIGNED_INT, 0);
+    }
+
+    def destroy()
+    {
+        if (self.program > 0)
+        {
+            glDeleteProgram(self.program);
+            self.program = 0;
+        }
+    }
+}
+
+
+// ============================================================
+// Mesh factory
+// ============================================================
+
+class MeshFactory
+{
+    def init()
+    {
+    }
+
+    def addQuad(s, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, r, g, b, a, inward)
+    {
+        var i0 = s.addVertex(ax, ay, az, 0.0, 0.0, r, g, b, a);
+        var i1 = s.addVertex(bx, by, bz, 1.0, 0.0, r, g, b, a);
+        var i2 = s.addVertex(cx, cy, cz, 1.0, 1.0, r, g, b, a);
+        var i3 = s.addVertex(dx, dy, dz, 0.0, 1.0, r, g, b, a);
+
+        if (!inward)
+        {
+            s.addTriangle(i0, i1, i2);
+            s.addTriangle(i0, i2, i3);
+        }
+        else
+        {
+            s.addTriangle(i0, i2, i1);
+            s.addTriangle(i0, i3, i2);
+        }
+    }
+
+    def createBox(size, r, g, b, a, inward)
+    {
+        var mesh = Mesh();
+        var s = mesh.addSurface("box");
+
+        var h = size * 0.5;
+
+        // +Z
+        self.addQuad(s, -h,-h, h,  h,-h, h,  h, h, h, -h, h, h, r,g,b,a, inward);
+        // -Z
+        self.addQuad(s,  h,-h,-h, -h,-h,-h, -h, h,-h,  h, h,-h, r,g,b,a, inward);
+        // +X
+        self.addQuad(s,  h,-h, h,  h,-h,-h,  h, h,-h,  h, h, h, r,g,b,a, inward);
+        // -X
+        self.addQuad(s, -h,-h,-h, -h,-h, h, -h, h, h, -h, h,-h, r,g,b,a, inward);
+        // +Y
+        self.addQuad(s, -h, h, h,  h, h, h,  h, h,-h, -h, h,-h, r,g,b,a, inward);
+        // -Y
+        self.addQuad(s, -h,-h,-h,  h,-h,-h,  h,-h, h, -h,-h, h, r,g,b,a, inward);
+
+        s.recalcNormals();
+        return mesh;
+    }
+
+    def createPlane(sizeX, sizeZ, segX, segZ, y, r, g, b, a)
+    {
+        var mesh = Mesh();
+        var s = mesh.addSurface("plane");
+        var fx = 0.0;
+        var fz = 0.0;
+        var u = 0.0;
+        var v = 0.0;
+        var i0 = 0;
+        var i1 = 0;
+        var i2 = 0;
+        var i3 = 0;
+
+        if (segX < 1) segX = 1;
+        if (segZ < 1) segZ = 1;
+
+        for (var z = 0; z <= segZ; z = z + 1)
+        {
+            for (var x = 0; x <= segX; x = x + 1)
+            {
+                fx = (x / segX - 0.5) * sizeX;
+                fz = (z / segZ - 0.5) * sizeZ;
+                u = x / segX;
+                v = z / segZ;
+                s.addVertex(fx, y, fz, u, v, r, g, b, a);
+            }
+        }
+
+        var row = segX + 1;
+        for (var z = 0; z < segZ; z = z + 1)
+        {
+            for (var x = 0; x < segX; x = x + 1)
+            {
+                i0 = z * row + x;
+                i1 = i0 + 1;
+                i2 = i0 + row;
+                i3 = i2 + 1;
+                s.addTriangle(i0, i2, i1);
+                s.addTriangle(i1, i2, i3);
+            }
+        }
+
+        s.recalcNormals();
+        return mesh;
+    }
+
+    def createTerrain(sizeX, sizeZ, segX, segZ, amp, freq)
+    {
+        var mesh = Mesh();
+        var s = mesh.addSurface("terrain");
+        var fx = 0.0;
+        var fz = 0.0;
+        var h = 0.0;
+        var shade = 0.0;
+        var cr = 0.0;
+        var cg = 0.0;
+        var cb = 0.0;
+        var i0 = 0;
+        var i1 = 0;
+        var i2 = 0;
+        var i3 = 0;
+
+        if (segX < 1) segX = 1;
+        if (segZ < 1) segZ = 1;
+
+        for (var z = 0; z <= segZ; z = z + 1)
+        {
+            for (var x = 0; x <= segX; x = x + 1)
+            {
+                fx = (x / segX - 0.5) * sizeX;
+                fz = (z / segZ - 0.5) * sizeZ;
+                h = sin(fx * freq) * amp + cos(fz * freq * 0.8) * amp * 0.6;
+                shade = miniClamp((h / max(amp, 0.001) + 1.0) * 0.5, 0.0, 1.0);
+                cr = 0.12 + 0.20 * shade;
+                cg = 0.35 + 0.40 * shade;
+                cb = 0.10 + 0.12 * shade;
+                s.addVertex(fx, h, fz, x / segX, z / segZ, cr, cg, cb, 1.0);
+            }
+        }
+
+        var row = segX + 1;
+        for (var z = 0; z < segZ; z = z + 1)
+        {
+            for (var x = 0; x < segX; x = x + 1)
+            {
+                i0 = z * row + x;
+                i1 = i0 + 1;
+                i2 = i0 + row;
+                i3 = i2 + 1;
+                s.addTriangle(i0, i2, i1);
+                s.addTriangle(i1, i2, i3);
+            }
+        }
+
+        s.recalcNormals();
+        return mesh;
+    }
+
+    def createWater(sizeX, sizeZ, segX, segZ)
+    {
+        var mesh = self.createPlane(sizeX, sizeZ, segX, segZ, 0.0, 0.17, 0.42, 0.74, 0.86);
+        var s = mesh.surfaces[0];
+        var m = mesh.getMaterial(s.materialId);
+        m.doubleSided = true;
+        return mesh;
+    }
+
+    def createSkybox(size)
+    {
+        var mesh = self.createBox(size, 0.40, 0.60, 0.96, 1.0, true);
+        var s = mesh.surfaces[0];
+        var m = mesh.getMaterial(s.materialId);
+        m.doubleSided = true;
+        return mesh;
+    }
+}

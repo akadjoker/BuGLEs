@@ -1,0 +1,1030 @@
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import ImGui;
+using ImGui;
+import STB;
+using STB;
+import path;
+using path;
+import math;
+using math;
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def voxelCompileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Voxel shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def voxelLinkProgram(vsSrc, fsSrc)
+{
+    var vs = voxelCompileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = voxelCompileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Voxel link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def voxelLoadTexture(path)
+{
+    stbi_set_flip_vertically_on_load(0);
+    var (w, h, ch, pixels) = stbi_load(path, 4);
+    if (pixels == nil)
+    {
+        print("Voxel atlas not found: " + path);
+        return 0;
+    }
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def voxelTileUV(tileX, tileY, cols, rows)
+{
+    var padU = 0.02 / cols;
+    var padV = 0.02 / rows;
+    var u0 = tileX / cols + padU;
+    var u1 = (tileX + 1.0) / cols - padU;
+    var v0 = tileY / rows + padV;
+    var v1 = (tileY + 1.0) / rows - padV;
+    return (u0, v0, u1, v1);
+}
+
+def voxelCross(ax, ay, az, bx, by, bz)
+{
+    return (
+        ay * bz - az * by,
+        az * bx - ax * bz,
+        ax * by - ay * bx
+    );
+}
+
+
+def voxelNormalize(x, y, z)
+{
+    var l = sqrt(x * x + y * y + z * z);
+    if (l < 0.000001) return (0.0, 0.0, -1.0);
+    return (x / l, y / l, z / l);
+}
+
+
+def voxelFloorDiv(a, b)
+{
+    return int(floor(a / b));
+}
+
+
+def voxelChunkKey(cx, cz)
+{
+    return str(cx) + "," + str(cz);
+}
+
+
+def voxelMouseRay(camX, camY, camZ, fwdX, fwdY, fwdZ, fovYRad, aspect)
+{
+    var (mx, my) = GetMousePosition();
+    var nx = (2.0 * mx / GetScreenWidth() - 1.0) * aspect * tan(fovYRad * 0.5);
+    var ny = (1.0 - 2.0 * my / GetScreenHeight()) * tan(fovYRad * 0.5);
+
+    var (rx, ry, rz) = voxelCross(fwdX, fwdY, fwdZ, 0.0, 1.0, 0.0);
+    var (rightX, rightY, rightZ) = voxelNormalize(rx, ry, rz);
+    var (ux, uy, uz) = voxelCross(rightX, rightY, rightZ, fwdX, fwdY, fwdZ);
+    var (upX, upY, upZ) = voxelNormalize(ux, uy, uz);
+
+    var dirX = fwdX + rightX * nx + upX * ny;
+    var dirY = fwdY + rightY * nx + upY * ny;
+    var dirZ = fwdZ + rightZ * nx + upZ * ny;
+    var (ndx, ndy, ndz) = voxelNormalize(dirX, dirY, dirZ);
+    return (camX, camY, camZ, ndx, ndy, ndz);
+}
+
+
+def voxelAddVertex(verts, x, y, z, nx, ny, nz, u, v)
+{
+    verts.add(x, y, z, nx, ny, nz, u, v);
+}
+
+
+def voxelAddFace(verts, indices, baseIndex, faceId, x, y, z, tileX, tileY, cols, rows)
+{
+    var (u0, v0, u1, v1) = voxelTileUV(tileX, tileY, cols, rows);
+
+    if (faceId == 0)
+    {
+        voxelAddVertex(verts, x + 1.0, y + 0.0, z + 0.0,  1.0, 0.0, 0.0, u0, v1);
+        voxelAddVertex(verts, x + 1.0, y + 1.0, z + 0.0,  1.0, 0.0, 0.0, u0, v0);
+        voxelAddVertex(verts, x + 1.0, y + 1.0, z + 1.0,  1.0, 0.0, 0.0, u1, v0);
+        voxelAddVertex(verts, x + 1.0, y + 0.0, z + 1.0,  1.0, 0.0, 0.0, u1, v1);
+    }
+    elif (faceId == 1)
+    {
+        voxelAddVertex(verts, x + 0.0, y + 0.0, z + 1.0, -1.0, 0.0, 0.0, u0, v1);
+        voxelAddVertex(verts, x + 0.0, y + 1.0, z + 1.0, -1.0, 0.0, 0.0, u0, v0);
+        voxelAddVertex(verts, x + 0.0, y + 1.0, z + 0.0, -1.0, 0.0, 0.0, u1, v0);
+        voxelAddVertex(verts, x + 0.0, y + 0.0, z + 0.0, -1.0, 0.0, 0.0, u1, v1);
+    }
+    elif (faceId == 2)
+    {
+        voxelAddVertex(verts, x + 0.0, y + 1.0, z + 1.0,  0.0, 1.0, 0.0, u0, v1);
+        voxelAddVertex(verts, x + 1.0, y + 1.0, z + 1.0,  0.0, 1.0, 0.0, u1, v1);
+        voxelAddVertex(verts, x + 1.0, y + 1.0, z + 0.0,  0.0, 1.0, 0.0, u1, v0);
+        voxelAddVertex(verts, x + 0.0, y + 1.0, z + 0.0,  0.0, 1.0, 0.0, u0, v0);
+    }
+    elif (faceId == 3)
+    {
+        voxelAddVertex(verts, x + 0.0, y + 0.0, z + 0.0,  0.0,-1.0, 0.0, u0, v1);
+        voxelAddVertex(verts, x + 1.0, y + 0.0, z + 0.0,  0.0,-1.0, 0.0, u1, v1);
+        voxelAddVertex(verts, x + 1.0, y + 0.0, z + 1.0,  0.0,-1.0, 0.0, u1, v0);
+        voxelAddVertex(verts, x + 0.0, y + 0.0, z + 1.0,  0.0,-1.0, 0.0, u0, v0);
+    }
+    elif (faceId == 4)
+    {
+        voxelAddVertex(verts, x + 0.0, y + 0.0, z + 1.0,  0.0, 0.0, 1.0, u0, v1);
+        voxelAddVertex(verts, x + 1.0, y + 0.0, z + 1.0,  0.0, 0.0, 1.0, u1, v1);
+        voxelAddVertex(verts, x + 1.0, y + 1.0, z + 1.0,  0.0, 0.0, 1.0, u1, v0);
+        voxelAddVertex(verts, x + 0.0, y + 1.0, z + 1.0,  0.0, 0.0, 1.0, u0, v0);
+    }
+    else
+    {
+        voxelAddVertex(verts, x + 1.0, y + 0.0, z + 0.0,  0.0, 0.0,-1.0, u0, v1);
+        voxelAddVertex(verts, x + 0.0, y + 0.0, z + 0.0,  0.0, 0.0,-1.0, u1, v1);
+        voxelAddVertex(verts, x + 0.0, y + 1.0, z + 0.0,  0.0, 0.0,-1.0, u1, v0);
+        voxelAddVertex(verts, x + 1.0, y + 1.0, z + 0.0,  0.0, 0.0,-1.0, u0, v0);
+    }
+
+    indices.add(baseIndex + 0, baseIndex + 1, baseIndex + 2);
+    indices.add(baseIndex + 0, baseIndex + 2, baseIndex + 3);
+}
+
+
+var BLOCK_AIR = 0;
+var BLOCK_GRASS = 1;
+var BLOCK_DIRT = 2;
+var BLOCK_STONE = 3;
+var BLOCK_SAND = 4;
+var BLOCK_WOOD = 5;
+var BLOCK_LEAVES = 6;
+
+
+def voxelBlockLabel(block)
+{
+    if (block == BLOCK_GRASS) return "Grass";
+    if (block == BLOCK_DIRT) return "Dirt";
+    if (block == BLOCK_STONE) return "Stone";
+    if (block == BLOCK_SAND) return "Sand";
+    if (block == BLOCK_WOOD) return "Wood";
+    if (block == BLOCK_LEAVES) return "Leaves";
+    return "Unknown";
+}
+
+
+class VoxelChunk
+{
+    var world;
+    var cx;
+    var cz;
+    var blocks;
+    var vao;
+    var vbo;
+    var ebo;
+    var indexCount;
+    var dirty;
+
+    def init(worldRef, chunkX, chunkZ)
+    {
+        self.world = worldRef;
+        self.cx = chunkX;
+        self.cz = chunkZ;
+        self.blocks = @(self.world.chunkSizeX * self.world.chunkSizeY * self.world.chunkSizeZ, TYPE_UINT8);
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.indexCount = 0;
+        self.dirty = true;
+    }
+
+    def idx(x, y, z)
+    {
+        return x + z * self.world.chunkSizeX + y * self.world.chunkSizeX * self.world.chunkSizeZ;
+    }
+
+    def get(x, y, z)
+    {
+        if (x < 0 || x >= self.world.chunkSizeX) return 0;
+        if (y < 0 || y >= self.world.chunkSizeY) return 0;
+        if (z < 0 || z >= self.world.chunkSizeZ) return 0;
+        return int(self.blocks[self.idx(x, y, z)]);
+    }
+
+    def set(x, y, z, v)
+    {
+        if (x < 0 || x >= self.world.chunkSizeX) return;
+        if (y < 0 || y >= self.world.chunkSizeY) return;
+        if (z < 0 || z >= self.world.chunkSizeZ) return;
+        self.blocks[self.idx(x, y, z)] = int(v);
+        self.dirty = true;
+    }
+
+    def buildMesh()
+    {
+        var verts = Float32Array(0);
+        var indices = Uint32Array(0);
+        var maxFaces = self.world.chunkSizeX * self.world.chunkSizeY * self.world.chunkSizeZ * 6;
+        verts.reserve(maxFaces * 4 * 8);
+        indices.reserve(maxFaces * 6);
+
+        var vcount = 0;
+        var x = 0;
+        var y = 0;
+        var z = 0;
+        var block = 0;
+        var wx = 0;
+        var wy = 0;
+        var wz = 0;
+        var sideTile = 0;
+        var topTile = 0;
+        var bottomTile = 0;
+
+        for (y = 0; y < self.world.chunkSizeY; y = y + 1)
+        {
+            for (z = 0; z < self.world.chunkSizeZ; z = z + 1)
+            {
+                for (x = 0; x < self.world.chunkSizeX; x = x + 1)
+                {
+                    block = self.get(x, y, z);
+                    if (block == BLOCK_AIR) continue;
+
+                    wx = self.cx * self.world.chunkSizeX + x;
+                    wy = y;
+                    wz = self.cz * self.world.chunkSizeZ + z;
+
+                    sideTile = self.world.blockSideTile(block);
+                    topTile = self.world.blockTopTile(block);
+                    bottomTile = self.world.blockBottomTile(block);
+
+                    if (self.world.getBlockWorld(wx + 1, wy, wz) == BLOCK_AIR)
+                    {
+                        voxelAddFace(verts, indices, vcount, 0, wx, wy, wz, sideTile % self.world.atlasCols, int(floor(sideTile / self.world.atlasCols)), self.world.atlasCols, self.world.atlasRows);
+                        vcount = vcount + 4;
+                    }
+                    if (self.world.getBlockWorld(wx - 1, wy, wz) == BLOCK_AIR)
+                    {
+                        voxelAddFace(verts, indices, vcount, 1, wx, wy, wz, sideTile % self.world.atlasCols, int(floor(sideTile / self.world.atlasCols)), self.world.atlasCols, self.world.atlasRows);
+                        vcount = vcount + 4;
+                    }
+                    if (self.world.getBlockWorld(wx, wy + 1, wz) == BLOCK_AIR)
+                    {
+                        voxelAddFace(verts, indices, vcount, 2, wx, wy, wz, topTile % self.world.atlasCols, int(floor(topTile / self.world.atlasCols)), self.world.atlasCols, self.world.atlasRows);
+                        vcount = vcount + 4;
+                    }
+                    if (self.world.getBlockWorld(wx, wy - 1, wz) == BLOCK_AIR)
+                    {
+                        voxelAddFace(verts, indices, vcount, 3, wx, wy, wz, bottomTile % self.world.atlasCols, int(floor(bottomTile / self.world.atlasCols)), self.world.atlasCols, self.world.atlasRows);
+                        vcount = vcount + 4;
+                    }
+                    if (self.world.getBlockWorld(wx, wy, wz + 1) == BLOCK_AIR)
+                    {
+                        voxelAddFace(verts, indices, vcount, 4, wx, wy, wz, sideTile % self.world.atlasCols, int(floor(sideTile / self.world.atlasCols)), self.world.atlasCols, self.world.atlasRows);
+                        vcount = vcount + 4;
+                    }
+                    if (self.world.getBlockWorld(wx, wy, wz - 1) == BLOCK_AIR)
+                    {
+                        voxelAddFace(verts, indices, vcount, 5, wx, wy, wz, sideTile % self.world.atlasCols, int(floor(sideTile / self.world.atlasCols)), self.world.atlasCols, self.world.atlasRows);
+                        vcount = vcount + 4;
+                    }
+                }
+            }
+        }
+
+        self.indexCount = indices.length();
+
+        if (self.vao == 0) self.vao = glGenVertexArrays();
+        if (self.vbo == 0) self.vbo = glGenBuffers();
+        if (self.ebo == 0) self.ebo = glGenBuffers();
+
+        glBindVertexArray(self.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.byteLength(), indices, GL_STATIC_DRAW);
+
+        var stride = 8 * 4;
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, stride, 0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, false, stride, 3 * 4);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, false, stride, 6 * 4);
+        glBindVertexArray(0);
+
+        self.dirty = false;
+    }
+
+    def draw()
+    {
+        if (self.dirty) self.buildMesh();
+        if (self.indexCount <= 0) return;
+        glBindVertexArray(self.vao);
+        glDrawElements(GL_TRIANGLES, self.indexCount, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+    }
+
+    def destroy()
+    {
+        if (self.vbo > 0) glDeleteBuffers(self.vbo);
+        if (self.ebo > 0) glDeleteBuffers(self.ebo);
+        if (self.vao > 0) glDeleteVertexArrays(self.vao);
+        self.vbo = 0;
+        self.ebo = 0;
+        self.vao = 0;
+        self.indexCount = 0;
+    }
+}
+
+
+class VoxelWorld
+{
+    var chunkSizeX;
+    var chunkSizeY;
+    var chunkSizeZ;
+    var renderDistance;
+    var unloadDistance;
+    var maxChunkBuildsPerFrame;
+    var seed;
+    var atlasCols;
+    var atlasRows;
+    var atlasTex;
+    var program;
+    var uView;
+    var uProj;
+    var uCamPos;
+    var uLightDir;
+    var uAtlas;
+    var chunkMap;
+    var chunkKeys;
+    var pending;
+    var pendingFlags;
+    var selectedBlock;
+    var triangles;
+
+    def init()
+    {
+        self.chunkSizeX = 16;
+        self.chunkSizeY = 48;
+        self.chunkSizeZ = 16;
+        self.renderDistance = 2;
+        self.unloadDistance = 3;
+        self.maxChunkBuildsPerFrame = 1;
+        self.seed = 1337.0;
+        self.atlasCols = 16;
+        self.atlasRows = 39;
+        self.atlasTex = 0;
+        self.program = 0;
+        self.uView = -1;
+        self.uProj = -1;
+        self.uCamPos = -1;
+        self.uLightDir = -1;
+        self.uAtlas = -1;
+        self.chunkMap = {};
+        self.chunkKeys = [];
+        self.pending = [];
+        self.pendingFlags = {};
+        self.selectedBlock = BLOCK_GRASS;
+        self.triangles = 0;
+    }
+
+    def setup(atlasPath)
+    {
+        var vs = @"#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+void main()
+{
+    vWorldPos = aPos;
+    vNormal = aNormal;
+    vUV = aUV;
+    gl_Position = uProj * uView * vec4(aPos, 1.0);
+}
+";
+
+        var fs = @"#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+
+uniform vec3 uCamPos;
+uniform vec3 uLightDir;
+uniform sampler2D uAtlas;
+
+out vec4 FragColor;
+
+void main()
+{
+    vec4 texel = texture(uAtlas, vUV);
+    if (texel.a < 0.1) discard;
+
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-uLightDir);
+    float diff = max(dot(N, L), 0.0);
+    float ambient = 0.28;
+
+    vec3 V = normalize(uCamPos - vWorldPos);
+    vec3 H = normalize(L + V);
+    float spec = pow(max(dot(N, H), 0.0), 24.0) * 0.15;
+
+    vec3 color = texel.rgb * (ambient + diff * 0.82) + vec3(spec);
+    FragColor = vec4(color, texel.a);
+}
+";
+
+        self.program = voxelLinkProgram(vs, fs);
+        if (self.program <= 0) return false;
+        self.uView = glGetUniformLocation(self.program, "uView");
+        self.uProj = glGetUniformLocation(self.program, "uProj");
+        self.uCamPos = glGetUniformLocation(self.program, "uCamPos");
+        self.uLightDir = glGetUniformLocation(self.program, "uLightDir");
+        self.uAtlas = glGetUniformLocation(self.program, "uAtlas");
+
+        self.atlasTex = voxelLoadTexture(atlasPath);
+        if (self.atlasTex <= 0) return false;
+
+        return true;
+    }
+
+    def chunkAt(cx, cz)
+    {
+        return self.chunkMap[voxelChunkKey(cx, cz)];
+    }
+
+    def getBlockWorld(wx, wy, wz)
+    {
+        if (wy < 0 || wy >= self.chunkSizeY) return BLOCK_AIR;
+
+        var cx = voxelFloorDiv(wx, self.chunkSizeX);
+        var cz = voxelFloorDiv(wz, self.chunkSizeZ);
+        var chunk = self.chunkAt(cx, cz);
+        if (chunk == nil) return BLOCK_AIR;
+
+        var bx = wx - cx * self.chunkSizeX;
+        var bz = wz - cz * self.chunkSizeZ;
+        return chunk.get(bx, wy, bz);
+    }
+
+    def setBlockWorld(wx, wy, wz, block)
+    {
+        if (wy < 0 || wy >= self.chunkSizeY) return false;
+
+        var cx = voxelFloorDiv(wx, self.chunkSizeX);
+        var cz = voxelFloorDiv(wz, self.chunkSizeZ);
+        var chunk = self.chunkAt(cx, cz);
+        if (chunk == nil) return false;
+
+        var bx = wx - cx * self.chunkSizeX;
+        var bz = wz - cz * self.chunkSizeZ;
+        chunk.set(bx, wy, bz, block);
+
+        if (bx == 0 && self.chunkAt(cx - 1, cz) != nil) self.chunkAt(cx - 1, cz).dirty = true;
+        if (bx == self.chunkSizeX - 1 && self.chunkAt(cx + 1, cz) != nil) self.chunkAt(cx + 1, cz).dirty = true;
+        if (bz == 0 && self.chunkAt(cx, cz - 1) != nil) self.chunkAt(cx, cz - 1).dirty = true;
+        if (bz == self.chunkSizeZ - 1 && self.chunkAt(cx, cz + 1) != nil) self.chunkAt(cx, cz + 1).dirty = true;
+        return true;
+    }
+
+    def queueChunk(cx, cz)
+    {
+        var key = voxelChunkKey(cx, cz);
+        if (self.chunkMap[key] != nil) return;
+        if (self.pendingFlags[key] != nil) return;
+        self.pending.push([cx, cz, key]);
+        self.pendingFlags[key] = true;
+    }
+
+    def generateChunkData(chunk)
+    {
+        var x = 0;
+        var y = 0;
+        var z = 0;
+        var wx = 0;
+        var wz = 0;
+        var n0 = 0.0;
+        var n1 = 0.0;
+        var h = 0;
+
+        for (z = 0; z < self.chunkSizeZ; z = z + 1)
+        {
+            for (x = 0; x < self.chunkSizeX; x = x + 1)
+            {
+                wx = chunk.cx * self.chunkSizeX + x;
+                wz = chunk.cz * self.chunkSizeZ + z;
+
+                n0 = stb_perlin_fbm_noise3(wx * 0.035, self.seed * 0.001, wz * 0.035, 2.0, 0.5, 5);
+                n1 = stb_perlin_ridge_noise3(wx * 0.012, 9.0 + self.seed * 0.0007, wz * 0.012, 2.0, 0.55, 1.0, 4);
+                h = 14 + int(floor(n0 * 9.0 + n1 * 6.0));
+                if (h < 6) h = 6;
+                if (h > self.chunkSizeY - 8) h = self.chunkSizeY - 8;
+
+                for (y = 0; y <= h; y = y + 1)
+                {
+                    var bi = chunk.idx(x, y, z);
+                    if (y == h)
+                    {
+                        if (h < 11) chunk.blocks[bi] = BLOCK_SAND;
+                        else chunk.blocks[bi] = BLOCK_GRASS;
+                    }
+                    elif (y >= h - 3)
+                    {
+                        if (h < 11) chunk.blocks[bi] = BLOCK_SAND;
+                        else chunk.blocks[bi] = BLOCK_DIRT;
+                    }
+                    else
+                    {
+                        chunk.blocks[bi] = BLOCK_STONE;
+                    }
+                }
+            }
+        }
+
+        chunk.dirty = true;
+    }
+
+    def streamAround(playerX, playerZ)
+    {
+        var centerCX = voxelFloorDiv(playerX, self.chunkSizeX);
+        var centerCZ = voxelFloorDiv(playerZ, self.chunkSizeZ);
+        var cx = 0;
+        var cz = 0;
+        var ring = 0;
+        var key = "";
+        var i = 0;
+        var chunk = nil;
+
+        self.queueChunk(centerCX, centerCZ);
+        for (ring = 1; ring <= self.renderDistance; ring = ring + 1)
+        {
+            for (cx = centerCX - ring; cx <= centerCX + ring; cx = cx + 1)
+            {
+                self.queueChunk(cx, centerCZ - ring);
+                self.queueChunk(cx, centerCZ + ring);
+            }
+            for (cz = centerCZ - ring + 1; cz <= centerCZ + ring - 1; cz = cz + 1)
+            {
+                self.queueChunk(centerCX - ring, cz);
+                self.queueChunk(centerCX + ring, cz);
+            }
+        }
+
+        i = 0;
+        while (i < len(self.chunkKeys))
+        {
+            key = self.chunkKeys[i];
+            chunk = self.chunkMap[key];
+            if (chunk == nil)
+            {
+                self.chunkKeys.remove(i);
+                continue;
+            }
+
+            if (abs(chunk.cx - centerCX) > self.unloadDistance || abs(chunk.cz - centerCZ) > self.unloadDistance)
+            {
+                chunk.destroy();
+                self.chunkMap[key] = nil;
+                self.chunkKeys.remove(i);
+                continue;
+            }
+
+            i = i + 1;
+        }
+
+        var builds = 0;
+        var item = nil;
+        while (builds < self.maxChunkBuildsPerFrame && len(self.pending) > 0)
+        {
+            item = self.pending[0];
+            self.pending.remove(0);
+            key = item[2];
+            self.pendingFlags[key] = nil;
+            if (self.chunkMap[key] != nil) continue;
+
+            chunk = VoxelChunk(self, item[0], item[1]);
+            self.generateChunkData(chunk);
+            self.chunkMap[key] = chunk;
+            self.chunkKeys.push(key);
+            builds = builds + 1;
+        }
+    }
+
+    def loadedChunkCount()
+    {
+        return len(self.chunkKeys);
+    }
+
+    def blockTopTile(block)
+    {
+        if (block == BLOCK_GRASS) return 0;
+        if (block == BLOCK_DIRT) return 2;
+        if (block == BLOCK_STONE) return 1;
+        if (block == BLOCK_SAND) return 18;
+        if (block == BLOCK_WOOD) return 21;
+        if (block == BLOCK_LEAVES) return 3;
+        return 1;
+    }
+
+    def blockSideTile(block)
+    {
+        if (block == BLOCK_GRASS) return 3;
+        if (block == BLOCK_DIRT) return 2;
+        if (block == BLOCK_STONE) return 1;
+        if (block == BLOCK_SAND) return 18;
+        if (block == BLOCK_WOOD) return 20;
+        if (block == BLOCK_LEAVES) return 3;
+        return 1;
+    }
+
+    def blockBottomTile(block)
+    {
+        if (block == BLOCK_GRASS) return 2;
+        return self.blockSideTile(block);
+    }
+
+    def plantTree(wx, wy, wz)
+    {
+        var th = 4 + int(floor((stb_perlin_noise3(wx * 0.5, 17.0, wz * 0.5, 0, 0, 0) + 1.0) * 1.5));
+        var i = 0;
+        var d = 0;
+        for (i = 1; i <= th; i = i + 1)
+            self.setBlockWorld(wx, wy + i, wz, BLOCK_WOOD);
+
+        var lx = 0;
+        var lz = 0;
+        var ly = 0;
+        for (ly = th - 1; ly <= th + 1; ly = ly + 1)
+        {
+            for (lz = -2; lz <= 2; lz = lz + 1)
+            {
+                for (lx = -2; lx <= 2; lx = lx + 1)
+                {
+                    d = lx * lx + lz * lz;
+                    if (d > 5) continue;
+                    if (self.getBlockWorld(wx + lx, wy + ly, wz + lz) == BLOCK_AIR)
+                        self.setBlockWorld(wx + lx, wy + ly, wz + lz, BLOCK_LEAVES);
+                }
+            }
+        }
+    }
+
+    def generate()
+    {
+        self.chunkMap = {};
+        self.chunkKeys = [];
+        self.pending = [];
+        self.pendingFlags = {};
+    }
+
+    def draw(camX, camY, camZ)
+    {
+        var view = rlGetMatrixModelview();
+        var proj = rlGetMatrixProjection();
+        self.triangles = 0;
+
+        rlDrawRenderBatchActive();
+        glUseProgram(self.program);
+        if (self.uView >= 0) glUniformMatrix4fv(self.uView, 1, false, view);
+        if (self.uProj >= 0) glUniformMatrix4fv(self.uProj, 1, false, proj);
+        if (self.uCamPos >= 0) glUniform3f(self.uCamPos, camX, camY, camZ);
+        if (self.uLightDir >= 0) glUniform3f(self.uLightDir, -0.55, -1.0, 0.35);
+        if (self.uAtlas >= 0) glUniform1i(self.uAtlas, 0);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, self.atlasTex);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+
+        var i = 0;
+        var key = "";
+        var chunk = nil;
+        for (i = 0; i < len(self.chunkKeys); i = i + 1)
+        {
+            key = self.chunkKeys[i];
+            chunk = self.chunkMap[key];
+            if (chunk == nil) continue;
+            chunk.draw();
+            self.triangles = self.triangles + int(chunk.indexCount / 3);
+        }
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        rlDisableVertexArray();
+        rlDisableVertexBuffer();
+        rlDisableVertexBufferElement();
+        rlSetTexture(0);
+        glEnable(GL_BLEND);
+        glDisable(GL_DEPTH_TEST);
+        glUseProgram(0);
+    }
+
+    def raycast(ox, oy, oz, dx, dy, dz, maxDistance)
+    {
+        var t = 0.0;
+        var step = 0.08;
+        var px = 0.0;
+        var py = 0.0;
+        var pz = 0.0;
+        var bx = 0;
+        var by = 0;
+        var bz = 0;
+        var lastBx = 0;
+        var lastBy = 0;
+        var lastBz = 0;
+        var haveLast = false;
+
+        while (t <= maxDistance)
+        {
+            px = ox + dx * t;
+            py = oy + dy * t;
+            pz = oz + dz * t;
+
+            bx = int(floor(px));
+            by = int(floor(py));
+            bz = int(floor(pz));
+
+            if (!haveLast || bx != lastBx || by != lastBy || bz != lastBz)
+            {
+                if (self.getBlockWorld(bx, by, bz) != BLOCK_AIR)
+                {
+                    return (true, bx, by, bz, lastBx, lastBy, lastBz);
+                }
+
+                lastBx = bx;
+                lastBy = by;
+                lastBz = bz;
+                haveLast = true;
+            }
+
+            t = t + step;
+        }
+
+        return (false, 0, 0, 0, 0, 0, 0);
+    }
+
+    def destroy()
+    {
+        var i = 0;
+        var key = "";
+        var chunk = nil;
+        for (i = 0; i < len(self.chunkKeys); i = i + 1)
+        {
+            key = self.chunkKeys[i];
+            chunk = self.chunkMap[key];
+            if (chunk != nil) chunk.destroy();
+        }
+
+        if (self.program > 0) glDeleteProgram(self.program);
+        if (self.atlasTex > 0) glDeleteTextures(self.atlasTex);
+        self.program = 0;
+        self.atlasTex = 0;
+    }
+}
+
+
+SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1280, 720, "BuGL Demo - Our Minecraft");
+SetTargetFPS(60);
+InitImGui();
+
+var atlasPath = resolveAssetPath(
+    "assets/minecraft.png",
+    "../assets/minecraft.png",
+    "../../assets/minecraft.png"
+);
+
+if (atlasPath == nil)
+{
+    print("minecraft atlas not found");
+    return;
+}
+
+var world = VoxelWorld();
+if (!world.setup(atlasPath))
+{
+    print("voxel world init failed");
+    CloseWindow();
+    return;
+}
+
+var cam = CreateCamera3D();
+var camX = 0.0;
+var camY = 22.0;
+var camZ = 18.0;
+var yaw = 180.0;
+var pitch = -18.0;
+
+SetCamera3DPosition(cam, camX, camY, camZ);
+SetCamera3DTarget(cam, 0.0, 0.0, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 70.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+world.streamAround(camX, camZ);
+
+var deg2rad = 0.017453292519943295;
+var nearPlane = 0.1;
+var farPlane = 180.0;
+var fovYRad = 70.0 * deg2rad;
+var hit = false;
+var hitBx = 0;
+var hitBy = 0;
+var hitBz = 0;
+var placeBx = 0;
+var placeBy = 0;
+var placeBz = 0;
+var showUi = true;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    var move = 12.0 * dt;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) move = move * 3.0;
+
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        var (mdx, mdy) = GetMouseDelta();
+        yaw = yaw - -mdx * 0.16;
+        pitch = pitch - mdy * 0.16;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * deg2rad;
+    var pitchRad = pitch * deg2rad;
+    var cp = cos(pitchRad);
+    var fwdX = sin(yawRad) * cp;
+    var fwdY = sin(pitchRad);
+    var fwdZ = -cos(yawRad) * cp;
+
+    var flatLen = sqrt(fwdX * fwdX + fwdZ * fwdZ);
+    if (flatLen < 0.00001) flatLen = 1.0;
+    var pfX = fwdX / flatLen;
+    var pfZ = fwdZ / flatLen;
+    var rgtX = cos(yawRad);
+    var rgtZ = sin(yawRad);
+
+    if (IsKeyDown(KEY_W)) { camX = camX + pfX * move; camZ = camZ + pfZ * move; }
+    if (IsKeyDown(KEY_S)) { camX = camX - pfX * move; camZ = camZ - pfZ * move; }
+    if (IsKeyDown(KEY_A)) { camX = camX - rgtX * move; camZ = camZ - rgtZ * move; }
+    if (IsKeyDown(KEY_D)) { camX = camX + rgtX * move; camZ = camZ + rgtZ * move; }
+    if (IsKeyDown(KEY_SPACE)) camY = camY + move;
+    if (IsKeyDown(KEY_C)) camY = camY - move;
+
+    if (IsKeyPressed(KEY_ONE)) world.selectedBlock = BLOCK_GRASS;
+    if (IsKeyPressed(KEY_TWO)) world.selectedBlock = BLOCK_DIRT;
+    if (IsKeyPressed(KEY_THREE)) world.selectedBlock = BLOCK_STONE;
+    if (IsKeyPressed(KEY_FOUR)) world.selectedBlock = BLOCK_WOOD;
+    if (IsKeyPressed(KEY_FIVE)) world.selectedBlock = BLOCK_LEAVES;
+    if (IsKeyPressed(KEY_SIX)) world.selectedBlock = BLOCK_SAND;
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+
+    world.streamAround(camX, camZ);
+
+    SetCamera3DPosition(cam, camX, camY, camZ);
+    SetCamera3DTarget(cam, camX + fwdX * 20.0, camY + fwdY * 20.0, camZ + fwdZ * 20.0);
+
+    var aspect = GetScreenWidth() / GetScreenHeight();
+    var (rox, roy, roz, rdx, rdy, rdz) = voxelMouseRay(camX, camY, camZ, fwdX, fwdY, fwdZ, fovYRad, aspect);
+    var (didHit, bx, by, bz, px, py, pz) = world.raycast(rox, roy, roz, rdx, rdy, rdz, 8.0);
+    hit = didHit;
+    hitBx = bx; hitBy = by; hitBz = bz;
+    placeBx = px; placeBy = py; placeBz = pz;
+
+    if (hit && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        world.setBlockWorld(hitBx, hitBy, hitBz, BLOCK_AIR);
+
+    if (hit && IsKeyPressed(KEY_F))
+        world.setBlockWorld(placeBx, placeBy, placeBz, world.selectedBlock);
+
+    BeginDrawing();
+    ClearBackground(Color(120, 190, 255, 255));
+
+    BeginMode3D(cam);
+    world.draw(camX, camY, camZ);
+    if (hit)
+    {
+        DrawCubeWires(hitBx + 0.5, hitBy + 0.5, hitBz + 0.5, 1.04, 1.04, 1.04, Color(255, 255, 255, 255));
+        DrawCubeWires(placeBx + 0.5, placeBy + 0.5, placeBz + 0.5, 1.02, 1.02, 1.02, Color(80, 255, 120, 255));
+    }
+    EndMode3D();
+
+    DrawRectangle(12, 12, 620, 114, Color(0, 0, 0, 150));
+    DrawText("Infinite voxel world  RMB look | WASD move | SPACE/C up-down | LMB break | F place | 1..6 block", 22, 22, 20, Color(245, 245, 245, 255));
+    DrawText("Selected block: " + str(world.selectedBlock) + "  Tris: " + str(world.triangles) + "  FPS: " + str(GetFPS()), 22, 54, 18, Color(220, 240, 255, 255));
+    DrawText("Loaded chunks: " + str(world.loadedChunkCount()) + "  Pending: " + str(len(world.pending)) + "  RenderDist: " + str(world.renderDistance), 22, 82, 18, Color(210, 255, 210, 255));
+    DrawText("+", GetScreenWidth() / 2 - 6, GetScreenHeight() / 2 - 12, 24, Color(255, 255, 255, 230));
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = Begin("Voxel World");
+        if (panel)
+        {
+            Text("TAB hide/show UI");
+            Text("Chunk streaming around player");
+            Separator();
+            Text("Select block");
+            var pickerBlocks = [BLOCK_GRASS, BLOCK_DIRT, BLOCK_STONE, BLOCK_SAND, BLOCK_WOOD, BLOCK_LEAVES];
+            var bi = 0;
+            var block = 0;
+            var tile = 0;
+            var tx = 0;
+            var ty = 0;
+            for (bi = 0; bi < len(pickerBlocks); bi = bi + 1)
+            {
+                block = pickerBlocks[bi];
+                tile = world.blockTopTile(block);
+                tx = tile % world.atlasCols;
+                ty = int(floor(tile / world.atlasCols));
+                var (u0, v0, u1, v1) = voxelTileUV(tx, ty, world.atlasCols, world.atlasRows);
+                if (ImageButton("##blk" + str(block), world.atlasTex, 40, 40, u0, v0, u1, v1))
+                    world.selectedBlock = block;
+                if ((bi % 3) != 2) SameLine();
+            }
+            Text("Current: " + voxelBlockLabel(world.selectedBlock) + " (" + str(world.selectedBlock) + ")");
+            Separator();
+            var (_, nextRenderDist) = SliderInt("Render distance", world.renderDistance, 1, 5);
+            world.renderDistance = nextRenderDist;
+            world.unloadDistance = world.renderDistance + 1;
+            var (_, nextBudget) = SliderInt("Chunks/frame", world.maxChunkBuildsPerFrame, 1, 4);
+            world.maxChunkBuildsPerFrame = nextBudget;
+            Text("Loaded: " + str(world.loadedChunkCount()));
+            Text("Pending: " + str(len(world.pending)));
+        }
+        End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+world.destroy();
+DestroyCamera3D(cam);
+ShutdownImGui();
+CloseWindow();

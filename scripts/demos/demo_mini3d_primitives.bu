@@ -1,0 +1,92 @@
+// Demo: mini3d GPU engine (terrain + skybox + water + primitive mesh)
+
+include "../libs/lib_mini3d.bu";
+
+SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1280, 720, "BuGL Demo - Mini3D GPU Engine");
+SetTargetFPS(60);
+
+var cam = CreateCamera3D();
+SetCamera3DPosition(cam, 0.0, 18.0, 34.0);
+SetCamera3DTarget(cam, 0.0, 0.0, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 45.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var renderer = Renderer();
+if (!renderer.setup())
+{
+    print("Renderer init failed");
+    CloseWindow();
+    return;
+}
+
+var scene = Scene();
+var factory = MeshFactory();
+
+var skyMesh = factory.createSkybox(260.0);
+var sky = scene.createSkybox(skyMesh, "skybox");
+
+var terrainMesh = factory.createTerrain(120.0, 120.0, 96, 96, 3.2, 0.12);
+var terrain = scene.createEntity(terrainMesh, "terrain");
+terrain.positionY = -1.8;
+
+var waterMesh = factory.createWater(120.0, 120.0, 96, 96);
+var water = scene.createWater(waterMesh, "water", 0.22, 0.22, 1.8);
+water.positionY = 0.3;
+
+var cubeMesh = factory.createBox(3.0, 0.95, 0.34, 0.24, 1.0, false);
+var cube = scene.createEntity(cubeMesh, "cube");
+cube.positionY = 3.4;
+
+// upfront upload
+skyMesh.upload();
+terrainMesh.upload();
+waterMesh.upload();
+cubeMesh.upload();
+
+var paused = false;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    UpdateCamera(cam, CAMERA_ORBITAL);
+
+    if (IsKeyPressed(KEY_SPACE)) paused = !paused;
+    if (IsKeyPressed(KEY_ONE)) terrain.visible = !terrain.visible;
+    if (IsKeyPressed(KEY_TWO)) water.visible = !water.visible;
+    if (IsKeyPressed(KEY_THREE)) cube.visible = !cube.visible;
+
+    if (!paused)
+    {
+        scene.update(dt);
+        cube.rotationY = cube.rotationY + dt * 42.0;
+        cube.rotationX = cube.rotationX + dt * 19.0;
+        cube.positionY = 3.4 + sin(scene.timeSec * 2.0) * 0.5;
+    }
+
+    BeginDrawing();
+    ClearBackground(Color(14, 18, 26, 255));
+
+    BeginMode3D(cam);
+    renderer.beginFrame(scene.timeSec);
+    scene.draw(renderer);
+    renderer.endFrame();
+    DrawGrid(30, 1.0);
+    EndMode3D();
+
+    DrawRectangle(10, 10, 700, 122, Color(0, 0, 0, 140));
+    DrawText("Mini3D GPU (SPACE pause | 1 terrain | 2 water | 3 cube)", 20, 20, 20, Color(240, 240, 240, 255));
+    DrawText("Surfaces: " + str(terrainMesh.surfaceCount() + waterMesh.surfaceCount() + cubeMesh.surfaceCount()), 20, 52, 16, Color(190, 220, 255, 255));
+    DrawText("Triangles: " + str(terrainMesh.triangleCount() + waterMesh.triangleCount() + cubeMesh.triangleCount()), 20, 74, 16, Color(190, 220, 255, 255));
+    DrawText("Scene time: " + str(scene.timeSec) + "  FPS: " + str(GetFPS()), 20, 96, 16, Color(180, 255, 180, 255));
+
+    EndDrawing();
+}
+
+skyMesh.destroy();
+terrainMesh.destroy();
+waterMesh.destroy();
+cubeMesh.destroy();
+renderer.destroy();
+CloseWindow();

@@ -1,0 +1,255 @@
+// ================================================================
+// lib_animation.bu
+//
+// Generic animation timeline helpers:
+// - AnimationClip: metadata (name/start/end/fps/loop)
+// - Animator: playback state + optional crossfade transition
+// ================================================================
+
+class AnimationClip
+{
+    var name;
+    var start;
+    var end;
+    var fps;
+    var looping;
+
+    def init(name, start, end, fps, looping)
+    {
+        self.name = name;
+        self.start = start;
+        self.end = end;
+        self.fps = fps;
+        self.looping = looping;
+    }
+}
+
+
+class Animator
+{
+    var clips;
+    var clipIndex;
+    var defaultBlendTime;
+
+    var current;
+    var next;
+    var interp;
+    var accum;
+    var playing;
+
+    var transitionActive;
+    var transitionTime;
+    var transitionDuration;
+    var transitionFromCurrent;
+    var transitionFromNext;
+    var transitionFromInterp;
+
+    def init()
+    {
+        self.clips = [];
+        self.clipIndex = -1;
+        self.defaultBlendTime = 0.16;
+
+        self.current = 0;
+        self.next = 0;
+        self.interp = 0.0;
+        self.accum = 0.0;
+        self.playing = true;
+
+        self.transitionActive = false;
+        self.transitionTime = 0.0;
+        self.transitionDuration = 0.0;
+        self.transitionFromCurrent = 0;
+        self.transitionFromNext = 0;
+        self.transitionFromInterp = 0.0;
+    }
+
+    def clipCount()
+    {
+        return len(self.clips);
+    }
+
+    def addClip(name, start, end, fps, looping)
+    {
+        var c = AnimationClip(name, start, end, fps, looping);
+        self.clips.push(c);
+        if (self.clipIndex < 0)
+            self.applyClipIndex(0);
+        return len(self.clips) - 1;
+    }
+
+    def findClip(name)
+    {
+        for (var i = 0; i < len(self.clips); i = i + 1)
+        {
+            if (self.clips[i].name == name) return i;
+        }
+        return -1;
+    }
+
+    def normalizeClipIndex(index)
+    {
+        if (len(self.clips) <= 0) return -1;
+        if (index < 0) index = len(self.clips) - 1;
+        if (index >= len(self.clips)) index = 0;
+        return index;
+    }
+
+    def applyClipIndex(index)
+    {
+        index = self.normalizeClipIndex(index);
+        if (index < 0) return false;
+
+        var c = self.clips[index];
+        var start = c.start;
+        var end = c.end;
+        if (start < 0) start = 0;
+        if (end < start) end = start;
+
+        self.clipIndex = index;
+        self.current = start;
+        self.next = start + 1;
+        if (self.next > end) self.next = start;
+        self.interp = 0.0;
+        self.accum = 0.0;
+        self.playing = true;
+
+        self.transitionActive = false;
+        self.transitionTime = 0.0;
+        self.transitionDuration = 0.0;
+        return true;
+    }
+
+    def playClipByIndex(index, blendTime)
+    {
+        index = self.normalizeClipIndex(index);
+        if (index < 0) return false;
+        if (index == self.clipIndex) return true;
+
+        if (blendTime <= 0.0 || self.clipIndex < 0)
+            return self.applyClipIndex(index);
+
+        self.transitionFromCurrent = self.current;
+        self.transitionFromNext = self.next;
+        self.transitionFromInterp = self.interp;
+        self.transitionActive = true;
+        self.transitionTime = 0.0;
+        self.transitionDuration = blendTime;
+
+        return self.applyClipIndexNoResetTransition(index);
+    }
+
+    def applyClipIndexNoResetTransition(index)
+    {
+        index = self.normalizeClipIndex(index);
+        if (index < 0) return false;
+
+        var c = self.clips[index];
+        var start = c.start;
+        var end = c.end;
+        if (start < 0) start = 0;
+        if (end < start) end = start;
+
+        self.clipIndex = index;
+        self.current = start;
+        self.next = start + 1;
+        if (self.next > end) self.next = start;
+        self.interp = 0.0;
+        self.accum = 0.0;
+        self.playing = true;
+        return true;
+    }
+
+    def playClipByName(name, blendTime)
+    {
+        var idx = self.findClip(name);
+        if (idx < 0) return false;
+        return self.playClipByIndex(idx, blendTime);
+    }
+
+    def nextClip()
+    {
+        return self.playClipByIndex(self.clipIndex + 1, self.defaultBlendTime);
+    }
+
+    def prevClip()
+    {
+        return self.playClipByIndex(self.clipIndex - 1, self.defaultBlendTime);
+    }
+
+    def currentClipName()
+    {
+        if (self.clipIndex < 0 || self.clipIndex >= len(self.clips)) return "";
+        return self.clips[self.clipIndex].name;
+    }
+
+    def transitionBlend()
+    {
+        if (!self.transitionActive) return 1.0;
+        if (self.transitionDuration <= 0.000001) return 1.0;
+
+        var t = self.transitionTime / self.transitionDuration;
+        if (t < 0.0) t = 0.0;
+        if (t > 1.0) t = 1.0;
+        return t;
+    }
+
+    def update(dt)
+    {
+        if (self.clipIndex < 0 || self.clipIndex >= len(self.clips)) return;
+        if (!self.playing) return;
+
+        var c = self.clips[self.clipIndex];
+        var start = c.start;
+        var end = c.end;
+        var fps = c.fps;
+        var shouldLoop = c.looping;
+
+        if (start < 0) start = 0;
+        if (end < start) end = start;
+        if (fps < 0.01) fps = 0.01;
+
+        var frameTime = 1.0 / fps;
+        self.accum = self.accum + dt;
+
+        while (self.accum >= frameTime)
+        {
+            self.accum = self.accum - frameTime;
+            self.current = self.next;
+            self.next = self.current + 1;
+
+            if (self.next > end)
+            {
+                if (shouldLoop)
+                {
+                    self.current = start;
+                    self.next = start + 1;
+                    if (self.next > end) self.next = start;
+                }
+                else
+                {
+                    self.current = end;
+                    self.next = end;
+                    self.playing = false;
+                    self.accum = 0.0;
+                    break;
+                }
+            }
+        }
+
+        self.interp = self.accum / frameTime;
+        if (self.interp < 0.0) self.interp = 0.0;
+        if (self.interp > 1.0) self.interp = 1.0;
+        if (!self.playing) self.interp = 0.0;
+
+        if (self.transitionActive)
+        {
+            self.transitionTime = self.transitionTime + dt;
+            if (self.transitionTime >= self.transitionDuration)
+            {
+                self.transitionActive = false;
+                self.transitionTime = self.transitionDuration;
+            }
+        }
+    }
+}

@@ -136,25 +136,46 @@ bool Device::Init(const char *title, int width, int height, unsigned int flags)
 void Device::Close()
 {
     if (!m_ready)
+    {
+        if (IsWindowReady())
+        {
+            ::CloseWindow();
+        }
+
+        m_running = false;
+        m_ready = false;
+        m_initialized = false;
         return;
-    
-    m_initialized = false;  
+    }
+
+    m_initialized = false;
     StopGifCapture();
     ShutdownImGui();
 
-    CloseWindow();
+    if (IsWindowReady())
+        ::CloseWindow();
 
     m_running = false;
     m_ready = false;
- 
 }
 
 bool Device::InitImGui()
 {
     if (!m_ready)
     {
-        LogError(" InitImGui - Device is not initialized");
-        return false;
+        if (!IsWindowReady())
+        {
+            LogError(" InitImGui - Device is not initialized");
+            return false;
+        }
+
+        // Allow ImGui on scripts that created the raylib window through the
+        // raw InitWindow() binding instead of Device::Init().
+        m_width = GetScreenWidth();
+        m_height = GetScreenHeight();
+        m_running = true;
+        m_ready = true;
+        m_initialized = true;
     }
 
     if (m_imguiInitialized)

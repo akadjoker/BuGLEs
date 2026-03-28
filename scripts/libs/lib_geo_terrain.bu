@@ -1,0 +1,1402 @@
+// ================================================================
+// lib_geo_terrain.bu
+//
+// Raw terrain renderer closer to the old Irrlicht/Haxe approach:
+// - one static vertex buffer for the full heightfield
+// - one dynamic index buffer rebuilt from patch LODs
+// - patch neighbors + border stitching between different LODs
+// -  frustum culling
+// ================================================================
+
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import STB;
+using STB;
+import math;
+using math;
+include "../libs/lib_frustum.bu";
+
+
+var GEO_PATCH_9 = 9;
+var GEO_PATCH_17 = 17;
+var GEO_PATCH_33 = 33;
+var GEO_PATCH_65 = 65;
+var GEO_PATCH_129 = 129;
+
+
+def geoCompileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("GeoTerrain shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+
+    return s;
+}
+
+
+def geoLinkProgram(vsSrc, fsSrc)
+{
+    var vs = geoCompileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+
+    var fs = geoCompileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("GeoTerrain link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+
+    return p;
+}
+
+
+def geoLoadTexture(path)
+{
+    stbi_set_flip_vertically_on_load(0);
+    var (w, h, ch, pixels) = stbi_load(path, 4);
+    if (pixels == nil)
+    {
+        print("GeoTerrain texture not found: " + path);
+        return 0;
+    }
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+class GeoTerrainPatch
+{
+    var currentLOD;
+    var centerX, centerY, centerZ;
+    var minX, minY, minZ;
+    var maxX, maxY, maxZ;
+    var top;
+    var bottom;
+    var left;
+    var right;
+
+    def init()
+    {
+        self.currentLOD = 0;
+        self.centerX = 0.0; self.centerY = 0.0; self.centerZ = 0.0;
+        self.minX = 0.0; self.minY = 0.0; self.minZ = 0.0;
+        self.maxX = 0.0; self.maxY = 0.0; self.maxZ = 0.0;
+        self.top = nil;
+        self.bottom = nil;
+        self.left = nil;
+        self.right = nil;
+    }
+}
+
+
+class GeoTerrainData
+{
+    var patchSize;
+    var calcPatchSize;
+    var patchCountX;
+    var patchCountZ;
+    var maxLOD;
+    var lodDistanceThreshold;
+    var patches;
+
+    def init()
+    {
+        self.patchSize = 17;
+        self.calcPatchSize = 16;
+        self.patchCountX = 0;
+        self.patchCountZ = 0;
+        self.maxLOD = 4;
+        self.lodDistanceThreshold = [];
+        self.patches = [];
+    }
+}
+
+
+class GeoTerrain
+{
+    var sizeX, sizeZ;
+    var cellsX, cellsZ;
+    var maxHeight;
+    var detailTiles;
+
+    var patchSize;
+    var maxLOD;
+    var heights;
+    var data;
+
+    var vao, vbo, ebo;
+    var indexCount;
+    var maxIndexCount;
+    var dynamicIndices;
+
+    var program;
+    var texBase;
+    var texDetail;
+
+    var uModel;
+    var uView;
+    var uProj;
+    var uLightDir;
+    var uCamPos;
+    var uBaseTex;
+    var uDetailTex;
+    var uDetailStrength;
+
+    var lastCamX, lastCamY, lastCamZ;
+    var lastCamValid;
+    var cameraMovementDelta;
+    var lodHysteresisMargin;
+    var frustum;
+    var frustumEnabled;
+    var visiblePatchCount;
+    var culledPatchCount;
+
+    var ready;
+
+    def init()
+    {
+        self.sizeX = 120.0;
+        self.sizeZ = 120.0;
+        self.cellsX = 96;
+        self.cellsZ = 96;
+        self.maxHeight = 18.0;
+        self.detailTiles = 24.0;
+
+        self.patchSize = 17;
+        self.maxLOD = 4;
+        self.heights = nil;
+        self.data = GeoTerrainData();
+
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.indexCount = 0;
+        self.maxIndexCount = 0;
+        self.dynamicIndices = Uint32Array(0);
+
+        self.program = 0;
+        self.texBase = 0;
+        self.texDetail = 0;
+
+        self.uModel = -1;
+        self.uView = -1;
+        self.uProj = -1;
+        self.uLightDir = -1;
+        self.uCamPos = -1;
+        self.uBaseTex = -1;
+        self.uDetailTex = -1;
+        self.uDetailStrength = -1;
+
+        self.lastCamX = 0.0;
+        self.lastCamY = 0.0;
+        self.lastCamZ = 0.0;
+        self.lastCamValid = false;
+        self.cameraMovementDelta = 1.0;
+        self.lodHysteresisMargin = 0.15;
+        self.frustum = Frustum();
+        self.frustumEnabled = false;
+        self.visiblePatchCount = 0;
+        self.culledPatchCount = 0;
+
+        self.ready = false;
+    }
+
+    def setup(baseTexPath, detailTexPath, sizeX, sizeZ, cellsX, cellsZ, maxHeight, detailTiles)
+    {
+        self.sizeX = sizeX;
+        self.sizeZ = sizeZ;
+        self.cellsX = cellsX;
+        self.cellsZ = cellsZ;
+        self.maxHeight = maxHeight;
+        self.detailTiles = detailTiles;
+
+        self.program = self.createProgram();
+        if (self.program <= 0) return false;
+        self.fetchUniforms();
+
+        self.texBase = geoLoadTexture(baseTexPath);
+        self.texDetail = geoLoadTexture(detailTexPath);
+        if (self.texBase <= 0 || self.texDetail <= 0) return false;
+
+        self.createProceduralHeights();
+        if (!self.buildTerrain()) return false;
+
+        self.ready = true;
+        return true;
+    }
+
+    def setupHeightmap(heightmapPath, baseTexPath, detailTexPath, sizeX, sizeZ, maxHeight, detailTiles)
+    {
+        self.sizeX = sizeX;
+        self.sizeZ = sizeZ;
+        self.maxHeight = maxHeight;
+        self.detailTiles = detailTiles;
+
+        self.program = self.createProgram();
+        if (self.program <= 0) return false;
+        self.fetchUniforms();
+
+        self.texBase = geoLoadTexture(baseTexPath);
+        self.texDetail = geoLoadTexture(detailTexPath);
+        if (self.texBase <= 0 || self.texDetail <= 0) return false;
+
+        if (!self.loadHeightmap(heightmapPath, maxHeight)) return false;
+        if (!self.buildTerrain()) return false;
+
+        self.ready = true;
+        return true;
+    }
+
+    def fetchUniforms()
+    {
+        self.uModel = glGetUniformLocation(self.program, "uModel");
+        self.uView = glGetUniformLocation(self.program, "uView");
+        self.uProj = glGetUniformLocation(self.program, "uProj");
+        self.uLightDir = glGetUniformLocation(self.program, "uLightDir");
+        self.uCamPos = glGetUniformLocation(self.program, "uCamPos");
+        self.uBaseTex = glGetUniformLocation(self.program, "uBaseTex");
+        self.uDetailTex = glGetUniformLocation(self.program, "uDetailTex");
+        self.uDetailStrength = glGetUniformLocation(self.program, "uDetailStrength");
+    }
+
+    def createProgram()
+    {
+        var vs = @"#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV0;
+layout(location = 3) in vec2 aUV1;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV0;
+out vec2 vUV1;
+
+void main()
+{
+    vec4 w = uModel * vec4(aPos, 1.0);
+    vWorldPos = w.xyz;
+    vNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    vUV0 = aUV0;
+    vUV1 = aUV1;
+    gl_Position = uProj * uView * w;
+}
+";
+
+        var fs = @"#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV0;
+in vec2 vUV1;
+
+uniform vec3 uLightDir;
+uniform vec3 uCamPos;
+uniform sampler2D uBaseTex;
+uniform sampler2D uDetailTex;
+uniform float uDetailStrength;
+
+out vec4 FragColor;
+
+void main()
+{
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-uLightDir);
+    float diff = max(dot(N, L), 0.0);
+
+    vec3 base = texture(uBaseTex, vUV0).rgb;
+    vec3 detail = texture(uDetailTex, vUV1).rgb;
+    vec3 albedo = base * mix(vec3(1.0), detail * 1.8, uDetailStrength);
+
+    vec3 V = normalize(uCamPos - vWorldPos);
+    vec3 R = reflect(-L, N);
+    float spec = pow(max(dot(V, R), 0.0), 24.0) * 0.18;
+
+    float ambient = 0.22 + N.y * 0.08;
+    vec3 color = albedo * (ambient + diff * 0.85) + vec3(spec);
+    FragColor = vec4(color, 1.0);
+}
+";
+
+        return geoLinkProgram(vs, fs);
+    }
+
+    def createProceduralHeights()
+    {
+        var vxCount = (self.cellsX + 1) * (self.cellsZ + 1);
+        self.heights = Float32Array(0);
+        self.heights.reserve(vxCount);
+
+        var halfX = self.sizeX * 0.5;
+        var halfZ = self.sizeZ * 0.5;
+        var iz = 0;
+        var zf = 0.0;
+        var wz = 0.0;
+        var ix = 0;
+        var xf = 0.0;
+        var wx = 0.0;
+        var hh = 0.0;
+
+        for (iz = 0; iz <= self.cellsZ; iz = iz + 1)
+        {
+            zf = iz / self.cellsZ;
+            wz = zf * self.sizeZ - halfZ;
+            for (ix = 0; ix <= self.cellsX; ix = ix + 1)
+            {
+                xf = ix / self.cellsX;
+                wx = xf * self.sizeX - halfX;
+
+                hh = sin(wx * 0.12) * 4.0;
+                hh = hh + cos(wz * 0.09) * 3.0;
+                hh = hh + sin((wx + wz) * 0.04) * 6.0;
+                hh = hh + cos((wx - wz) * 0.06) * 2.5;
+                hh = hh * (self.maxHeight / 15.5);
+
+                self.heights.add(hh);
+            }
+        }
+    }
+
+    def loadHeightmap(path, heightScale)
+    {
+        stbi_set_flip_vertically_on_load(0);
+        var (w, h, ch, pixels) = stbi_load(path, 1);
+        if (pixels == nil)
+        {
+            print("GeoTerrain heightmap not found: " + path);
+            return false;
+        }
+
+        if (w < 2 || h < 2)
+        {
+            print("GeoTerrain heightmap too small: " + path);
+            return false;
+        }
+
+        self.cellsX = w - 1;
+        self.cellsZ = h - 1;
+        self.maxHeight = heightScale;
+        self.heights = Float32Array(0);
+        self.heights.reserve(w * h);
+
+        var i = 0;
+        var v = 0.0;
+        for (i = 0; i < w * h; i = i + 1)
+        {
+            v = pixels[i] / 255.0;
+            self.heights.add(v * heightScale);
+        }
+
+        return true;
+    }
+
+    def correctMaxLOD()
+    {
+        if (self.patchSize <= GEO_PATCH_9 && self.maxLOD > 3) self.maxLOD = 3;
+        if (self.patchSize <= GEO_PATCH_17 && self.maxLOD > 4) self.maxLOD = 4;
+        if (self.patchSize <= GEO_PATCH_33 && self.maxLOD > 5) self.maxLOD = 5;
+        if (self.patchSize <= GEO_PATCH_65 && self.maxLOD > 6) self.maxLOD = 6;
+        if (self.patchSize <= GEO_PATCH_129 && self.maxLOD > 7) self.maxLOD = 7;
+    }
+
+    def buildTerrain()
+    {
+        self.correctMaxLOD();
+
+        self.data.patchSize = self.patchSize;
+        self.data.calcPatchSize = self.patchSize - 1;
+        self.data.maxLOD = self.maxLOD;
+
+        if (self.data.calcPatchSize <= 0) return false;
+        if ((self.cellsX % self.data.calcPatchSize) != 0 || (self.cellsZ % self.data.calcPatchSize) != 0)
+            self.padHeightGrid();
+
+        if ((self.cellsX % self.data.calcPatchSize) != 0 || (self.cellsZ % self.data.calcPatchSize) != 0)
+        {
+            print("GeoTerrain patch size incompatible with heightfield after pad: cells=" + str(self.cellsX) + "x" + str(self.cellsZ) + " patchSize=" + str(self.patchSize));
+            return false;
+        }
+
+        self.data.patchCountX = self.cellsX / self.data.calcPatchSize;
+        self.data.patchCountZ = self.cellsZ / self.data.calcPatchSize;
+
+        self.calculateDistanceThresholds();
+        self.createPatches();
+        self.calculatePatchNeighbors();
+        self.buildVertexBuffer();
+        self.allocateIndexBuffer();
+
+        self.lastCamValid = false;
+        return true;
+    }
+
+    def padHeightGrid()
+    {
+        var calc = self.data.calcPatchSize;
+        var oldCellsX = self.cellsX;
+        var oldCellsZ = self.cellsZ;
+        var oldVertsX = oldCellsX + 1;
+        var oldVertsZ = oldCellsZ + 1;
+
+        var newCellsX = oldCellsX;
+        var newCellsZ = oldCellsZ;
+        var qx = 0;
+        var qz = 0;
+
+        if ((newCellsX % calc) != 0)
+        {
+            qx = int(floor(newCellsX / calc));
+            newCellsX = (qx + 1) * calc;
+        }
+        if ((newCellsZ % calc) != 0)
+        {
+            qz = int(floor(newCellsZ / calc));
+            newCellsZ = (qz + 1) * calc;
+        }
+
+        if (newCellsX == oldCellsX && newCellsZ == oldCellsZ) return;
+
+        var newVertsX = newCellsX + 1;
+        var newVertsZ = newCellsZ + 1;
+        var padded = Float32Array(0);
+        padded.reserve(newVertsX * newVertsZ);
+
+        var z = 0;
+        var x = 0;
+        var srcZ = 0;
+        var srcX = 0;
+        for (z = 0; z < newVertsZ; z = z + 1)
+        {
+            srcZ = z;
+            if (srcZ >= oldVertsZ) srcZ = oldVertsZ - 1;
+            for (x = 0; x < newVertsX; x = x + 1)
+            {
+                srcX = x;
+                if (srcX >= oldVertsX) srcX = oldVertsX - 1;
+                padded.add(self.heights.get(srcZ * oldVertsX + srcX));
+            }
+        }
+
+        self.heights = padded;
+        self.cellsX = newCellsX;
+        self.cellsZ = newCellsZ;
+
+        print("GeoTerrain padded grid to " + str(newCellsX) + "x" + str(newCellsZ) + " cells for patchSize " + str(self.patchSize));
+    }
+
+    def calculateDistanceThresholds()
+    {
+        self.data.lodDistanceThreshold = [];
+        var normalizedPatchSizeX = self.patchSize / self.cellsX;
+        var normalizedPatchSizeZ = self.patchSize / self.cellsZ;
+        var patchWorldSizeX = normalizedPatchSizeX * self.sizeX;
+        var patchWorldSizeZ = normalizedPatchSizeZ * self.sizeZ;
+        var patchDiagonal = sqrt(patchWorldSizeX * patchWorldSizeX + patchWorldSizeZ * patchWorldSizeZ);
+        var i = 0;
+        var d = 0.0;
+        for (i = 0; i < self.data.maxLOD; i = i + 1)
+        {
+            d = patchDiagonal * pow(2.0, i);
+            d = d * d;
+            self.data.lodDistanceThreshold.push(d);
+        }
+    }
+
+    def createPatches()
+    {
+        self.data.patches = [];
+        var px = 0;
+        var pz = 0;
+        var patch = nil;
+        for (pz = 0; pz < self.data.patchCountZ; pz = pz + 1)
+        {
+            for (px = 0; px < self.data.patchCountX; px = px + 1)
+            {
+                patch = GeoTerrainPatch();
+                self.fillPatchBounds(px, pz, patch);
+                self.data.patches.push(patch);
+            }
+        }
+    }
+
+    def fillPatchBounds(px, pz, patch)
+    {
+        var xstart = px * self.data.calcPatchSize;
+        var xend = xstart + self.data.calcPatchSize;
+        var zstart = pz * self.data.calcPatchSize;
+        var zend = zstart + self.data.calcPatchSize;
+
+        var minX = 999999.0;
+        var minY = 999999.0;
+        var minZ = 999999.0;
+        var maxX = -999999.0;
+        var maxY = -999999.0;
+        var maxZ = -999999.0;
+
+        var gz = 0;
+        var gx = 0;
+        var wx = 0.0;
+        var wy = 0.0;
+        var wz = 0.0;
+
+        for (gz = zstart; gz <= zend; gz = gz + 1)
+        {
+            wz = self.gridToWorldZ(gz);
+            for (gx = xstart; gx <= xend; gx = gx + 1)
+            {
+                wx = self.gridToWorldX(gx);
+                wy = self.heightAtGrid(gx, gz);
+
+                if (wx < minX) minX = wx;
+                if (wy < minY) minY = wy;
+                if (wz < minZ) minZ = wz;
+                if (wx > maxX) maxX = wx;
+                if (wy > maxY) maxY = wy;
+                if (wz > maxZ) maxZ = wz;
+            }
+        }
+
+        patch.minX = minX; patch.minY = minY; patch.minZ = minZ;
+        patch.maxX = maxX; patch.maxY = maxY; patch.maxZ = maxZ;
+        patch.centerX = (minX + maxX) * 0.5;
+        patch.centerY = (minY + maxY) * 0.5;
+        patch.centerZ = (minZ + maxZ) * 0.5;
+        patch.currentLOD = 0;
+    }
+
+    def calculatePatchNeighbors()
+    {
+        var px = 0;
+        var pz = 0;
+        var patch = nil;
+
+        for (pz = 0; pz < self.data.patchCountZ; pz = pz + 1)
+        {
+            for (px = 0; px < self.data.patchCountX; px = px + 1)
+            {
+                patch = self.patchAt(px, pz);
+                if (pz > 0) patch.top = self.patchAt(px, pz - 1); else patch.top = nil;
+                if (pz < self.data.patchCountZ - 1) patch.bottom = self.patchAt(px, pz + 1); else patch.bottom = nil;
+                if (px > 0) patch.left = self.patchAt(px - 1, pz); else patch.left = nil;
+                if (px < self.data.patchCountX - 1) patch.right = self.patchAt(px + 1, pz); else patch.right = nil;
+            }
+        }
+    }
+
+    def buildVertexBuffer()
+    {
+        var vcount = (self.cellsX + 1) * (self.cellsZ + 1);
+        var verts = Float32Array(0);
+        verts.reserve(vcount * 10);
+
+        var halfX = self.sizeX * 0.5;
+        var halfZ = self.sizeZ * 0.5;
+        var iz = 0;
+        var zf = 0.0;
+        var wz = 0.0;
+        var ix = 0;
+        var xf = 0.0;
+        var wx = 0.0;
+        var wy = 0.0;
+        var nx = 0.0;
+        var ny = 0.0;
+        var nz = 0.0;
+
+        for (iz = 0; iz <= self.cellsZ; iz = iz + 1)
+        {
+            zf = iz / self.cellsZ;
+            wz = zf * self.sizeZ - halfZ;
+            for (ix = 0; ix <= self.cellsX; ix = ix + 1)
+            {
+                xf = ix / self.cellsX;
+                wx = xf * self.sizeX - halfX;
+                wy = self.heightAtGrid(ix, iz);
+                var (nnx, nny, nnz) = self.normalAtGrid(ix, iz);
+                nx = nnx; ny = nny; nz = nnz;
+
+                verts.add(
+                    wx, wy, wz,
+                    nx, ny, nz,
+                    xf, zf,
+                    xf * self.detailTiles, zf * self.detailTiles
+                );
+            }
+        }
+
+        if (self.vao == 0) self.vao = glGenVertexArrays();
+        if (self.vbo == 0) self.vbo = glGenBuffers();
+        if (self.ebo == 0) self.ebo = glGenBuffers();
+
+        glBindVertexArray(self.vao);
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+
+        var stride = 10 * 4;
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, stride, 0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, false, stride, 3 * 4);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, false, stride, 6 * 4);
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 2, GL_FLOAT, false, stride, 8 * 4);
+
+        glBindVertexArray(0);
+    }
+
+    def allocateIndexBuffer()
+    {
+        self.maxIndexCount = self.cellsX * self.cellsZ * 6;
+        self.dynamicIndices = Uint32Array(0);
+        self.dynamicIndices.reserve(self.maxIndexCount);
+
+        glBindVertexArray(self.vao);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, self.maxIndexCount * 4, nil, GL_DYNAMIC_DRAW);
+        glBindVertexArray(0);
+    }
+
+    def updateLOD(camX, camY, camZ)
+    {
+        var dx = camX - self.lastCamX;
+        var dy = camY - self.lastCamY;
+        var dz = camZ - self.lastCamZ;
+        var dist2 = dx * dx + dy * dy + dz * dz;
+        var delta2 = self.cameraMovementDelta * self.cameraMovementDelta;
+
+        self.lastCamX = camX;
+        self.lastCamY = camY;
+        self.lastCamZ = camZ;
+        self.lastCamValid = true;
+
+        self.preRenderLODCalculations(camX, camY, camZ);
+        self.preRenderIndicesCalculations();
+        self.uploadDynamicIndices();
+    }
+
+    def setFrustum(camX, camY, camZ,
+                   fwdX, fwdY, fwdZ,
+                   rightX, rightY, rightZ,
+                   fovYRad, aspect, nearPlane, farPlane)
+    {
+        self.frustum.setPerspective(camX, camY, camZ,
+                                    fwdX, fwdY, fwdZ,
+                                    rightX, rightY, rightZ,
+                                    fovYRad, aspect, nearPlane, farPlane);
+        self.frustumEnabled = true;
+    }
+
+    def disableFrustum()
+    {
+        self.frustum.clear();
+        self.frustumEnabled = false;
+    }
+
+    def preRenderLODCalculations(camX, camY, camZ)
+    {
+        var count = len(self.data.patches);
+        var i = 0;
+        var patch = nil;
+        var dx = 0.0;
+        var dy = 0.0;
+        var dz = 0.0;
+        var dist = 0.0;
+        var lod = 0;
+        var prevLOD = 0;
+        var newLOD = 0;
+        var threshold = 0.0;
+        self.visiblePatchCount = 0;
+        self.culledPatchCount = 0;
+
+        for (i = 0; i < count; i = i + 1)
+        {
+            patch = self.data.patches[i];
+            prevLOD = patch.currentLOD;
+            if (self.frustumEnabled && !self.frustum.boxVisible(patch.minX, patch.minY, patch.minZ, patch.maxX, patch.maxY, patch.maxZ))
+            {
+                patch.currentLOD = -1;
+                self.culledPatchCount = self.culledPatchCount + 1;
+                continue;
+            }
+
+            dx = camX - patch.centerX;
+            dy = camY - patch.centerY;
+            dz = camZ - patch.centerZ;
+            dist = dx * dx + dy * dy + dz * dz;
+
+            newLOD = 0;
+            for (lod = self.data.maxLOD - 1; lod > 0; lod = lod - 1)
+            {
+                if (dist >= self.data.lodDistanceThreshold[lod])
+                {
+                    newLOD = lod;
+                    break;
+                }
+            }
+
+            if (prevLOD < 0 || prevLOD == newLOD)
+            {
+                patch.currentLOD = newLOD;
+            }
+            elif (newLOD < prevLOD)
+            {
+                threshold = self.data.lodDistanceThreshold[newLOD];
+                if (dist < threshold * (1.0 - self.lodHysteresisMargin))
+                    patch.currentLOD = newLOD;
+                else
+                    patch.currentLOD = prevLOD;
+            }
+            else
+            {
+                threshold = self.data.lodDistanceThreshold[prevLOD];
+                if (dist > threshold * (1.0 + self.lodHysteresisMargin))
+                    patch.currentLOD = newLOD;
+                else
+                    patch.currentLOD = prevLOD;
+            }
+
+            self.visiblePatchCount = self.visiblePatchCount + 1;
+        }
+    }
+
+    def preRenderIndicesCalculations()
+    {
+        self.dynamicIndices.clear();
+
+        var pz = 0;
+        var px = 0;
+        var patch = nil;
+        var step = 1;
+        var xx = 0;
+        var zz = 0;
+        var i11 = 0;
+        var i21 = 0;
+        var i12 = 0;
+        var i22 = 0;
+
+        for (pz = 0; pz < self.data.patchCountZ; pz = pz + 1)
+        {
+            for (px = 0; px < self.data.patchCountX; px = px + 1)
+            {
+                patch = self.patchAt(px, pz);
+                if (patch.currentLOD < 0) continue;
+                step = 1 << patch.currentLOD;
+                xx = 0;
+                zz = 0;
+
+                while (zz < self.data.calcPatchSize)
+                {
+                    i11 = self.getIndex(px, pz, patch, xx, zz);
+                    i21 = self.getIndex(px, pz, patch, xx + step, zz);
+                    i12 = self.getIndex(px, pz, patch, xx, zz + step);
+                    i22 = self.getIndex(px, pz, patch, xx + step, zz + step);
+
+                    self.dynamicIndices.add(i11, i12, i22);
+                    self.dynamicIndices.add(i11, i22, i21);
+
+                    xx = xx + step;
+                    if (xx >= self.data.calcPatchSize)
+                    {
+                        xx = 0;
+                        zz = zz + step;
+                    }
+                }
+            }
+        }
+
+        self.indexCount = self.dynamicIndices.length();
+    }
+
+    def getIndex(patchX, patchZ, patch, x, z)
+    {
+        var vx = x;
+        var vz = z;
+        var nstep = 1;
+
+        if (vz == 0)
+        {
+            if (patch.top != nil && patch.currentLOD < patch.top.currentLOD)
+            {
+                nstep = 1 << patch.top.currentLOD;
+                if ((vx % nstep) != 0) vx = vx - (vx % nstep);
+            }
+        }
+        elif (vz == self.data.calcPatchSize)
+        {
+            if (patch.bottom != nil && patch.currentLOD < patch.bottom.currentLOD)
+            {
+                nstep = 1 << patch.bottom.currentLOD;
+                if ((vx % nstep) != 0) vx = vx - (vx % nstep);
+            }
+        }
+
+        if (vx == 0)
+        {
+            if (patch.left != nil && patch.currentLOD < patch.left.currentLOD)
+            {
+                nstep = 1 << patch.left.currentLOD;
+                if ((vz % nstep) != 0) vz = vz - (vz % nstep);
+            }
+        }
+        elif (vx == self.data.calcPatchSize)
+        {
+            if (patch.right != nil && patch.currentLOD < patch.right.currentLOD)
+            {
+                nstep = 1 << patch.right.currentLOD;
+                if ((vz % nstep) != 0) vz = vz - (vz % nstep);
+            }
+        }
+
+        if (vz > self.data.calcPatchSize) vz = self.data.calcPatchSize;
+        if (vx > self.data.calcPatchSize) vx = self.data.calcPatchSize;
+        if (vz < 0) vz = 0;
+        if (vx < 0) vx = 0;
+
+        var row = vz + self.data.calcPatchSize * patchZ;
+        var col = vx + self.data.calcPatchSize * patchX;
+        return row * (self.cellsX + 1) + col;
+    }
+
+    def uploadDynamicIndices()
+    {
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        if (self.indexCount > 0)
+            glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, self.indexCount * 4, self.dynamicIndices);
+    }
+
+    def patchAt(px, pz)
+    {
+        return self.data.patches[pz * self.data.patchCountX + px];
+    }
+
+    def gridStepX()
+    {
+        return self.sizeX / self.cellsX;
+    }
+
+    def gridStepZ()
+    {
+        return self.sizeZ / self.cellsZ;
+    }
+
+    def gridToWorldX(ix)
+    {
+        return ix * self.gridStepX() - self.sizeX * 0.5;
+    }
+
+    def gridToWorldZ(iz)
+    {
+        return iz * self.gridStepZ() - self.sizeZ * 0.5;
+    }
+
+    def heightAtGrid(ix, iz)
+    {
+        if (ix < 0) ix = 0;
+        if (iz < 0) iz = 0;
+        if (ix > self.cellsX) ix = self.cellsX;
+        if (iz > self.cellsZ) iz = self.cellsZ;
+        return self.heights.get(iz * (self.cellsX + 1) + ix);
+    }
+
+    def setHeightAtGrid(ix, iz, h)
+    {
+        if (ix < 0 || ix > self.cellsX || iz < 0 || iz > self.cellsZ) return;
+        self.heights.set(iz * (self.cellsX + 1) + ix, h);
+    }
+
+    def normalAtGrid(ix, iz)
+    {
+        var hl = self.heightAtGrid(ix - 1, iz);
+        var hr = self.heightAtGrid(ix + 1, iz);
+        var hd = self.heightAtGrid(ix, iz - 1);
+        var hu = self.heightAtGrid(ix, iz + 1);
+
+        var stepx = self.gridStepX();
+        var stepz = self.gridStepZ();
+
+        var nx = hl - hr;
+        var ny = stepx + stepz;
+        var nz = hd - hu;
+
+        var nl = sqrt(nx * nx + ny * ny + nz * nz);
+        if (nl < 0.000001) return (0.0, 1.0, 0.0);
+        return (nx / nl, ny / nl, nz / nl);
+    }
+
+    def refreshPatchBounds()
+    {
+        var pz = 0;
+        var px = 0;
+        for (pz = 0; pz < self.data.patchCountZ; pz = pz + 1)
+        {
+            for (px = 0; px < self.data.patchCountX; px = px + 1)
+            {
+                self.fillPatchBounds(px, pz, self.patchAt(px, pz));
+            }
+        }
+    }
+
+    def rebuildAfterHeightEdit()
+    {
+        self.refreshPatchBounds();
+        self.buildVertexBuffer();
+        self.lastCamValid = false;
+    }
+
+    def raycast(ox, oy, oz, dx, dy, dz, maxDistance)
+    {
+        var step = self.gridStepX();
+        var stepZ = self.gridStepZ();
+        if (stepZ < step) step = stepZ;
+        step = step * 0.75;
+        if (step < 0.35) step = 0.35;
+
+        var t = 0.0;
+        var px = 0.0;
+        var py = 0.0;
+        var pz = 0.0;
+        var prevT = 0.0;
+        var prevDelta = 0.0;
+        var prevValid = false;
+        var halfX = self.sizeX * 0.5;
+        var halfZ = self.sizeZ * 0.5;
+        var terrainY = 0.0;
+        var delta = 0.0;
+        var lo = 0.0;
+        var hi = 0.0;
+        var mid = 0.0;
+        var i = 0;
+
+        while (t <= maxDistance)
+        {
+            px = ox + dx * t;
+            py = oy + dy * t;
+            pz = oz + dz * t;
+
+            if (px >= -halfX && px <= halfX && pz >= -halfZ && pz <= halfZ)
+            {
+                terrainY = self.getHeightAt(px, pz);
+                delta = py - terrainY;
+
+                if (prevValid && delta <= 0.0 && prevDelta > 0.0)
+                {
+                    lo = prevT;
+                    hi = t;
+                    for (i = 0; i < 8; i = i + 1)
+                    {
+                        mid = (lo + hi) * 0.5;
+                        px = ox + dx * mid;
+                        py = oy + dy * mid;
+                        pz = oz + dz * mid;
+                        terrainY = self.getHeightAt(px, pz);
+                        if ((py - terrainY) > 0.0) lo = mid;
+                        else hi = mid;
+                    }
+
+                    px = ox + dx * hi;
+                    pz = oz + dz * hi;
+                    return (true, px, self.getHeightAt(px, pz), pz, hi);
+                }
+
+                prevT = t;
+                prevDelta = delta;
+                prevValid = true;
+            }
+            else
+            {
+                prevValid = false;
+            }
+
+            t = t + step;
+        }
+
+        return (false, 0.0, 0.0, 0.0, 0.0);
+    }
+
+    def sculptAdd(centerX, centerZ, radius, amount)
+    {
+        if (radius <= 0.0 || amount == 0.0) return false;
+
+        var stepX = self.gridStepX();
+        var stepZ = self.gridStepZ();
+        var minX = int(floor((centerX - radius + self.sizeX * 0.5) / stepX));
+        var maxX = int(floor((centerX + radius + self.sizeX * 0.5) / stepX));
+        var minZ = int(floor((centerZ - radius + self.sizeZ * 0.5) / stepZ));
+        var maxZ = int(floor((centerZ + radius + self.sizeZ * 0.5) / stepZ));
+        var ix = 0;
+        var iz = 0;
+        var wx = 0.0;
+        var wz = 0.0;
+        var dx = 0.0;
+        var dz = 0.0;
+        var dist2 = 0.0;
+        var falloff = 0.0;
+        var changed = false;
+        var h = 0.0;
+
+        if (minX < 0) minX = 0;
+        if (minZ < 0) minZ = 0;
+        if (maxX > self.cellsX) maxX = self.cellsX;
+        if (maxZ > self.cellsZ) maxZ = self.cellsZ;
+
+        for (iz = minZ; iz <= maxZ; iz = iz + 1)
+        {
+            wz = self.gridToWorldZ(iz);
+            dz = (wz - centerZ) / radius;
+            for (ix = minX; ix <= maxX; ix = ix + 1)
+            {
+                wx = self.gridToWorldX(ix);
+                dx = (wx - centerX) / radius;
+                dist2 = dx * dx + dz * dz;
+                if (dist2 > 1.0) continue;
+
+                falloff = 1.0 - dist2;
+                h = self.heightAtGrid(ix, iz) + amount * falloff;
+                self.setHeightAtGrid(ix, iz, h);
+                changed = true;
+            }
+        }
+
+        if (changed) self.rebuildAfterHeightEdit();
+        return changed;
+    }
+
+    def sculptFlatten(centerX, centerZ, radius, targetHeight, strength)
+    {
+        if (radius <= 0.0 || strength <= 0.0) return false;
+
+        var stepX = self.gridStepX();
+        var stepZ = self.gridStepZ();
+        var minX = int(floor((centerX - radius + self.sizeX * 0.5) / stepX));
+        var maxX = int(floor((centerX + radius + self.sizeX * 0.5) / stepX));
+        var minZ = int(floor((centerZ - radius + self.sizeZ * 0.5) / stepZ));
+        var maxZ = int(floor((centerZ + radius + self.sizeZ * 0.5) / stepZ));
+        var ix = 0;
+        var iz = 0;
+        var wx = 0.0;
+        var wz = 0.0;
+        var dx = 0.0;
+        var dz = 0.0;
+        var dist2 = 0.0;
+        var falloff = 0.0;
+        var changed = false;
+        var h = 0.0;
+
+        if (minX < 0) minX = 0;
+        if (minZ < 0) minZ = 0;
+        if (maxX > self.cellsX) maxX = self.cellsX;
+        if (maxZ > self.cellsZ) maxZ = self.cellsZ;
+
+        for (iz = minZ; iz <= maxZ; iz = iz + 1)
+        {
+            wz = self.gridToWorldZ(iz);
+            dz = (wz - centerZ) / radius;
+            for (ix = minX; ix <= maxX; ix = ix + 1)
+            {
+                wx = self.gridToWorldX(ix);
+                dx = (wx - centerX) / radius;
+                dist2 = dx * dx + dz * dz;
+                if (dist2 > 1.0) continue;
+
+                falloff = (1.0 - dist2) * strength;
+                h = self.heightAtGrid(ix, iz);
+                h = h + (targetHeight - h) * falloff;
+                self.setHeightAtGrid(ix, iz, h);
+                changed = true;
+            }
+        }
+
+        if (changed) self.rebuildAfterHeightEdit();
+        return changed;
+    }
+
+    def sculptSmooth(centerX, centerZ, radius, strength)
+    {
+        if (radius <= 0.0 || strength <= 0.0) return false;
+
+        var src = Float32Array(0);
+        var count = (self.cellsX + 1) * (self.cellsZ + 1);
+        var i = 0;
+        src.reserve(count);
+        for (i = 0; i < count; i = i + 1) src.add(self.heights.get(i));
+
+        var stepX = self.gridStepX();
+        var stepZ = self.gridStepZ();
+        var minX = int(floor((centerX - radius + self.sizeX * 0.5) / stepX));
+        var maxX = int(floor((centerX + radius + self.sizeX * 0.5) / stepX));
+        var minZ = int(floor((centerZ - radius + self.sizeZ * 0.5) / stepZ));
+        var maxZ = int(floor((centerZ + radius + self.sizeZ * 0.5) / stepZ));
+        var ix = 0;
+        var iz = 0;
+        var wx = 0.0;
+        var wz = 0.0;
+        var dx = 0.0;
+        var dz = 0.0;
+        var dist2 = 0.0;
+        var falloff = 0.0;
+        var base = 0.0;
+        var avg = 0.0;
+        var changed = false;
+
+        if (minX < 1) minX = 1;
+        if (minZ < 1) minZ = 1;
+        if (maxX > self.cellsX - 1) maxX = self.cellsX - 1;
+        if (maxZ > self.cellsZ - 1) maxZ = self.cellsZ - 1;
+
+        for (iz = minZ; iz <= maxZ; iz = iz + 1)
+        {
+            wz = self.gridToWorldZ(iz);
+            dz = (wz - centerZ) / radius;
+            for (ix = minX; ix <= maxX; ix = ix + 1)
+            {
+                wx = self.gridToWorldX(ix);
+                dx = (wx - centerX) / radius;
+                dist2 = dx * dx + dz * dz;
+                if (dist2 > 1.0) continue;
+
+                avg = 0.0;
+                avg = avg + src.get((iz - 1) * (self.cellsX + 1) + (ix - 1));
+                avg = avg + src.get((iz - 1) * (self.cellsX + 1) + ix);
+                avg = avg + src.get((iz - 1) * (self.cellsX + 1) + (ix + 1));
+                avg = avg + src.get(iz * (self.cellsX + 1) + (ix - 1));
+                avg = avg + src.get(iz * (self.cellsX + 1) + ix);
+                avg = avg + src.get(iz * (self.cellsX + 1) + (ix + 1));
+                avg = avg + src.get((iz + 1) * (self.cellsX + 1) + (ix - 1));
+                avg = avg + src.get((iz + 1) * (self.cellsX + 1) + ix);
+                avg = avg + src.get((iz + 1) * (self.cellsX + 1) + (ix + 1));
+                avg = avg / 9.0;
+
+                base = src.get(iz * (self.cellsX + 1) + ix);
+                falloff = (1.0 - dist2) * strength;
+                self.setHeightAtGrid(ix, iz, base + (avg - base) * falloff);
+                changed = true;
+            }
+        }
+
+        if (changed) self.rebuildAfterHeightEdit();
+        return changed;
+    }
+
+    def exportHeightmap(path)
+    {
+        var w = self.cellsX + 1;
+        var h = self.cellsZ + 1;
+        var img = GenImageColor(w, h, Color(0, 0, 0, 255));
+        var i = 0;
+        var minH = 999999.0;
+        var maxH = -999999.0;
+        var hh = 0.0;
+        var z = 0;
+        var x = 0;
+        var gray = 0;
+
+        for (i = 0; i < w * h; i = i + 1)
+        {
+            hh = self.heights.get(i);
+            if (hh < minH) minH = hh;
+            if (hh > maxH) maxH = hh;
+        }
+
+        if ((maxH - minH) < 0.000001) maxH = minH + 1.0;
+
+        for (z = 0; z < h; z = z + 1)
+        {
+            for (x = 0; x < w; x = x + 1)
+            {
+                hh = self.heights.get(z * w + x);
+                gray = int(((hh - minH) / (maxH - minH)) * 255.0);
+                if (gray < 0) gray = 0;
+                if (gray > 255) gray = 255;
+                ImageDrawPixel(img, x, z, Color(gray, gray, gray, 255));
+            }
+        }
+
+        var ok = ExportImage(img, path);
+        UnloadImage(img);
+        return ok;
+    }
+
+    def draw(camX, camY, camZ)
+    {
+        if (!self.ready) return;
+
+        self.updateLOD(camX, camY, camZ);
+        if (self.indexCount <= 0) return;
+
+        rlDrawRenderBatchActive();
+
+        var view = rlGetMatrixModelview();
+        var proj = rlGetMatrixProjection();
+        var model = rlGetMatrixTransform();
+
+        glUseProgram(self.program);
+        if (self.uModel >= 0) glUniformMatrix4fv(self.uModel, 1, false, model);
+        if (self.uView >= 0) glUniformMatrix4fv(self.uView, 1, false, view);
+        if (self.uProj >= 0) glUniformMatrix4fv(self.uProj, 1, false, proj);
+        if (self.uLightDir >= 0) glUniform3f(self.uLightDir, -0.45, -1.0, 0.35);
+        if (self.uCamPos >= 0) glUniform3f(self.uCamPos, camX, camY, camZ);
+        if (self.uBaseTex >= 0) glUniform1i(self.uBaseTex, 0);
+        if (self.uDetailTex >= 0) glUniform1i(self.uDetailTex, 1);
+        if (self.uDetailStrength >= 0) glUniform1f(self.uDetailStrength, 0.55);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, self.texBase);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, self.texDetail);
+
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glBindVertexArray(self.vao);
+        glDrawElements(GL_TRIANGLES, self.indexCount, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glUseProgram(0);
+    }
+
+    def getHeightAt(x, z)
+    {
+        var fx = (x + self.sizeX * 0.5) / self.sizeX;
+        var fz = (z + self.sizeZ * 0.5) / self.sizeZ;
+
+        if (fx < 0.0 || fx > 1.0 || fz < 0.0 || fz > 1.0) return 0.0;
+
+        var gx = fx * self.cellsX;
+        var gz = fz * self.cellsZ;
+
+        var ix = int(floor(gx));
+        var iz = int(floor(gz));
+        if (ix >= self.cellsX) ix = self.cellsX - 1;
+        if (iz >= self.cellsZ) iz = self.cellsZ - 1;
+
+        var tx = gx - ix;
+        var tz = gz - iz;
+
+        var h00 = self.heightAtGrid(ix, iz);
+        var h10 = self.heightAtGrid(ix + 1, iz);
+        var h01 = self.heightAtGrid(ix, iz + 1);
+        var h11 = self.heightAtGrid(ix + 1, iz + 1);
+
+        var hx0 = h00 + (h10 - h00) * tx;
+        var hx1 = h01 + (h11 - h01) * tx;
+        return hx0 + (hx1 - hx0) * tz;
+    }
+
+    def patchTotal()
+    {
+        var total = self.data.patchCountX * self.data.patchCountZ;
+        return total;
+    }
+
+    def visiblePatches()
+    {
+        return self.visiblePatchCount;
+    }
+
+    def culledPatches()
+    {
+        return self.culledPatchCount;
+    }
+
+    def triangleCount()
+    {
+        var tris = self.indexCount / 3;
+        return tris;
+    }
+
+    def debugDrawPatches()
+    {
+        var count = len(self.data.patches);
+        var i = 0;
+        var patch = nil;
+        var cx = 0.0;
+        var cy = 0.0;
+        var cz = 0.0;
+        var sx = 0.0;
+        var sy = 0.0;
+        var sz = 0.0;
+        var col = nil;
+
+        for (i = 0; i < count; i = i + 1)
+        {
+            patch = self.data.patches[i];
+
+            cx = (patch.minX + patch.maxX) * 0.5;
+            cy = (patch.minY + patch.maxY) * 0.5;
+            cz = (patch.minZ + patch.maxZ) * 0.5;
+            sx = patch.maxX - patch.minX;
+            sy = patch.maxY - patch.minY;
+            sz = patch.maxZ - patch.minZ;
+
+            if (patch.currentLOD < 0) col = Color(100, 100, 100, 255);
+            elif (patch.currentLOD == 0) col = Color(0, 255, 0, 255);
+            elif (patch.currentLOD == 1) col = Color(255, 255, 0, 255);
+            elif (patch.currentLOD == 2) col = Color(255, 165, 0, 255);
+            elif (patch.currentLOD == 3) col = Color(128, 0, 128, 255);
+            else col = Color(255, 0, 0, 255);
+
+            DrawCubeWires(cx, cy, cz, sx, sy, sz, col);
+        }
+    }
+
+    def destroy()
+    {
+        if (self.vbo > 0) glDeleteBuffers(self.vbo);
+        if (self.ebo > 0) glDeleteBuffers(self.ebo);
+        if (self.vao > 0) glDeleteVertexArrays(self.vao);
+        if (self.program > 0) glDeleteProgram(self.program);
+        if (self.texBase > 0) glDeleteTextures(self.texBase);
+        if (self.texDetail > 0) glDeleteTextures(self.texDetail);
+
+        self.vbo = 0;
+        self.ebo = 0;
+        self.vao = 0;
+        self.program = 0;
+        self.texBase = 0;
+        self.texDetail = 0;
+        self.indexCount = 0;
+        self.maxIndexCount = 0;
+        self.ready = false;
+    }
+}

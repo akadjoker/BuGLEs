@@ -1,0 +1,312 @@
+import path;
+using path;
+import math;
+using math;
+import ImGui;
+using ImGui;
+
+include "../libs/lib_geo_terrain.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def geoCross(ax, ay, az, bx, by, bz)
+{
+    return (
+        ay * bz - az * by,
+        az * bx - ax * bz,
+        ax * by - ay * bx
+    );
+}
+
+
+def geoNormalize(x, y, z)
+{
+    var l = sqrt(x * x + y * y + z * z);
+    if (l < 0.000001) return (0.0, 0.0, -1.0);
+    return (x / l, y / l, z / l);
+}
+
+
+def geoMouseRay(camX, camY, camZ, fwdX, fwdY, fwdZ, fovYRad, aspect)
+{
+    var (mx, my) = GetMousePosition();
+    var nx = (2.0 * mx / GetScreenWidth() - 1.0) * aspect * tan(fovYRad * 0.5);
+    var ny = (1.0 - 2.0 * my / GetScreenHeight()) * tan(fovYRad * 0.5);
+
+    var (rx, ry, rz) = geoCross(fwdX, fwdY, fwdZ, 0.0, 1.0, 0.0);
+    var (rightX, rightY, rightZ) = geoNormalize(rx, ry, rz);
+    var (ux, uy, uz) = geoCross(rightX, rightY, rightZ, fwdX, fwdY, fwdZ);
+    var (upX, upY, upZ) = geoNormalize(ux, uy, uz);
+
+    var dirX = fwdX + rightX * nx + upX * ny;
+    var dirY = fwdY + rightY * nx + upY * ny;
+    var dirZ = fwdZ + rightZ * nx + upZ * ny;
+    var (ndx, ndy, ndz) = geoNormalize(dirX, dirY, dirZ);
+
+    return (camX, camY, camZ, ndx, ndy, ndz);
+}
+
+
+def geoDrawTerrainBrushRing(terrain, cx, cz, radius, color)
+{
+    var segs = 48;
+    var i = 0;
+    var a0 = 0.0;
+    var a1 = 0.0;
+    var x0 = 0.0;
+    var z0 = 0.0;
+    var x1 = 0.0;
+    var z1 = 0.0;
+    var y0 = 0.0;
+    var y1 = 0.0;
+    var tau = 6.283185307179586;
+
+    for (i = 0; i < segs; i = i + 1)
+    {
+        a0 = tau * i / segs;
+        a1 = tau * (i + 1) / segs;
+
+        x0 = cx + cos(a0) * radius;
+        z0 = cz + sin(a0) * radius;
+        x1 = cx + cos(a1) * radius;
+        z1 = cz + sin(a1) * radius;
+
+        y0 = terrain.getHeightAt(x0, z0) + 0.10;
+        y1 = terrain.getHeightAt(x1, z1) + 0.10;
+
+        DrawLine3D(x0, y0, z0, x1, y1, z1, color);
+    }
+}
+
+
+SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1280, 720, "BuGL Demo - GeoTerrain");
+SetTargetFPS(60);
+InitImGui();
+
+var heightPath = resolveAssetPath(
+    "assets/terrain-heightmap.png",
+    "../assets/terrain-heightmap.png",
+    "../../assets/terrain-heightmap.png"
+);
+var baseTexPath = resolveAssetPath(
+    "assets/terrain-texture.jpg",
+    "../assets/terrain-texture.jpg",
+    "../../assets/terrain-texture.jpg"
+);
+var detailTexPath = resolveAssetPath(
+    "assets/detail.jpg",
+    "../assets/detail.jpg",
+    "../../assets/detail.jpg"
+);
+
+if (baseTexPath == nil || detailTexPath == nil)
+{
+    print("GeoTerrain assets missing");
+    return;
+}
+
+var cam = CreateCamera3D();
+var camX = 0.0;
+var camY = 48.0;
+var camZ = 72.0;
+var yaw = 180.0;
+var pitch = -24.0;
+
+SetCamera3DPosition(cam, camX, camY, camZ);
+SetCamera3DTarget(cam, 0.0, 0.0, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 45.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var terrain = GeoTerrain();
+var ok = false;
+
+if (heightPath != nil)
+    ok = terrain.setupHeightmap(heightPath, baseTexPath, detailTexPath, 220.0, 220.0, 42.0, 32.0);
+else
+    ok = terrain.setup(baseTexPath, detailTexPath, 220.0, 220.0, 160, 160, 24.0, 32.0);
+
+if (!ok)
+{
+    print("GeoTerrain init failed");
+    CloseWindow();
+    return;
+}
+
+var deg2rad = 0.017453292519943295;
+var rightMouse = false;
+var nearPlane = 0.1;
+var farPlane = 500.0;
+var fovYRad = 45.0 * deg2rad;
+var showPatchBoxes = true;
+var editorEnabled = true;
+var brushMode = 0;
+var brushRadius = 6.0;
+var brushStrength = 3.0;
+var flattenHeight = 8.0;
+var exportPath = "terrain_edit_export.png";
+var exportStatus = "";
+var hit = false;
+var hitX = 0.0;
+var hitY = 0.0;
+var hitZ = 0.0;
+var hitDist = 0.0;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    var move = 18.0 * dt;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) move = move * 3.0;
+
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        rightMouse = true;
+        var (mdx, mdy) = GetMouseDelta();
+        yaw = yaw - -mdx * 0.16;
+        pitch = pitch - mdy * 0.16;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+    else
+    {
+        rightMouse = false;
+    }
+
+    var yawRad = yaw * deg2rad;
+    var pitchRad = pitch * deg2rad;
+    var cp = cos(pitchRad);
+    var fwdX = sin(yawRad) * cp;
+    var fwdY = sin(pitchRad);
+    var fwdZ = -cos(yawRad) * cp;
+
+    var flatLen = sqrt(fwdX * fwdX + fwdZ * fwdZ);
+    if (flatLen < 0.00001) flatLen = 1.0;
+    var pfX = fwdX / flatLen;
+    var pfZ = fwdZ / flatLen;
+    var rgtX = cos(yawRad);
+    var rgtZ = sin(yawRad);
+
+    if (IsKeyDown(KEY_W)) { camX = camX + pfX * move; camZ = camZ + pfZ * move; }
+    if (IsKeyDown(KEY_S)) { camX = camX - pfX * move; camZ = camZ - pfZ * move; }
+    if (IsKeyDown(KEY_A)) { camX = camX - rgtX * move; camZ = camZ - rgtZ * move; }
+    if (IsKeyDown(KEY_D)) { camX = camX + rgtX * move; camZ = camZ + rgtZ * move; }
+    if (IsKeyDown(KEY_Q)) camY = camY + move;
+    if (IsKeyDown(KEY_E)) camY = camY - move;
+    if (IsKeyPressed(KEY_B)) showPatchBoxes = !showPatchBoxes;
+
+    SetCamera3DPosition(cam, camX, camY, camZ);
+    SetCamera3DTarget(cam, camX + fwdX * 20.0, camY + fwdY * 20.0, camZ + fwdZ * 20.0);
+
+    var aspect = GetScreenWidth() / GetScreenHeight();
+    terrain.setFrustum(camX, camY, camZ, fwdX, fwdY, fwdZ, rgtX, 0.0, rgtZ, fovYRad, aspect, nearPlane, farPlane);
+
+    var (rox, roy, roz, rdx, rdy, rdz) = geoMouseRay(camX, camY, camZ, fwdX, fwdY, fwdZ, fovYRad, aspect);
+    var (didHit, hx, hy, hz, hd) = terrain.raycast(rox, roy, roz, rdx, rdy, rdz, farPlane);
+    hit = didHit;
+    hitX = hx;
+    hitY = hy;
+    hitZ = hz;
+    hitDist = hd;
+
+    if (editorEnabled && hit && IsKeyDown(KEY_LEFT_CONTROL) && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !rightMouse)
+    {
+        if (brushMode == 0) terrain.sculptAdd(hitX, hitZ, brushRadius, brushStrength * dt * 10.0);
+        elif (brushMode == 1) terrain.sculptAdd(hitX, hitZ, brushRadius, -brushStrength * dt * 10.0);
+        elif (brushMode == 2)
+        {
+            var smoothStrength = brushStrength * dt * 1.5;
+            if (smoothStrength > 1.0) smoothStrength = 1.0;
+            terrain.sculptSmooth(hitX, hitZ, brushRadius, smoothStrength);
+        }
+        else
+        {
+            var flatStrength = brushStrength * dt * 1.5;
+            if (flatStrength > 1.0) flatStrength = 1.0;
+            terrain.sculptFlatten(hitX, hitZ, brushRadius, flattenHeight, flatStrength);
+        }
+    }
+
+    BeginDrawing();
+    ClearBackground(Color(120, 155, 190, 255));
+
+    BeginMode3D(cam);
+    terrain.draw(camX, camY, camZ);
+    if (showPatchBoxes) terrain.debugDrawPatches();
+    if (hit)
+    {
+        DrawSphereWires(hitX, hitY + 0.25, hitZ, 0.55, 8, 8, Color(255, 255, 255, 220));
+        geoDrawTerrainBrushRing(terrain, hitX, hitZ, brushRadius, Color(255, 120, 80, 220));
+        DrawLine3D(hitX, hitY + 0.2, hitZ, hitX, hitY + 3.0, hitZ, Color(255, 220, 120, 255));
+    }
+    DrawGrid(24, 10.0);
+    EndMode3D();
+
+    BeginImGui();
+    var panel = Begin("GeoTerrain Editor");
+    if (panel)
+    {
+        Text("Ctrl + LMB sculpt");
+        Text("Hit: " + str(hit) + "  Dist: " + str(hitDist));
+        var (_, nextEditor) = Checkbox("Editor enabled", editorEnabled);
+        editorEnabled = nextEditor;
+        var (_, nextBoxes) = Checkbox("Show patch boxes", showPatchBoxes);
+        showPatchBoxes = nextBoxes;
+        Separator();
+
+        Text("Brush mode");
+        if (Button("Raise")) brushMode = 0;
+        SameLine();
+        if (Button("Lower")) brushMode = 1;
+        SameLine();
+        if (Button("Smooth")) brushMode = 2;
+        SameLine();
+        if (Button("Flatten")) brushMode = 3;
+
+        if (brushMode == 0) Text("Mode: Raise");
+        elif (brushMode == 1) Text("Mode: Lower");
+        elif (brushMode == 2) Text("Mode: Smooth");
+        else Text("Mode: Flatten");
+
+        var (_, nextRadius) = SliderFloat("Radius", brushRadius, 1.0, 24.0);
+        brushRadius = nextRadius;
+        var (_, nextStrength) = SliderFloat("Strength", brushStrength, 0.2, 12.0);
+        brushStrength = nextStrength;
+        var (_, nextFlatten) = SliderFloat("Flatten height", flattenHeight, -8.0, 48.0);
+        flattenHeight = nextFlatten;
+
+        Separator();
+        var (_, nextExportPath) = InputText("Export path", exportPath);
+        exportPath = nextExportPath;
+        if (Button("Export Heightmap PNG"))
+        {
+            if (terrain.exportHeightmap(exportPath)) exportStatus = "saved: " + exportPath;
+            else exportStatus = "save failed: " + exportPath;
+        }
+        Text(exportStatus);
+    }
+    End();
+    EndImGui();
+
+    DrawRectangle(10, 10, 760, 140, Color(0, 0, 0, 145));
+    DrawText("GeoTerrain raw (RMB look, WASD fly, Q/E up-down, SHIFT faster, B boxes, Ctrl+LMB sculpt)", 20, 20, 20, Color(240, 240, 240, 255));
+    DrawText("Heightmap: " + str(heightPath != nil) + "  Cells: " + str(terrain.cellsX) + "x" + str(terrain.cellsZ), 20, 50, 16, Color(200, 225, 255, 255));
+    DrawText("Patches: " + str(terrain.visiblePatches()) + "/" + str(terrain.patchTotal()) + "  Culled: " + str(terrain.culledPatches()), 20, 74, 16, Color(200, 255, 200, 255));
+    DrawText("Triangles: " + str(terrain.triangleCount()), 20, 98, 16, Color(255, 230, 190, 255));
+    DrawText("Cam: " + str(camX) + ", " + str(camY) + ", " + str(camZ) + "  FPS: " + str(GetFPS()) + "  Boxes: " + str(showPatchBoxes), 20, 122, 16, Color(220, 220, 255, 255));
+
+    EndDrawing();
+}
+
+terrain.destroy();
+DestroyCamera3D(cam);
+ShutdownImGui();
+CloseWindow();

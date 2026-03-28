@@ -1,0 +1,109 @@
+// Demo: MD2 animated mesh rendered through Mini3D GPU pipeline
+
+import path;
+using path;
+
+include "../libs/lib_mini3d_md2.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+var modelPath = resolveAssetPath(
+    "assets/md2/pknight.md2",
+    "../assets/md2/pknight.md2",
+    "../../assets/md2/pknight.md2"
+);
+
+if (modelPath == nil)
+{
+    print("MD2 asset not found (pknight.md2)");
+    return;
+}
+
+SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1280, 720, "BuGL Demo - Mini3D MD2");
+SetTargetFPS(60);
+
+var cam = CreateCamera3D();
+SetCamera3DPosition(cam, 0.0, 2.6, 7.0);
+SetCamera3DTarget(cam, 0.0, 1.4, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 45.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var renderer = Renderer();
+if (!renderer.setup())
+{
+    print("Renderer init failed");
+    CloseWindow();
+    return;
+}
+
+var scene = Scene();
+
+var md2 = Mini3DMD2Instance();
+if (!md2.load(modelPath))
+{
+    print("Failed to load MD2: " + modelPath);
+    renderer.destroy();
+    CloseWindow();
+    return;
+}
+
+var ent = scene.createEntity(md2.mesh, "md2_knight");
+ent.positionY = 0.8;
+ent.rotationY = 180.0;
+ent.scaleX = 1.35;
+ent.scaleY = 1.35;
+ent.scaleZ = 1.35;
+
+md2.setAnimationByName("Stand");
+
+var paused = false;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    UpdateCamera(cam, CAMERA_ORBITAL);
+
+    if (IsKeyPressed(KEY_SPACE)) paused = !paused;
+    if (IsKeyPressed(KEY_RIGHT)) md2.nextAnimation();
+    if (IsKeyPressed(KEY_LEFT)) md2.prevAnimation();
+    if (IsKeyPressed(KEY_ONE)) md2.setAnimationByName("Stand");
+    if (IsKeyPressed(KEY_TWO)) md2.setAnimationByName("Run");
+    if (IsKeyPressed(KEY_THREE)) md2.setAnimationByName("Attack");
+
+    if (!paused)
+    {
+        scene.update(dt);
+        md2.update(dt);
+    }
+
+    BeginDrawing();
+    ClearBackground(Color(18, 22, 30, 255));
+
+    BeginMode3D(cam);
+    renderer.beginFrame(scene.timeSec);
+    scene.draw(renderer);
+    renderer.endFrame();
+    DrawGrid(30, 1.0);
+    EndMode3D();
+
+    DrawRectangle(10, 10, 540, 96, Color(0, 0, 0, 140));
+    DrawText("Mini3D MD2 (SPACE pause, LEFT/RIGHT anim, 1/2/3 quick)", 20, 20, 18, Color(240, 240, 240, 255));
+    DrawText("Anim: " + md2.animationName() + "  Tris: " + str(md2.triangleCount()), 20, 48, 16, Color(200, 220, 255, 255));
+    DrawText("FPS: " + str(GetFPS()), 20, 72, 16, Color(180, 255, 180, 255));
+
+    EndDrawing();
+}
+
+md2.destroy();
+renderer.destroy();
+CloseWindow();

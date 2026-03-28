@@ -6,7 +6,7 @@ namespace ImGuiBindings
     {
         if (!ImGui::GetCurrentContext())
         {
-            vm->runtimeError("%s requires Engine.InitImGui()", fn);
+            vm->runtimeError("%s requires InitImGui()", fn);
             return false;
         }
         return true;

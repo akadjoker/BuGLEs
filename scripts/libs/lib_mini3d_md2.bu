@@ -1,0 +1,268 @@
+// ================================================================
+// lib_mini3d_md2.bu
+//
+// Bridge: MD2 loader/animation -> Mini3D Mesh/Surface + GPU renderer
+// - Uses MD2Model parsing and anim state from lib_md2.bu
+// - Streams interpolated vertices to Surface.updateGpu() each frame
+// ================================================================
+
+include "../libs/lib_mini3d.bu";
+include "../libs/lib_md2.bu";
+include "../libs/lib_animation.bu";
+
+
+class Mini3DMD2Instance
+{
+    var model;                 // MD2Model
+    var animator;              // Animator
+    var mesh;                  // Mesh
+    var surface;               // Surface
+    var cornerSourceVertices;  // array<int>: one source MD2 vertex per surface corner
+    var ready;
+
+    def init()
+    {
+        self.model = MD2Model();
+        self.animator = Animator();
+        self.mesh = nil;
+        self.surface = nil;
+        self.cornerSourceVertices = [];
+        self.ready = false;
+    }
+
+    def destroy()
+    {
+        if (self.mesh != nil) self.mesh.destroy();
+        if (self.model != nil) self.model.destroy();
+        self.animator = Animator();
+        self.mesh = nil;
+        self.surface = nil;
+        self.cornerSourceVertices = [];
+        self.ready = false;
+    }
+
+    def load(modelPath)
+    {
+        self.destroy();
+
+        self.model = MD2Model();
+        if (!self.model.load(modelPath)) return false;
+        self.buildAnimatorFromModel();
+
+        if (!self.buildMeshFromModel())
+        {
+            self.model.destroy();
+            return false;
+        }
+
+        self.ready = true;
+        return true;
+    }
+
+    def buildAnimatorFromModel()
+    {
+        self.animator = Animator();
+        self.animator.defaultBlendTime = self.model.defaultBlendTime;
+
+        if (len(self.model.animations) > 0)
+        {
+            for (var i = 0; i < len(self.model.animations); i = i + 1)
+            {
+                var a = self.model.animations[i];
+                self.animator.addClip(a.name, a.first, a.last, a.fps, true);
+            }
+        }
+        else
+        {
+            self.animator.addClip("Default", 0, self.model.header.numFrames - 1, 10.0, true);
+        }
+
+        var stand = self.animator.findClip("Stand");
+        if (stand >= 0) self.animator.applyClipIndex(stand);
+        else self.animator.applyClipIndex(0);
+    }
+
+    def buildMeshFromModel()
+    {
+        self.mesh = Mesh();
+        self.surface = self.mesh.addSurface("md2_surface");
+        self.cornerSourceVertices = [];
+
+        var triCount = self.model.header.numTris;
+        for (var tri = 0; tri < triCount; tri = tri + 1)
+        {
+            var triBase = tri * 3;
+
+            var i0 = self.addCorner(triBase + 0);
+            var i1 = self.addCorner(triBase + 1);
+            var i2 = self.addCorner(triBase + 2);
+            self.surface.addTriangle(i0, i1, i2);
+        }
+
+        var mat = self.mesh.getMaterial(self.surface.materialId);
+        mat.doubleSided = false;
+        if (self.model.texture > 0) mat.textureId = self.model.texture;
+        self.samplePoseToSurface();
+        self.surface.upload();
+        return true;
+    }
+
+    def addCorner(cornerIndex)
+    {
+        var vi = self.model.vertexIndices.get(cornerIndex);
+        var ti = self.model.uvIndices.get(cornerIndex);
+        var uvBase = ti * 2;
+        var u = self.model.texcoords.get(uvBase + 0);
+        var v = self.model.texcoords.get(uvBase + 1);
+
+        self.cornerSourceVertices.push(vi);
+        return self.surface.addVertex(0.0, 0.0, 0.0, u, v, 1.0, 1.0, 1.0, 1.0);
+    }
+
+    def samplePoseToSurface()
+    {
+        var frameSize = self.model.header.numVerts * 3;
+        var frameA = self.animator.current;
+        var frameB = self.animator.next;
+
+        if (frameA < 0) frameA = 0;
+        if (frameA >= self.model.header.numFrames) frameA = self.model.header.numFrames - 1;
+        if (frameB < 0) frameB = frameA;
+        if (frameB >= self.model.header.numFrames) frameB = frameA;
+
+        var baseA = frameA * frameSize;
+        var baseB = frameB * frameSize;
+        var t = self.animator.interp;
+
+        var blend = self.animator.transitionBlend();
+        var srcBaseA = self.animator.transitionFromCurrent * frameSize;
+        var srcBaseB = self.animator.transitionFromNext * frameSize;
+        var srcT = self.animator.transitionFromInterp;
+
+        for (var c = 0; c < len(self.cornerSourceVertices); c = c + 1)
+        {
+            var vi = self.cornerSourceVertices[c];
+            var pa = baseA + vi * 3;
+            var pb = baseB + vi * 3;
+
+            var x0 = self.model.framePositions.get(pa + 0);
+            var y0 = self.model.framePositions.get(pa + 1);
+            var z0 = self.model.framePositions.get(pa + 2);
+            var x1 = self.model.framePositions.get(pb + 0);
+            var y1 = self.model.framePositions.get(pb + 1);
+            var z1 = self.model.framePositions.get(pb + 2);
+
+            var x = x0 + (x1 - x0) * t;
+            var y = y0 + (y1 - y0) * t;
+            var z = z0 + (z1 - z0) * t;
+
+            if (self.animator.transitionActive)
+            {
+                pa = srcBaseA + vi * 3;
+                pb = srcBaseB + vi * 3;
+
+                var sx0 = self.model.framePositions.get(pa + 0);
+                var sy0 = self.model.framePositions.get(pa + 1);
+                var sz0 = self.model.framePositions.get(pa + 2);
+                var sx1 = self.model.framePositions.get(pb + 0);
+                var sy1 = self.model.framePositions.get(pb + 1);
+                var sz1 = self.model.framePositions.get(pb + 2);
+
+                var sourceX = sx0 + (sx1 - sx0) * srcT;
+                var sourceY = sy0 + (sy1 - sy0) * srcT;
+                var sourceZ = sz0 + (sz1 - sz0) * srcT;
+
+                x = sourceX + (x - sourceX) * blend;
+                y = sourceY + (y - sourceY) * blend;
+                z = sourceZ + (z - sourceZ) * blend;
+            }
+
+            var p = c * 3;
+            self.surface.positions[p + 0] = x;
+            self.surface.positions[p + 1] = y;
+            self.surface.positions[p + 2] = z;
+        }
+
+        self.rebuildFlatNormals();
+    }
+
+    def rebuildFlatNormals()
+    {
+        var vc = self.surface.vertexCount();
+        self.surface.normals = [];
+        for (var i = 0; i < vc; i = i + 1)
+        {
+            self.surface.normals.push(0.0);
+            self.surface.normals.push(1.0);
+            self.surface.normals.push(0.0);
+        }
+
+        for (var i = 0; i < len(self.surface.indices); i = i + 3)
+        {
+            var i0 = self.surface.indices[i + 0];
+            var i1 = self.surface.indices[i + 1];
+            var i2 = self.surface.indices[i + 2];
+
+            var p0 = i0 * 3;
+            var p1 = i1 * 3;
+            var p2 = i2 * 3;
+
+            var x0 = self.surface.positions[p0 + 0];
+            var y0 = self.surface.positions[p0 + 1];
+            var z0 = self.surface.positions[p0 + 2];
+            var x1 = self.surface.positions[p1 + 0];
+            var y1 = self.surface.positions[p1 + 1];
+            var z1 = self.surface.positions[p1 + 2];
+            var x2 = self.surface.positions[p2 + 0];
+            var y2 = self.surface.positions[p2 + 1];
+            var z2 = self.surface.positions[p2 + 2];
+
+            var e1x = x1 - x0; var e1y = y1 - y0; var e1z = z1 - z0;
+            var e2x = x2 - x0; var e2y = y2 - y0; var e2z = z2 - z0;
+            var (nx, ny, nz) = miniCross(e1x, e1y, e1z, e2x, e2y, e2z);
+            var (fnx, fny, fnz) = miniNormalize3(nx, ny, nz);
+
+            self.surface.normals[p0 + 0] = fnx; self.surface.normals[p0 + 1] = fny; self.surface.normals[p0 + 2] = fnz;
+            self.surface.normals[p1 + 0] = fnx; self.surface.normals[p1 + 1] = fny; self.surface.normals[p1 + 2] = fnz;
+            self.surface.normals[p2 + 0] = fnx; self.surface.normals[p2 + 1] = fny; self.surface.normals[p2 + 2] = fnz;
+        }
+    }
+
+    def update(dt)
+    {
+        if (!self.ready) return;
+        self.animator.update(dt);
+        self.samplePoseToSurface();
+        self.surface.updateGpu();
+    }
+
+    def setAnimationByName(name)
+    {
+        if (!self.ready) return false;
+        return self.animator.playClipByName(name, self.animator.defaultBlendTime);
+    }
+
+    def nextAnimation()
+    {
+        if (!self.ready) return false;
+        return self.animator.nextClip();
+    }
+
+    def prevAnimation()
+    {
+        if (!self.ready) return false;
+        return self.animator.prevClip();
+    }
+
+    def animationName()
+    {
+        if (!self.ready) return "";
+        return self.animator.currentClipName();
+    }
+
+    def triangleCount()
+    {
+        if (!self.ready) return 0;
+        return self.model.triangleCount();
+    }
+}

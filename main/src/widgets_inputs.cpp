@@ -40,6 +40,41 @@ namespace ImGuiBindings
         return 1;
     }
 
+    int ImageButton(Interpreter *vm, int argCount, Value *args)
+    {
+        if (!ensure_context(vm, "ImGui.ImageButton()"))
+            return push_nil(vm);
+
+        if ((argCount != 4 && argCount != 8) || !args[0].isString() || !args[1].isNumber() ||
+            !args[2].isNumber() || !args[3].isNumber())
+        {
+            vm->runtimeError("ImGui.ImageButton expects (id, textureId, width, height[, u0, v0, u1, v1])");
+            return push_nil(vm);
+        }
+
+        ImVec2 uv0(0.0f, 0.0f);
+        ImVec2 uv1(1.0f, 1.0f);
+        if (argCount == 8)
+        {
+            if (!args[4].isNumber() || !args[5].isNumber() || !args[6].isNumber() || !args[7].isNumber())
+            {
+                vm->runtimeError("ImGui.ImageButton expects numeric UV coordinates");
+                return push_nil(vm);
+            }
+
+            uv0 = ImVec2((float)args[4].asNumber(), (float)args[5].asNumber());
+            uv1 = ImVec2((float)args[6].asNumber(), (float)args[7].asNumber());
+        }
+
+        const bool pressed = ImGui::ImageButton(args[0].asStringChars(),
+                                                (ImTextureID)(intptr_t)(unsigned int)args[1].asNumber(),
+                                                ImVec2((float)args[2].asNumber(), (float)args[3].asNumber()),
+                                                uv0,
+                                                uv1);
+        vm->pushBool(pressed);
+        return 1;
+    }
+
     int Selectable(Interpreter *vm, int argCount, Value *args)
     {
         if (!ensure_context(vm, "ImGui.Selectable()"))
@@ -687,6 +722,7 @@ namespace ImGuiBindings
     void register_inputs(ModuleBuilder &module)
     {
         module.addFunction("Button", Button, -1)
+              .addFunction("ImageButton", ImageButton, -1)
               .addFunction("SmallButton", SmallButton, 1)
               .addFunction("CollapsingHeader", CollapsingHeader, -1)
               .addFunction("TreeNode", TreeNode, 1)

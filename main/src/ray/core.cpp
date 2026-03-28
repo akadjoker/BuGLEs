@@ -1,4 +1,5 @@
 #include "bindings.hpp"
+#include "device.hpp"
 #include "raylib.h"
 #include "rlgl.h"
 
@@ -24,7 +25,7 @@ namespace RaylibBindings
 
     static int native_CloseWindow(Interpreter *vm, int argc, Value *args)
     {
-        CloseWindow();
+        Device::Instance().Close();
         return 0;
     }
 

@@ -1,0 +1,120 @@
+// ================================================================
+// lib_frustum.bu
+//
+// Simple camera frustum in BuLang:
+// - stores eye + basis vectors
+// - tests AABB against perspective frustum
+// ================================================================
+
+import math;
+using math;
+
+
+class Frustum
+{
+    var eyeX, eyeY, eyeZ;
+    var fwdX, fwdY, fwdZ;
+    var rightX, rightY, rightZ;
+    var upX, upY, upZ;
+    var nearPlane, farPlane;
+    var tanHalfH, tanHalfV;
+    var active;
+
+    def init()
+    {
+        self.eyeX = 0.0; self.eyeY = 0.0; self.eyeZ = 0.0;
+        self.fwdX = 0.0; self.fwdY = 0.0; self.fwdZ = 1.0;
+        self.rightX = 1.0; self.rightY = 0.0; self.rightZ = 0.0;
+        self.upX = 0.0; self.upY = 1.0; self.upZ = 0.0;
+        self.nearPlane = 0.1;
+        self.farPlane = 1000.0;
+        self.tanHalfH = 1.0;
+        self.tanHalfV = 1.0;
+        self.active = false;
+    }
+
+    def clear()
+    {
+        self.active = false;
+    }
+
+    def setPerspective(camX, camY, camZ,
+                       fwdX, fwdY, fwdZ,
+                       rightX, rightY, rightZ,
+                       fovYRad, aspect, nearPlane, farPlane)
+    {
+        var flen = sqrt(fwdX * fwdX + fwdY * fwdY + fwdZ * fwdZ);
+        if (flen > 0.000001)
+        {
+            fwdX = fwdX / flen;
+            fwdY = fwdY / flen;
+            fwdZ = fwdZ / flen;
+        }
+
+        var rlen = sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
+        if (rlen > 0.000001)
+        {
+            rightX = rightX / rlen;
+            rightY = rightY / rlen;
+            rightZ = rightZ / rlen;
+        }
+
+        var upX = rightY * fwdZ - rightZ * fwdY;
+        var upY = rightZ * fwdX - rightX * fwdZ;
+        var upZ = rightX * fwdY - rightY * fwdX;
+        var ulen = sqrt(upX * upX + upY * upY + upZ * upZ);
+        if (ulen > 0.000001)
+        {
+            upX = upX / ulen;
+            upY = upY / ulen;
+            upZ = upZ / ulen;
+        }
+
+        self.eyeX = camX; self.eyeY = camY; self.eyeZ = camZ;
+        self.fwdX = fwdX; self.fwdY = fwdY; self.fwdZ = fwdZ;
+        self.rightX = rightX; self.rightY = rightY; self.rightZ = rightZ;
+        self.upX = upX; self.upY = upY; self.upZ = upZ;
+        self.nearPlane = nearPlane;
+        self.farPlane = farPlane;
+        self.tanHalfV = tan(fovYRad * 0.5);
+        self.tanHalfH = self.tanHalfV * aspect;
+        self.active = true;
+    }
+
+    def boxVisible(minX, minY, minZ, maxX, maxY, maxZ)
+    {
+        if (!self.active) return true;
+
+        var cx = (minX + maxX) * 0.5;
+        var cy = (minY + maxY) * 0.5;
+        var cz = (minZ + maxZ) * 0.5;
+        var ex = (maxX - minX) * 0.5;
+        var ey = (maxY - minY) * 0.5;
+        var ez = (maxZ - minZ) * 0.5;
+
+        var vx = cx - self.eyeX;
+        var vy = cy - self.eyeY;
+        var vz = cz - self.eyeZ;
+
+        var x = vx * self.rightX + vy * self.rightY + vz * self.rightZ;
+        var y = vx * self.upX + vy * self.upY + vz * self.upZ;
+        var z = vx * self.fwdX + vy * self.fwdY + vz * self.fwdZ;
+
+        var rx = ex * abs(self.rightX) + ey * abs(self.rightY) + ez * abs(self.rightZ);
+        var ry = ex * abs(self.upX) + ey * abs(self.upY) + ez * abs(self.upZ);
+        var rz = ex * abs(self.fwdX) + ey * abs(self.fwdY) + ez * abs(self.fwdZ);
+
+        if (z + rz < self.nearPlane) return false;
+        if (z - rz > self.farPlane) return false;
+
+        var zMax = z + rz;
+        if (zMax <= 0.0) return false;
+
+        if ( x - rx > zMax * self.tanHalfH) return false;
+        if (-x - rx > zMax * self.tanHalfH) return false;
+        if ( y - ry > zMax * self.tanHalfV) return false;
+        if (-y - ry > zMax * self.tanHalfV) return false;
+
+        return true;
+    }
+}
