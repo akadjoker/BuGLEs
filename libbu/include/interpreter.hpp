@@ -581,6 +581,7 @@ struct ProcessExec
   Value *stackTop;
   CallFrame frames[FRAMES_MAX];
   int frameCount;
+  uint8_t lastCallReturnCount;
   uint8_t *gosubStack[GOSUB_MAX];
   int gosubTop{0};
   TryHandler tryHandlers[TRY_MAX];
@@ -588,7 +589,7 @@ struct ProcessExec
 
   ProcessExec()
       : state(ProcessState::DEAD), resumeTime(0), ip(nullptr), stackTop(stack),
-        frameCount(0), gosubTop(0), tryDepth(0) {}
+        frameCount(0), lastCallReturnCount(1), gosubTop(0), tryDepth(0) {}
 };
 enum class PrivateIndex : uint8
 {

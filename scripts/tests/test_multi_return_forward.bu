@@ -1,0 +1,83 @@
+// Validates direct forwarding of multi-return through `return callee()`.
+
+var passed = 0;
+
+def assert(cond, msg)
+{
+    if (!cond) throw f"ASSERT FAIL: {msg}";
+    passed += 1;
+}
+
+def src2()
+{
+    return (1, 2);
+}
+
+def fw_func()
+{
+    return src2();
+}
+
+var fn = src2;
+def fw_closure()
+{
+    return fn();
+}
+
+class A
+{
+    def m()
+    {
+        return (5, 6);
+    }
+}
+
+class B: A
+{
+    def fw_super()
+    {
+        return super.m();
+    }
+}
+
+class C
+{
+    def m()
+    {
+        return (3, 4);
+    }
+
+    def fw_method()
+    {
+        return self.m();
+    }
+}
+
+def fw_depth1()
+{
+    return src2();
+}
+
+def fw_depth2()
+{
+    return fw_depth1();
+}
+
+var (a, b) = fw_func();
+assert(a == 1 && b == 2, "function forward");
+
+var (c, d) = fw_closure();
+assert(c == 1 && d == 2, "closure forward");
+
+var obj = C();
+var (e, f) = obj.fw_method();
+assert(e == 3 && f == 4, "method invoke forward");
+
+var child = B();
+var (g, h) = child.fw_super();
+assert(g == 5 && h == 6, "super invoke forward");
+
+var (i, j) = fw_depth2();
+assert(i == 1 && j == 2, "nested forward depth");
+
+print(f"test_multi_return_forward: {passed} passed");

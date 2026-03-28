@@ -57,6 +57,7 @@ set(BULANG_LANG_TESTS
     test_closures_stress
     test_class_stress
     test_int_edge_cases
+    test_multi_return_forward
     test_multi_return_unpack_repack
 )
 
@@ -129,7 +130,6 @@ set(BULANG_ERROR_TESTS
     err_set_property_non_object
     err_wrong_arg_count
     err_self_inheritance
-    err_forward_multireturn_underflow
 )
 
 foreach(test_name IN LISTS BULANG_ERROR_TESTS)

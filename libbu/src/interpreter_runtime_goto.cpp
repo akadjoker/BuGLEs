@@ -396,12 +396,14 @@ ProcessResult Interpreter::run_process(Process *process)
                 std::memmove(_dest, _src, _rets * sizeof(Value));                      \
             }                                                                          \
             (fiber)->stackTop = _dest + _rets;                                         \
+            (fiber)->lastCallReturnCount = (uint8_t)((_rets > 255) ? 255 : _rets);    \
         }                                                                              \
         else                                                                           \
         {                                                                              \
             /* Retornar nil se for void */                                             \
             *_dest = makeNil();                                                        \
             (fiber)->stackTop = _dest + 1;                                             \
+            (fiber)->lastCallReturnCount = 1;                                          \
         }                                                                              \
     } while (0)
 
@@ -1778,7 +1780,23 @@ op_call:
 
 op_return:
 {
-    Value result = POP();
+    uint8_t returnCount = 1;
+    size_t ipOffset = (size_t)(ip - func->chunk->code);
+    bool prevWasDirectCall =
+        (ipOffset >= 3 && func->chunk->code[ipOffset - 3] == OP_CALL) ||
+        (ipOffset >= 5 && func->chunk->code[ipOffset - 5] == OP_INVOKE) ||
+        (ipOffset >= 6 && func->chunk->code[ipOffset - 6] == OP_SUPER_INVOKE);
+
+    if (prevWasDirectCall && fiber->lastCallReturnCount > 1)
+    {
+        returnCount = fiber->lastCallReturnCount;
+    }
+
+    Value results[256];
+    for (int i = returnCount - 1; i >= 0; i--)
+    {
+        results[i] = POP();
+    }
 
     if (hasFatalError_)
     {
@@ -1808,9 +1826,14 @@ op_return:
 
             if (handler.finallyIP != nullptr && !handler.inFinally)
             {
-                // Marca para executar finally
-                handler.pendingReturns[0] = result;
-                handler.pendingReturnCount = 1;
+                int n = (returnCount < TryHandler::MAX_PENDING_RETURNS)
+                            ? returnCount
+                            : TryHandler::MAX_PENDING_RETURNS;
+                for (int i = 0; i < n; i++)
+                {
+                    handler.pendingReturns[i] = results[i];
+                }
+                handler.pendingReturnCount = (uint8_t)n;
                 handler.hasPendingReturn = true;
                 handler.inFinally = true;
                 fiber->tryDepth = depth + 1; // Ajusta depth
@@ -1845,14 +1868,21 @@ op_return:
     {
         CallFrame *finished = &fiber->frames[fiber->frameCount];
         fiber->stackTop = finished->slots;
-        *fiber->stackTop++ = result;
+        for (int i = 0; i < returnCount; i++)
+        {
+            *fiber->stackTop++ = results[i];
+        }
+        fiber->lastCallReturnCount = returnCount;
         return {ProcessResult::CALL_RETURN, 0};
     }
 
     if (fiber->frameCount == 0)
     {
         fiber->stackTop = fiber->stack;
-        *fiber->stackTop++ = result;
+        for (int i = 0; i < returnCount; i++)
+        {
+            *fiber->stackTop++ = results[i];
+        }
 
         fiber->state = ProcessState::DEAD;
 
@@ -1865,7 +1895,11 @@ op_return:
     }
     CallFrame *finished = &fiber->frames[fiber->frameCount];
     fiber->stackTop = finished->slots;
-    *fiber->stackTop++ = result;
+    for (int i = 0; i < returnCount; i++)
+    {
+        *fiber->stackTop++ = results[i];
+    }
+    fiber->lastCallReturnCount = returnCount;
 
     LOAD_FRAME();
     DISPATCH();
@@ -5315,6 +5349,7 @@ op_exit_finally:
                 {
                     *fiber->stackTop++ = pendingReturns[i];
                 }
+                fiber->lastCallReturnCount = returnCount;
 
                 LOAD_FRAME();
             }
@@ -5943,6 +5978,7 @@ op_return_n:
         {
             *fiber->stackTop++ = results[i];
         }
+        fiber->lastCallReturnCount = count;
         return {ProcessResult::CALL_RETURN, 0};
     }
 
@@ -5973,6 +6009,7 @@ op_return_n:
     {
         *fiber->stackTop++ = results[i];
     }
+    fiber->lastCallReturnCount = count;
 
     LOAD_FRAME();
     DISPATCH();
