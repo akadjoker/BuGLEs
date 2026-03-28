@@ -1,0 +1,78 @@
+// Demo moderno: lib_q3bsp + camera 3D raylib
+
+import path;
+using path;
+
+include "../libs/lib_q3bsp.bu";
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+var mapPath = resolveAssetPath(
+    "assets/maps/level.bsp",
+    "../assets/maps/level.bsp",
+    "../../assets/maps/level.bsp"
+);
+var texRoot = resolveAssetPath(
+    "assets/",
+    "../assets/",
+    "../../assets/"
+);
+
+if (mapPath == nil || texRoot == nil)
+{
+    print("BSP asset not found (level.bsp)");
+    return;
+}
+
+InitWindow(1280, 720, "BuGL Demo - Q3 BSP");
+SetTargetFPS(60);
+
+var cam = CreateCamera3D();
+SetCamera3DPosition(cam, 0.0, 20.0, 60.0);
+SetCamera3DTarget(cam, 0.0, 8.0, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 45.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var bsp = Q3BSP();
+if (!bsp.load(mapPath, texRoot))
+{
+    print("Failed to load BSP: " + mapPath);
+    CloseWindow();
+    return;
+}
+
+bsp.scale = 0.03;
+
+while (!WindowShouldClose())
+{
+    UpdateCamera(cam, CAMERA_ORBITAL);
+
+    if (IsKeyPressed(KEY_MINUS)) bsp.scale = max(0.005, bsp.scale - 0.002);
+    if (IsKeyPressed(KEY_EQUAL)) bsp.scale = min(0.20, bsp.scale + 0.002);
+
+    BeginDrawing();
+    ClearBackground(Color(16, 20, 28, 255));
+
+    BeginMode3D(cam);
+    bsp.draw();
+    EndMode3D();
+
+    var (visBuf, visPatch, drawBuf, drawPatch, culled, tris) = bsp.frameStats();
+
+    DrawRectangle(10, 10, 540, 116, Color(0, 0, 0, 150));
+    DrawText("BSP Demo (orbital camera, -/+ scale)", 20, 20, 18, Color(240, 240, 240, 255));
+    DrawText("Faces: " + str(bsp.faceCount()) + "  Verts: " + str(bsp.vertexCount()) + "  Lightmaps: " + str(bsp.lightmapCount()), 20, 48, 16, Color(200, 220, 255, 255));
+    DrawText("Visible buffers: " + str(visBuf) + "  Drawn buffers: " + str(drawBuf) + "  Drawn tris: " + str(tris), 20, 72, 16, Color(180, 255, 180, 255));
+    DrawText("Scale: " + str(bsp.scale) + "  FPS: " + str(GetFPS()), 20, 96, 16, Color(255, 220, 180, 255));
+
+    EndDrawing();
+}
+
+CloseWindow();

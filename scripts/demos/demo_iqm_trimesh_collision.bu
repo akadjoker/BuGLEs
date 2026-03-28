@@ -1,0 +1,167 @@
+// Demo: IQM + TriMesh + primitive collision tests with matrices
+
+import path;
+using path;
+import math;
+using math;
+
+include "../libs/lib_iqm.bu";
+include "../libs/lib_trimesh.bu";
+include "../libs/lib_tri_primitives.bu";
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+var modelPath = resolveAssetPath(
+    "assets/iqm/erebus/erebus.iqm",
+    "../assets/iqm/erebus/erebus.iqm",
+    "../../assets/iqm/erebus/erebus.iqm"
+);
+var texDir = resolveAssetPath(
+    "assets/iqm/erebus/",
+    "../assets/iqm/erebus/",
+    "../../assets/iqm/erebus/"
+);
+
+if (modelPath == nil || texDir == nil)
+{
+    print("IQM asset not found (erebus.iqm)");
+    return;
+}
+
+InitWindow(1280, 720, "BuGL Demo - IQM TriMesh Collision");
+SetTargetFPS(60);
+
+var cam = CreateCamera3D();
+SetCamera3DPosition(cam, 0.0, 4.0, 10.0);
+SetCamera3DTarget(cam, 0.0, 1.0, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 45.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var model = IQMModel();
+if (!model.load(modelPath, texDir))
+{
+    print("Failed to load IQM: " + modelPath);
+    CloseWindow();
+    return;
+}
+
+model.scaleVal = 0.05;
+if (model.animCount() > 0) model.setAnimByIndex(0);
+
+// Build trimesh collider from IQM bind vertices.
+var colMesh = TriMesh();
+for (var si = 0; si < model.surfaceCount(); si += 1)
+{
+    var surf = model.surfaces[si];
+    colMesh.addSurfaceScaled(surf.vertices, surf.indices, model.scaleVal);
+}
+colMesh.build();
+print("IQM TriMesh built: " + str(colMesh.triCount()) + " tris");
+
+// Player sphere that collides with IQM trimesh.
+var spherePosX = 0.0;
+var spherePosY = 1.6;
+var spherePosZ = 2.6;
+var sphereRadius = 0.35;
+var velY = 0.0;
+var onGround = false;
+var moveSpeed = 4.0;
+var jumpSpeed = 5.3;
+var gravity = 12.0;
+
+var sphereViz = GenMeshSphere(1.0, 16, 16);
+var boxViz = GenMeshCube(1.0, 1.0, 1.0);
+
+var paused = false;
+
+// One-shot primitive tests (matrix-based).
+var initTriM = MatrixMultiply(MatrixRotateY(0.45), MatrixTranslate(0.0, 1.2, 0.0));
+var initBoxM = MatrixMultiply(MatrixRotateY(-0.7), MatrixTranslate(2.4, 1.0, 0.0));
+var initSphereM = MatrixTranslate(0.0, 1.2, 0.0);
+var (initHitST, initCpX, initCpY, initCpZ, initNX, initNY, initNZ, initPenST) = triPrimSphereTriangle(
+    0.0, 0.0, 0.0, 0.45, initSphereM,
+    -0.9, 0.0, -0.7,  0.9, 0.0, -0.7,  0.0, 0.0, 1.0, initTriM
+);
+var (initHitSB, initBxClosest, initByClosest, initBzClosest, initPenSB) = triPrimSphereBox(
+    0.0, 0.0, 0.0, 0.45, initSphereM,
+    0.0, 0.0, 0.0, 0.6, 0.6, 0.6, initBoxM
+);
+var initHitBT = triPrimBoxTriangle(
+    0.0, 0.0, 0.0, 0.6, 0.6, 0.6, initBoxM,
+    -0.9, 0.0, -0.7,  0.9, 0.0, -0.7,  0.0, 0.0, 1.0, initTriM
+);
+print("triPrim startup -> sphere/tri=" + str(initHitST) + " sphere/box=" + str(initHitSB) + " box/tri=" + str(initHitBT));
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+
+    UpdateCamera(cam, CAMERA_ORBITAL);
+
+    if (IsKeyPressed(KEY_SPACE) && onGround) velY = jumpSpeed;
+    if (IsKeyPressed(KEY_P)) paused = !paused;
+    if (IsKeyPressed(KEY_RIGHT)) model.nextAnim();
+    if (IsKeyPressed(KEY_LEFT)) model.prevAnim();
+    if (IsKeyPressed(KEY_K)) model.showSkeleton = !model.showSkeleton;
+
+    var moveX = 0.0;
+    var moveZ = 0.0;
+    if (IsKeyDown(KEY_A)) moveX -= 1.0;
+    if (IsKeyDown(KEY_D)) moveX += 1.0;
+    if (IsKeyDown(KEY_W)) moveZ -= 1.0;
+    if (IsKeyDown(KEY_S)) moveZ += 1.0;
+
+    var ml = sqrt(moveX*moveX + moveZ*moveZ);
+    if (ml > 0.001) { moveX /= ml; moveZ /= ml; }
+
+    velY = velY - gravity * dt;
+    var dx = moveX * moveSpeed * dt;
+    var dy = velY * dt;
+    var dz = moveZ * moveSpeed * dt;
+
+    var (npx, npy, npz, hitGround) = colMesh.moveAndSlide(
+        spherePosX, spherePosY, spherePosZ, dx, dy, dz, sphereRadius, 4
+    );
+    spherePosX = npx; spherePosY = npy; spherePosZ = npz;
+    onGround = hitGround;
+    if (onGround && velY < 0.0) velY = 0.0;
+
+    if (!paused) model.update(dt);
+
+    var (boxCenterX, boxCenterY, boxCenterZ) = triPrimTransformPoint(initBoxM, 0.0, 0.0, 0.0);
+    var (bsx, bsy, bsz) = triPrimExtractScale(initBoxM);
+
+    BeginDrawing();
+    ClearBackground(Color(18, 22, 30, 255));
+
+    BeginMode3D(cam);
+    DrawGrid(30, 1.0);
+    model.draw();
+
+    DrawModel(sphereViz, spherePosX, spherePosY, spherePosZ, sphereRadius, Color(120, 220, 255, 255));
+    DrawModel(boxViz, boxCenterX, boxCenterY, boxCenterZ, 0.6, Color(255, 200, 80, 120));
+    DrawCubeWires(boxCenterX, boxCenterY, boxCenterZ, 1.2*bsx, 1.2*bsy, 1.2*bsz, Color(255, 210, 120, 255));
+    if (initHitST) DrawCubeWires(initCpX, initCpY, initCpZ, 0.08, 0.08, 0.08, Color(255, 80, 80, 255));
+    if (initHitSB) DrawCubeWires(initBxClosest, initByClosest, initBzClosest, 0.08, 0.08, 0.08, Color(80, 255, 80, 255));
+    EndMode3D();
+
+    DrawRectangle(10, 10, 620, 160, Color(0, 0, 0, 145));
+    DrawText("IQM + TriMesh collision (WASD move, SPACE jump, P pause anim)", 20, 20, 18, Color(240, 240, 240, 255));
+    DrawText("TriMesh tris: " + str(colMesh.triCount()) + "  OnGround: " + str(onGround) + "  velY: " + str(velY), 20, 48, 16, Color(200, 220, 255, 255));
+    DrawText("Sphere/Triangle: " + str(initHitST) + " pen=" + str(initPenST), 20, 74, 16, Color(255, 180, 180, 255));
+    DrawText("Sphere/Box: " + str(initHitSB) + " pen=" + str(initPenSB), 20, 98, 16, Color(180, 255, 180, 255));
+    DrawText("Box/Triangle: " + str(initHitBT) + "  Anim: " + model.animName() + "  FPS: " + str(GetFPS()), 20, 122, 16, Color(200, 200, 255, 255));
+
+    EndDrawing();
+}
+
+UnloadModel(sphereViz);
+UnloadModel(boxViz);
+CloseWindow();

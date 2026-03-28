@@ -78,7 +78,6 @@ HeapAllocator::HeapAllocator()
 
 HeapAllocator::~HeapAllocator()
 {
-
 	for (size_t i = 0; i < m_chunkCount; ++i)
 	{
 		aFree(m_chunks[i].blocks);

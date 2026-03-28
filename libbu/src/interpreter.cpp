@@ -639,6 +639,17 @@ int Interpreter::addGlobal(const char *name, Value value)
   return index;
 }
 
+void Interpreter::setArgs(int argc, char *argv[])
+{
+  Value arr = makeArray();
+  ArrayInstance *a = arr.asArray();
+  for (int i = 0; i < argc; i++)
+  {
+    a->values.push(makeString(argv[i]));
+  }
+  addGlobal("ARGV", arr);
+}
+
 bool Interpreter::setGlobal(const char *name, Value value)
 {
   String* str = createString(name);

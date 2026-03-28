@@ -1,0 +1,80 @@
+// Validates stable multi-return transport through deep call chains
+// using unpack+repack (current safe pattern).
+
+var passed = 0;
+var failed = 0;
+
+def assert(cond, msg)
+{
+    if (!cond) throw f"ASSERT FAIL: {msg}";
+    passed += 1;
+}
+
+def src12()
+{
+    return (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
+}
+
+def f1()
+{
+    var (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) = src12();
+    return (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12);
+}
+
+def f2()
+{
+    var (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) = f1();
+    return (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12);
+}
+
+def f3()
+{
+    var (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) = f2();
+    return (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12);
+}
+
+def f4()
+{
+    var (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) = f3();
+    return (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12);
+}
+
+def f5()
+{
+    var (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) = f4();
+    return (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12);
+}
+
+def f6()
+{
+    var (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) = f5();
+    return (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12);
+}
+
+def f7()
+{
+    var (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) = f6();
+    return (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12);
+}
+
+def f8()
+{
+    var (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) = f7();
+    return (v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12);
+}
+
+var (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12) = f8();
+assert(r1 == 1, "r1");
+assert(r2 == 2, "r2");
+assert(r3 == 3, "r3");
+assert(r4 == 4, "r4");
+assert(r5 == 5, "r5");
+assert(r6 == 6, "r6");
+assert(r7 == 7, "r7");
+assert(r8 == 8, "r8");
+assert(r9 == 9, "r9");
+assert(r10 == 10, "r10");
+assert(r11 == 11, "r11");
+assert(r12 == 12, "r12");
+
+print(f"test_multi_return_unpack_repack: {passed} passed, {failed} failed");

@@ -1,0 +1,21 @@
+// Reproducer for VM multi-return forward bug:
+// returning `callee()` directly with 2+ values corrupts return values.
+
+def src()
+{
+    return (1, 2);
+}
+
+def forward_once()
+{
+    return src();
+}
+
+var (a, b) = forward_once();
+
+// This should be true in a correct VM. Right now it reproduces the bug:
+// first value becomes nil/corrupted after direct multi-return forwarding.
+if (a != 1 || b != 2)
+{
+    throw f"forward multi-return bug: expected (1,2), got ({a},{b})";
+}

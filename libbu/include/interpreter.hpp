@@ -99,7 +99,7 @@ enum class StaticNames : uint8 {
     ISLOWER,      // str.islower()
     LSTRIP,       // str.lstrip()
     RSTRIP,       // str.rstrip()
-    INIT,         // Geralmente para Classes/Structs
+    INIT,         // for  Classes/Structs
 
     // === BUFFER ===
     FILL,         //   Buffer e Array)
@@ -1287,6 +1287,9 @@ public:
   Value getGlobal(const char *name);
   Value getGlobal(uint32 index);
   bool tryGetGlobal(const char *name, Value *value);
+
+  // Set script arguments (available as global ARGV array)
+  void setArgs(int argc, char *argv[]);
 
   // ===== ARRAY EXTRACTION HELPERS (for native bindings - no allocation) =====
   // Extract values from a BuLang array to a C buffer (stack-allocated by caller)

@@ -1,0 +1,94 @@
+// Demo moderno: lib_b3d + camera 3D raylib
+
+import path;
+using path;
+
+include "../libs/lib_b3d.bu";
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+var modelPath = resolveAssetPath(
+    "assets/b3d/ninja.b3d",
+    "../assets/b3d/ninja.b3d",
+    "../../assets/b3d/ninja.b3d"
+);
+var texDir = resolveAssetPath(
+    "assets/b3d/",
+    "../assets/b3d/",
+    "../../assets/b3d/"
+);
+
+if (modelPath == nil || texDir == nil)
+{
+    print("B3D asset not found (ninja.b3d)");
+    return;
+}
+
+InitWindow(1280, 720, "BuGL Demo - B3D");
+SetTargetFPS(60);
+
+var cam = CreateCamera3D();
+SetCamera3DPosition(cam, 0.0, 2.5, 8.0);
+SetCamera3DTarget(cam, 0.0, 1.4, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 45.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var model = B3DModel();
+if (!model.load(modelPath, texDir))
+{
+    print("Failed to load B3D: " + modelPath);
+    CloseWindow();
+    return;
+}
+
+model.scaleVal = 0.05;
+model.fps = 10.0;
+
+var paused = false;
+var animFrame = 0.0;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    UpdateCamera(cam, CAMERA_ORBITAL);
+
+    if (IsKeyPressed(KEY_SPACE)) paused = !paused;
+    if (IsKeyPressed(KEY_K)) model.showSkeleton = !model.showSkeleton;
+
+    if (IsKeyPressed(KEY_RIGHT)) animFrame = animFrame + 1.0;
+    if (IsKeyPressed(KEY_LEFT)) animFrame = animFrame - 1.0;
+
+    if (!paused) animFrame = animFrame + model.fps * dt;
+
+    if (model.numFrames > 0)
+    {
+        while (animFrame < 0.0) animFrame = animFrame + model.numFrames;
+        while (animFrame >= model.numFrames) animFrame = animFrame - model.numFrames;
+    }
+
+    model.update(animFrame);
+
+    BeginDrawing();
+    ClearBackground(Color(18, 22, 30, 255));
+
+    BeginMode3D(cam);
+    DrawGrid(30, 1.0);
+    model.draw();
+    EndMode3D();
+
+    DrawRectangle(10, 10, 470, 96, Color(0, 0, 0, 140));
+    DrawText("B3D Demo (SPACE pause, LEFT/RIGHT frame, K skeleton)", 20, 20, 18, Color(240, 240, 240, 255));
+    DrawText("Frame: " + str(int(animFrame)) + " / " + str(model.numFrames) + "  Joints: " + str(model.jointCount()), 20, 48, 16, Color(200, 220, 255, 255));
+    DrawText("Surfaces: " + str(model.surfaceCount()) + "  Tris: " + str(model.triangleCount()) + "  FPS: " + str(GetFPS()), 20, 72, 16, Color(180, 255, 180, 255));
+
+    EndDrawing();
+}
+
+CloseWindow();

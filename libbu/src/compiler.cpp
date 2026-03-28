@@ -5,6 +5,7 @@
 #include "opcode.hpp"
 #include "pool.hpp"
 #include "value.hpp"
+#include "stdlib_embedded.h"
 #include <cstdio>
 #include <cstdlib>
 #include <stdarg.h>
@@ -356,6 +357,15 @@ ProcessDef *Compiler::compile(const std::string &source)
   currentFunctionType = FunctionType::TYPE_SCRIPT;
   currentClass = nullptr;
 
+  // Inject stdlib (map, filter, reduce, etc.) on first compilation
+  // Must be after function/chunk are initialized so declarations
+  // can emit bytecode into __main__'s chunk.
+  if (!stdlibLoaded_)
+  {
+    injectStdlib();
+    stdlibLoaded_ = true;
+  }
+
   advance();
 
   while (!match(TOKEN_EOF) && !hadError)
@@ -394,6 +404,37 @@ ProcessDef *Compiler::compile(const std::string &source)
   // Info("  Compile Time: %lld ms", stats.compileTime.count());
 
   return currentProcess;
+}
+
+// ============================================
+// Stdlib injection — compiles embedded stdlib.bu inline
+// Uses the same save/restore pattern as includeStatement().
+// ============================================
+void Compiler::injectStdlib()
+{
+    Lexer *oldLexer            = this->lexer;
+    std::vector<Token> oldToks = this->tokens;
+    Token oldCurrent           = this->current;
+    Token oldPrevious          = this->previous;
+    int   oldCursor            = this->cursor;
+
+    this->lexer  = new Lexer(STDLIB_SOURCE, STDLIB_SOURCE_LEN);
+    this->tokens = lexer->scanAll();
+    predeclareGlobals();
+    this->cursor = 0;
+    advance();
+
+    while (!check(TOKEN_EOF) && !hadError)
+    {
+        declaration();
+    }
+
+    delete this->lexer;
+    this->lexer    = oldLexer;
+    this->tokens   = oldToks;
+    this->current  = oldCurrent;
+    this->previous = oldPrevious;
+    this->cursor   = oldCursor;
 }
 
 ProcessDef *Compiler::compileExpression(const std::string &source)

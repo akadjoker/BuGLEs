@@ -1,0 +1,272 @@
+// ================================================================
+// lib_tri_primitives.bu
+//
+// Primitive collision helpers with matrix support:
+// - Sphere vs Triangle
+// - Sphere vs Box (OBB via matrix)
+// - Box vs Triangle (OBB vs tri via SAT in box-local space)
+//
+// Notes:
+// - Sphere under non-uniform scale is treated as conservative sphere
+//   using max scale component.
+// ================================================================
+
+import math;
+using math;
+import GLM;
+using GLM;
+
+def triPrimMax3(a, b, c)
+{
+    return max(a, max(b, c));
+}
+
+def triPrimMin3(a, b, c)
+{
+    return min(a, min(b, c));
+}
+
+def triPrimTransformPoint(m, x, y, z)
+{
+    var tx = m.m0 * x + m.m4 * y + m.m8  * z + m.m12;
+    var ty = m.m1 * x + m.m5 * y + m.m9  * z + m.m13;
+    var tz = m.m2 * x + m.m6 * y + m.m10 * z + m.m14;
+    return (tx, ty, tz);
+}
+
+def triPrimTransformVector(m, x, y, z)
+{
+    var tx = m.m0 * x + m.m4 * y + m.m8  * z;
+    var ty = m.m1 * x + m.m5 * y + m.m9  * z;
+    var tz = m.m2 * x + m.m6 * y + m.m10 * z;
+    return (tx, ty, tz);
+}
+
+def triPrimExtractScale(m)
+{
+    var sx = sqrt(m.m0*m.m0 + m.m1*m.m1 + m.m2*m.m2);
+    var sy = sqrt(m.m4*m.m4 + m.m5*m.m5 + m.m6*m.m6);
+    var sz = sqrt(m.m8*m.m8 + m.m9*m.m9 + m.m10*m.m10);
+    return (sx, sy, sz);
+}
+
+def triPrimClosestPointOnTriangle(px, py, pz,
+                                  ax, ay, az,
+                                  bx, by, bz,
+                                  cx, cy, cz)
+{
+    var abx = bx - ax; var aby = by - ay; var abz = bz - az;
+    var acx = cx - ax; var acy = cy - ay; var acz = cz - az;
+    var apx = px - ax; var apy = py - ay; var apz = pz - az;
+
+    var d1 = abx*apx + aby*apy + abz*apz;
+    var d2 = acx*apx + acy*apy + acz*apz;
+    if (d1 <= 0.0 && d2 <= 0.0) return (ax, ay, az);
+
+    var bpx = px - bx; var bpy = py - by; var bpz = pz - bz;
+    var d3 = abx*bpx + aby*bpy + abz*bpz;
+    var d4 = acx*bpx + acy*bpy + acz*bpz;
+    if (d3 >= 0.0 && d4 <= d3) return (bx, by, bz);
+
+    var vc = d1*d4 - d3*d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0)
+    {
+        var v = d1 / (d1 - d3);
+        return (ax + abx*v, ay + aby*v, az + abz*v);
+    }
+
+    var cpx = px - cx; var cpy = py - cy; var cpz = pz - cz;
+    var d5 = abx*cpx + aby*cpy + abz*cpz;
+    var d6 = acx*cpx + acy*cpy + acz*cpz;
+    if (d6 >= 0.0 && d5 <= d6) return (cx, cy, cz);
+
+    var vb = d5*d2 - d1*d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0)
+    {
+        var w = d2 / (d2 - d6);
+        return (ax + acx*w, ay + acy*w, az + acz*w);
+    }
+
+    var va = d3*d6 - d5*d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0)
+    {
+        var bcx = cx - bx; var bcy = cy - by; var bcz = cz - bz;
+        var w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (bx + bcx*w, by + bcy*w, bz + bcz*w);
+    }
+
+    var denom = 1.0 / (va + vb + vc);
+    var v = vb * denom;
+    var w = vc * denom;
+    return (ax + abx*v + acx*w, ay + aby*v + acy*w, az + abz*v + acz*w);
+}
+
+def triPrimSphereTriangleWorld(sx, sy, sz, sr,
+                               ax, ay, az,
+                               bx, by, bz,
+                               cx, cy, cz)
+{
+    var (qx, qy, qz) = triPrimClosestPointOnTriangle(
+        sx, sy, sz, ax, ay, az, bx, by, bz, cx, cy, cz
+    );
+
+    var dx = sx - qx; var dy = sy - qy; var dz = sz - qz;
+    var distSq = dx*dx + dy*dy + dz*dz;
+    var rSq = sr * sr;
+    if (distSq > rSq) return (false, qx, qy, qz, 0.0, 0.0, 0.0, 0.0);
+
+    var dist = sqrt(max(distSq, 0.0));
+    var nx = 0.0; var ny = 1.0; var nz = 0.0;
+
+    if (dist > 0.000001)
+    {
+        nx = dx / dist; ny = dy / dist; nz = dz / dist;
+    }
+    else
+    {
+        var e0x = bx - ax; var e0y = by - ay; var e0z = bz - az;
+        var e1x = cx - ax; var e1y = cy - ay; var e1z = cz - az;
+        nx = e0y*e1z - e0z*e1y;
+        ny = e0z*e1x - e0x*e1z;
+        nz = e0x*e1y - e0y*e1x;
+        var nl = sqrt(nx*nx + ny*ny + nz*nz);
+        if (nl > 0.000001) { nx = nx/nl; ny = ny/nl; nz = nz/nl; }
+    }
+
+    return (true, qx, qy, qz, nx, ny, nz, sr - dist);
+}
+
+def triPrimSphereTriangle(sphereX, sphereY, sphereZ, sphereRadius, sphereMatrix,
+                          triAx, triAy, triAz, triBx, triBy, triBz, triCx, triCy, triCz, triMatrix)
+{
+    var (swx, swy, swz) = triPrimTransformPoint(sphereMatrix, sphereX, sphereY, sphereZ);
+    var (ssx, ssy, ssz) = triPrimExtractScale(sphereMatrix);
+    var worldRadius = sphereRadius * triPrimMax3(ssx, ssy, ssz);
+
+    var (ax, ay, az) = triPrimTransformPoint(triMatrix, triAx, triAy, triAz);
+    var (bx, by, bz) = triPrimTransformPoint(triMatrix, triBx, triBy, triBz);
+    var (cx, cy, cz) = triPrimTransformPoint(triMatrix, triCx, triCy, triCz);
+
+    var (hit, qx, qy, qz, nx, ny, nz, depth) = triPrimSphereTriangleWorld(
+        swx, swy, swz, worldRadius,
+        ax, ay, az, bx, by, bz, cx, cy, cz
+    );
+
+    return (hit, qx, qy, qz, nx, ny, nz, depth);
+}
+
+def triPrimSphereBox(sphereX, sphereY, sphereZ, sphereRadius, sphereMatrix,
+                     boxCx, boxCy, boxCz, boxHx, boxHy, boxHz, boxMatrix)
+{
+    var (swx, swy, swz) = triPrimTransformPoint(sphereMatrix, sphereX, sphereY, sphereZ);
+    var (ssx, ssy, ssz) = triPrimExtractScale(sphereMatrix);
+    var worldRadius = sphereRadius * triPrimMax3(ssx, ssy, ssz);
+
+    var (bcx, bcy, bcz) = triPrimTransformPoint(boxMatrix, boxCx, boxCy, boxCz);
+    var (bsx, bsy, bsz) = triPrimExtractScale(boxMatrix);
+
+    var axx = boxMatrix.m0; var axy = boxMatrix.m1; var axz = boxMatrix.m2;
+    var ayx = boxMatrix.m4; var ayy = boxMatrix.m5; var ayz = boxMatrix.m6;
+    var azx = boxMatrix.m8; var azy = boxMatrix.m9; var azz = boxMatrix.m10;
+
+    if (bsx > 0.000001) { axx = axx / bsx; axy = axy / bsx; axz = axz / bsx; }
+    if (bsy > 0.000001) { ayx = ayx / bsy; ayy = ayy / bsy; ayz = ayz / bsy; }
+    if (bsz > 0.000001) { azx = azx / bsz; azy = azy / bsz; azz = azz / bsz; }
+
+    var ex = boxHx * bsx;
+    var ey = boxHy * bsy;
+    var ez = boxHz * bsz;
+
+    var dx = swx - bcx; var dy = swy - bcy; var dz = swz - bcz;
+    var px = dx*axx + dy*axy + dz*axz;
+    var py = dx*ayx + dy*ayy + dz*ayz;
+    var pz = dx*azx + dy*azy + dz*azz;
+
+    var cx = clamp(px, -ex, ex);
+    var cy = clamp(py, -ey, ey);
+    var cz = clamp(pz, -ez, ez);
+
+    var wx = bcx + axx*cx + ayx*cy + azx*cz;
+    var wy = bcy + axy*cx + ayy*cy + azy*cz;
+    var wz = bcz + axz*cx + ayz*cy + azz*cz;
+
+    var ddx = swx - wx; var ddy = swy - wy; var ddz = swz - wz;
+    var d2 = ddx*ddx + ddy*ddy + ddz*ddz;
+    var r2 = worldRadius * worldRadius;
+    if (d2 > r2) return (false, wx, wy, wz, 0.0);
+
+    var dist = sqrt(max(d2, 0.0));
+    return (true, wx, wy, wz, worldRadius - dist);
+}
+
+def triPrimAabbTriAxisOverlap(ax, ay, az, v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z, hx, hy, hz)
+{
+    var al2 = ax*ax + ay*ay + az*az;
+    if (al2 < 0.0000001) return true;
+
+    var p0 = v0x*ax + v0y*ay + v0z*az;
+    var p1 = v1x*ax + v1y*ay + v1z*az;
+    var p2 = v2x*ax + v2y*ay + v2z*az;
+    var minP = triPrimMin3(p0, p1, p2);
+    var maxP = triPrimMax3(p0, p1, p2);
+    var r = hx*abs(ax) + hy*abs(ay) + hz*abs(az);
+    if (minP > r || maxP < -r) return false;
+    return true;
+}
+
+def triPrimAabbTriangleLocal(centerX, centerY, centerZ, hx, hy, hz,
+                             ax, ay, az, bx, by, bz, cx, cy, cz)
+{
+    var v0x = ax - centerX; var v0y = ay - centerY; var v0z = az - centerZ;
+    var v1x = bx - centerX; var v1y = by - centerY; var v1z = bz - centerZ;
+    var v2x = cx - centerX; var v2y = cy - centerY; var v2z = cz - centerZ;
+
+    var e0x = v1x - v0x; var e0y = v1y - v0y; var e0z = v1z - v0z;
+    var e1x = v2x - v1x; var e1y = v2y - v1y; var e1z = v2z - v1z;
+    var e2x = v0x - v2x; var e2y = v0y - v2y; var e2z = v0z - v2z;
+
+    if (!triPrimAabbTriAxisOverlap(0.0, -e0z, e0y, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+    if (!triPrimAabbTriAxisOverlap(e0z, 0.0, -e0x, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+    if (!triPrimAabbTriAxisOverlap(-e0y, e0x, 0.0, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+
+    if (!triPrimAabbTriAxisOverlap(0.0, -e1z, e1y, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+    if (!triPrimAabbTriAxisOverlap(e1z, 0.0, -e1x, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+    if (!triPrimAabbTriAxisOverlap(-e1y, e1x, 0.0, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+
+    if (!triPrimAabbTriAxisOverlap(0.0, -e2z, e2y, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+    if (!triPrimAabbTriAxisOverlap(e2z, 0.0, -e2x, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+    if (!triPrimAabbTriAxisOverlap(-e2y, e2x, 0.0, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+
+    var minX = triPrimMin3(v0x, v1x, v2x);
+    var maxX = triPrimMax3(v0x, v1x, v2x);
+    if (minX > hx || maxX < -hx) return false;
+    var minY = triPrimMin3(v0y, v1y, v2y);
+    var maxY = triPrimMax3(v0y, v1y, v2y);
+    if (minY > hy || maxY < -hy) return false;
+    var minZ = triPrimMin3(v0z, v1z, v2z);
+    var maxZ = triPrimMax3(v0z, v1z, v2z);
+    if (minZ > hz || maxZ < -hz) return false;
+
+    var nx = e0y*e1z - e0z*e1y;
+    var ny = e0z*e1x - e0x*e1z;
+    var nz = e0x*e1y - e0y*e1x;
+    if (!triPrimAabbTriAxisOverlap(nx, ny, nz, v0x,v0y,v0z, v1x,v1y,v1z, v2x,v2y,v2z, hx,hy,hz)) return false;
+
+    return true;
+}
+
+def triPrimBoxTriangle(boxCx, boxCy, boxCz, boxHx, boxHy, boxHz, boxMatrix,
+                       triAx, triAy, triAz, triBx, triBy, triBz, triCx, triCy, triCz, triMatrix)
+{
+    var (wax, way, waz) = triPrimTransformPoint(triMatrix, triAx, triAy, triAz);
+    var (wbx, wby, wbz) = triPrimTransformPoint(triMatrix, triBx, triBy, triBz);
+    var (wcx, wcy, wcz) = triPrimTransformPoint(triMatrix, triCx, triCy, triCz);
+
+    var invBox = MatrixInvert(boxMatrix);
+    var (lax, lay, laz) = triPrimTransformPoint(invBox, wax, way, waz);
+    var (lbx, lby, lbz) = triPrimTransformPoint(invBox, wbx, wby, wbz);
+    var (lcx, lcy, lcz) = triPrimTransformPoint(invBox, wcx, wcy, wcz);
+
+    return triPrimAabbTriangleLocal(boxCx, boxCy, boxCz, boxHx, boxHy, boxHz,
+                                    lax, lay, laz, lbx, lby, lbz, lcx, lcy, lcz);
+}

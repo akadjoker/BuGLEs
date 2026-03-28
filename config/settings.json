@@ -1,0 +1,25 @@
+{
+  "autosave_enabled": false,
+  "autosave_interval_ms": 1500,
+  "bugl_path": "bugl",
+  "bytecode_output_path": "scripts/depracated/demo_advanced_battle.buc",
+  "console_visible": false,
+  "file_explorer_visible": true,
+  "font_choice": "default",
+  "font_path": "",
+  "font_scale": 1.0,
+  "last_file_path": "scripts/depracated/demo_advanced_battle.bu",
+  "minimap_visible": false,
+  "outline_side": "right",
+  "outline_visible": true,
+  "palette": "vscode_dark",
+  "runtime": {
+    "binary_path": "bugl",
+    "profile_name": "bugl"
+  },
+  "workspace": {
+    "bytecode_output_path": "scripts/depracated/demo_advanced_battle.buc",
+    "entry_script": "scripts/depracated/demo_advanced_battle.bu",
+    "root_path": ""
+  }
+}

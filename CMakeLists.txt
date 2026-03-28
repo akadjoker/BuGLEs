@@ -9,6 +9,7 @@ option(BUGL_PORTABLE_RELEASE "Build release binaries without CPU-specific native
 option(BUGL_STRIP_RELEASE "Strip symbols from release binaries when supported" ON)
 option(BUGL_IMGUI_DEMO "Build Dear ImGui demo window support" OFF)
 option(BUGL_ENABLE_COMPILER_CACHE "Use compiler cache launcher (sccache/ccache) when available" ON)
+option(BUGL_BUILD_EDITOR "Build BuEditor target" ON)
 
 # Optional modules (all ON by default — disable with -DBUGL_WITH_XXX=OFF)
 option(BUGL_WITH_BOX2D      "Build Box2D 2D physics module"          ON)
@@ -166,6 +167,10 @@ endif()
 
 add_subdirectory(libbu)
 add_subdirectory(main)
+
+if(BUGL_BUILD_EDITOR)
+    add_subdirectory(editor)
+endif()
 
 # Language test suite (lightweight: only needs libbu)
 enable_testing()

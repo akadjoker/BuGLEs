@@ -434,6 +434,9 @@ private:
   FileLoaderCallback fileLoader = nullptr;
   void *fileLoaderUserdata = nullptr;
   std::set<std::string> includedFiles;
+
+  bool stdlibLoaded_ = false;
+  void injectStdlib();
   std::set<std::string> importedModules;
   std::set<std::string> usingModules;
 

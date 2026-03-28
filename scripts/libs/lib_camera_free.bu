@@ -1,0 +1,162 @@
+// ================================================================
+// lib_camera_free.bu — Reusable Free Camera (fly-through, 6DOF)
+//
+// Usage:
+//   include "lib_camera_free.bu";
+//   var cam = CameraFree(0.0, 3.0, 10.0);
+//   cam.speed = 6.0;
+//   SetMouseRelative(true);
+//   cam.setAngles(-90.0, 0.0, 0.0);
+//   // in your loop:
+//   cam.update(dt);
+//   var view = cam.getViewMatrix();
+//
+// Keys:
+//   WASD move
+//   Space/C up/down
+//   Q/E roll
+//   Left mouse or alwaysCapture for look
+// ================================================================
+
+import math;
+using math;
+import GLM;
+using GLM;
+
+class CameraFree
+{
+    var x;
+    var y;
+    var z;
+    var yaw;
+    var pitch;
+    var roll;
+    var speed;
+    var sensitivity;
+    var firstMouse;
+    var alwaysCapture;
+    var mouseButton;
+
+    def init(px, py, pz)
+    {
+        self.x = px;
+        self.y = py;
+        self.z = pz;
+        self.yaw = -90.0;
+        self.pitch = 0.0;
+        self.roll = 0.0;
+        self.speed = 5.0;
+        self.sensitivity = 0.1;
+        self.firstMouse = true;
+        self.alwaysCapture = false;
+        self.mouseButton = 0;
+    }
+
+    def setPosition(px, py, pz)
+    {
+        self.x = px;
+        self.y = py;
+        self.z = pz;
+    }
+
+    def setAngles(yawDeg, pitchDeg, rollDeg)
+    {
+        self.yaw = yawDeg;
+        self.pitch = pitchDeg;
+        self.roll = rollDeg;
+        if (self.pitch > 89.0) self.pitch = 89.0;
+        if (self.pitch < -89.0) self.pitch = -89.0;
+    }
+
+    def getForward()
+    {
+        var deg2rad = 0.017453292519943295;
+        var yr = self.yaw * deg2rad;
+        var pr = self.pitch * deg2rad;
+        var fx = cos(yr) * cos(pr);
+        var fy = sin(pr);
+        var fz = sin(yr) * cos(pr);
+        return Vector3(fx, fy, fz);
+    }
+
+    def getRight()
+    {
+        var fwd = self.getForward();
+        var up = Vector3(0.0, 1.0, 0.0);
+        var rx = fwd.y * up.z - fwd.z * up.y;
+        var ry = fwd.z * up.x - fwd.x * up.z;
+        var rz = fwd.x * up.y - fwd.y * up.x;
+        var vlen = sqrt(rx * rx + ry * ry + rz * rz);
+        if (vlen < 0.0001) return Vector3(1.0, 0.0, 0.0);
+        return Vector3(rx / vlen, ry / vlen, rz / vlen);
+    }
+
+    def getUp()
+    {
+        var fwd = self.getForward();
+        var right = self.getRight();
+        var ux = right.y * fwd.z - right.z * fwd.y;
+        var uy = right.z * fwd.x - right.x * fwd.z;
+        var uz = right.x * fwd.y - right.y * fwd.x;
+        return Vector3(ux, uy, uz);
+    }
+
+    def update(dt)
+    {
+        var doLook = self.alwaysCapture || IsMouseDown(self.mouseButton);
+        if (doLook)
+        {
+            var (dx, dy) = GetMouseDelta();
+            if (self.firstMouse)
+            {
+                self.firstMouse = false;
+            }
+            else
+            {
+                self.yaw = self.yaw + dx * self.sensitivity;
+                self.pitch = self.pitch - dy * self.sensitivity;
+                if (self.pitch > 89.0) self.pitch = 89.0;
+                if (self.pitch < -89.0) self.pitch = -89.0;
+            }
+        }
+        else
+        {
+            self.firstMouse = true;
+        }
+
+        var fwd = self.getForward();
+        var right = self.getRight();
+        var mv = self.speed * dt;
+        if (IsKeyDown(KEY_LEFT_SHIFT)) mv = mv * 2.5;
+
+        if (IsKeyDown(KEY_W)) { self.x = self.x + fwd.x * mv; self.y = self.y + fwd.y * mv; self.z = self.z + fwd.z * mv; }
+        if (IsKeyDown(KEY_S)) { self.x = self.x - fwd.x * mv; self.y = self.y - fwd.y * mv; self.z = self.z - fwd.z * mv; }
+        if (IsKeyDown(KEY_A)) { self.x = self.x - right.x * mv; self.y = self.y - right.y * mv; self.z = self.z - right.z * mv; }
+        if (IsKeyDown(KEY_D)) { self.x = self.x + right.x * mv; self.y = self.y + right.y * mv; self.z = self.z + right.z * mv; }
+        if (IsKeyDown(KEY_SPACE)) self.y = self.y + mv;
+        if (IsKeyDown(KEY_C)) self.y = self.y - mv;
+
+        var rollSpeed = 60.0;
+        if (IsKeyDown(KEY_Q)) self.roll = self.roll - rollSpeed * dt;
+        if (IsKeyDown(KEY_E)) self.roll = self.roll + rollSpeed * dt;
+    }
+
+    def getViewMatrix()
+    {
+        var fwd = self.getForward();
+        var eye = Vector3(self.x, self.y, self.z);
+        var tgt = Vector3(self.x + fwd.x, self.y + fwd.y, self.z + fwd.z);
+        var up = self.getUp();
+        return MatrixLookAt(eye, tgt, up);
+    }
+
+    def getProjectionMatrix(aspect, fov, near, far)
+    {
+        return MatrixPerspective(fov, aspect, near, far);
+    }
+
+    def getEye()
+    {
+        return Vector3(self.x, self.y, self.z);
+    }
+}

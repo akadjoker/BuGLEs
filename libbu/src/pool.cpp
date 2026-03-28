@@ -143,35 +143,31 @@ String *StringPool::concat(String *a, String *b)
 
     size_t totalLen = lenA + lenB;
 
-    // Create transient string (not interned) — avoids O(n) hash + HashMap lookup
-    String *s = allocString();
-
-    if (totalLen <= String::SMALL_THRESHOLD)
+    // Concat via pool create() to keep ownership/lifetime centralized.
+    char *temp = nullptr;
+    bool useAlloca = totalLen < 4096;
+    if (useAlloca)
     {
-        s->length_and_flag = totalLen;
-        std::memcpy(s->data, a->chars(), lenA);
-        std::memcpy(s->data + lenA, b->chars(), lenB);
-        s->data[totalLen] = '\0';
+        temp = (char *)alloca(totalLen + 1);
     }
     else
     {
-        s->length_and_flag = totalLen | String::IS_LONG_FLAG;
-        s->ptr = (char *)allocator.Allocate(totalLen + 1);
-        std::memcpy(s->ptr, a->chars(), lenA);
-        std::memcpy(s->ptr + lenA, b->chars(), lenB);
-        s->ptr[totalLen] = '\0';
+        temp = (char *)aAlloc(totalLen + 1);
     }
 
-    s->hash = hashString(s->chars(), totalLen);
-    s->index = String::TRANSIENT_INDEX;
-    bytesAllocated += sizeof(String) + totalLen;
+    std::memcpy(temp, a->chars(), lenA);
+    std::memcpy(temp + lenA, b->chars(), lenB);
+    temp[totalLen] = '\0';
 
-    // Free the left operand if it was transient (s = s + "x" pattern)
-    // Data already copied via memcpy above, so safe to free now
+    String *result = create(temp, totalLen);
+
+    if (!useAlloca)
+        aFree(temp);
+
     if (a->isTransient())
         freeTransient(a);
 
-    return s;
+    return result;
 }
 
 // ========================================
