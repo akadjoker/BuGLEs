@@ -91,6 +91,11 @@ String *StringPool::create(const char *str, uint32 len)
         return s;
     }
 
+    return createNoLookup(str, len);
+}
+
+String *StringPool::createNoLookup(const char *str, uint32 len)
+{
     // New string
     String *s = allocString();
 
@@ -143,7 +148,8 @@ String *StringPool::concat(String *a, String *b)
 
     size_t totalLen = lenA + lenB;
 
-    // Concat via pool create() to keep ownership/lifetime centralized.
+    // Fast concat path: skip pool.get lookup (single hash-table write only).
+    // This removes one expensive lookup in concat-heavy workloads.
     char *temp = nullptr;
     bool useAlloca = totalLen < 4096;
     if (useAlloca)
@@ -159,13 +165,10 @@ String *StringPool::concat(String *a, String *b)
     std::memcpy(temp + lenA, b->chars(), lenB);
     temp[totalLen] = '\0';
 
-    String *result = create(temp, totalLen);
+    String *result = createNoLookup(temp, (uint32)totalLen);
 
     if (!useAlloca)
         aFree(temp);
-
-    if (a->isTransient())
-        freeTransient(a);
 
     return result;
 }

@@ -1,0 +1,147 @@
+// =============================================
+// BuLang Runtime Hotspots Benchmark
+// Focus: return paths, string building, map+string keys
+// =============================================
+
+var N_RET = 5000000;
+var N_STR = 500000;
+var N_MAP = 200000;
+
+def inc(x) {
+    return x + 1;
+}
+
+def fwd_inc(x) {
+    return inc(x);
+}
+
+def pair(x) {
+    return (x, x + 1);
+}
+
+def bench_return_scalar(n) {
+    var s = 0;
+    var i = 0;
+    while (i < n) {
+        s = s + inc(i);
+        i = i + 1;
+    }
+    return s;
+}
+
+def bench_return_forward_single(n) {
+    var s = 0;
+    var i = 0;
+    while (i < n) {
+        s = s + fwd_inc(i);
+        i = i + 1;
+    }
+    return s;
+}
+
+def bench_multi_return_unpack(n) {
+    var s = 0;
+    var i = 0;
+    while (i < n) {
+        var (a, b) = pair(i);
+        s = s + a + b;
+        i = i + 1;
+    }
+    return s;
+}
+
+def bench_concat_plus(n) {
+    var s = "";
+    var i = 0;
+    while (i < n) {
+        s = "Points " + i;
+        i = i + 1;
+    }
+    return len(s);
+}
+
+def bench_fstring(n) {
+    var s = "";
+    var i = 0;
+    while (i < n) {
+        s = f"Points {i}";
+        i = i + 1;
+    }
+    return len(s);
+}
+
+def bench_format(n) {
+    var s = "";
+    var i = 0;
+    while (i < n) {
+        s = format("Points {}", i);
+        i = i + 1;
+    }
+    return len(s);
+}
+
+def bench_map_string_keys(n) {
+    var keys = [];
+    var m = {};
+
+    var i = 0;
+    while (i < n) {
+        var k = format("k{}", i);
+        keys.push(k);
+        m[k] = i;
+        i = i + 1;
+    }
+
+    var s = 0;
+    i = 0;
+    while (i < n) {
+        s = s + m[keys[i]];
+        i = i + 1;
+    }
+    return s;
+}
+
+print("=== BuLang Hotspots Benchmark ===");
+print(f"N_RET={N_RET} N_STR={N_STR} N_MAP={N_MAP}");
+print("");
+
+var t0 = clock();
+var r1 = bench_return_scalar(N_RET);
+var t1 = clock();
+print(f"1. Return scalar:         {t1 - t0} s");
+
+var t2 = clock();
+var r2 = bench_return_forward_single(N_RET);
+var t3 = clock();
+print(f"2. Return forward 1-val:  {t3 - t2} s");
+
+var t4 = clock();
+var r3 = bench_multi_return_unpack(N_RET);
+var t5 = clock();
+print(f"3. Multi-return unpack:   {t5 - t4} s");
+
+var t6 = clock();
+var r4 = bench_concat_plus(N_STR);
+var t7 = clock();
+print(f"4. String +:              {t7 - t6} s");
+
+var t8 = clock();
+var r5 = bench_fstring(N_STR);
+var t9 = clock();
+print(f"5. fstring:               {t9 - t8} s");
+
+var t10 = clock();
+var r6 = bench_format(N_STR);
+var t11 = clock();
+print(f"6. format():              {t11 - t10} s");
+
+var t12 = clock();
+var r7 = bench_map_string_keys(N_MAP);
+var t13 = clock();
+print(f"7. Map string keys:       {t13 - t12} s");
+
+print("");
+var total = (t1 - t0) + (t3 - t2) + (t5 - t4) + (t7 - t6) + (t9 - t8) + (t11 - t10) + (t13 - t12);
+print(f"TOTAL:                    {total} s");
+print(f"checksum: {r1 + r2 + r3 + r4 + r5 + r6 + r7}");
+

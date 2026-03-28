@@ -53,6 +53,7 @@ public:
     size_t getBytesAllocated() { return bytesAllocated; }
 
     String *create(const char *str, uint32 len);
+    String *createNoLookup(const char *str, uint32 len);
     void destroy(String *s);
 
     String *create(const char *str);

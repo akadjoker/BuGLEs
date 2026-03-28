@@ -1387,7 +1387,6 @@ void Compiler::foreachStatement()
 
 void Compiler::returnStatement()
 {
-
     if (isProcess_)
     {
         consume(TOKEN_SEMICOLON, "Expect ';'"); // quando usamo gosub nos processos
