@@ -462,6 +462,9 @@ namespace Bindings
 #ifdef GL_DEPTH_COMPONENT16
         module.addInt("GL_DEPTH_COMPONENT16", GL_DEPTH_COMPONENT16);
 #endif
+#ifdef GL_DEPTH_COMPONENT
+        module.addInt("GL_DEPTH_COMPONENT", GL_DEPTH_COMPONENT);
+#endif
 #ifdef GL_DEPTH_COMPONENT24
         module.addInt("GL_DEPTH_COMPONENT24", GL_DEPTH_COMPONENT24);
 #endif

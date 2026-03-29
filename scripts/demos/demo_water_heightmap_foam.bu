@@ -1,0 +1,1183 @@
+import file;
+import path;
+using path;
+import math;
+using math;
+import ImGui;
+using ImGui;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import GLM;
+using GLM;
+import STB;
+using STB;
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def readTextFile(filePath)
+{
+    if (filePath == nil || !path.exists(filePath)) return nil;
+    var handle = file.open(filePath, "r");
+    if (handle == nil || handle <= 0) return nil;
+    var buf = file.read_all(handle);
+    file.close(handle);
+    if (buf == nil) return nil;
+    buf.seek(0);
+    return buf.readString(buf.length());
+}
+
+
+def strReplace(text, fromText, toText)
+{
+    if (text == nil) return nil;
+    if (fromText == nil || fromText == "") return text;
+
+    var out = "";
+    var i = 0;
+    var fromLen = len(fromText);
+    var textLen = len(text);
+
+    while (i < textLen)
+    {
+        var match = true;
+        if (i + fromLen > textLen) match = false;
+        if (match)
+        {
+            for (var j = 0; j < fromLen; j += 1)
+            {
+                if (text[i + j] != fromText[j])
+                {
+                    match = false;
+                    break;
+                }
+            }
+        }
+
+        if (match)
+        {
+            out = out + toText;
+            i = i + fromLen;
+        }
+        else
+        {
+            out = out + text[i];
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+
+def patchShaderSource(src)
+{
+    if (src == nil) return nil;
+    src = strReplace(src, "#version 300 es", "#version 330 core");
+    src = strReplace(src, "precision highp float;\r\n", "");
+    src = strReplace(src, "precision highp float;\n", "");
+    src = strReplace(src, "precision mediump float;\r\n", "");
+    src = strReplace(src, "precision mediump float;\n", "");
+    src = strReplace(src, "precision lowp float;\r\n", "");
+    src = strReplace(src, "precision lowp float;\n", "");
+    return src;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Water demo shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Water demo shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def loadTexture2D(path, flipY, repeatMode, withMipmaps)
+{
+    stbi_set_flip_vertically_on_load(flipY ? 1 : 0);
+    var (w, h, ch, pixels) = stbi_load(path, 4);
+    if (pixels == nil) return 0;
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (withMipmaps) glGenerateMipmap(GL_TEXTURE_2D);
+    if (withMipmaps) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    else glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def drawDebugTextureQuad(texId, x, y, w, h)
+{
+    if (texId <= 0) return;
+    rlSetTexture(texId);
+    rlColor4ub(255, 255, 255, 255);
+    rlBegin(RL_QUADS);
+    rlTexCoord2f(0.0, 1.0); rlVertex2f(x, y);
+    rlTexCoord2f(1.0, 1.0); rlVertex2f(x + w, y);
+    rlTexCoord2f(1.0, 0.0); rlVertex2f(x + w, y + h);
+    rlTexCoord2f(0.0, 0.0); rlVertex2f(x, y + h);
+    rlEnd();
+    rlSetTexture(0);
+}
+
+
+def drawDebugPanel(texId, x, y, w, h, title)
+{
+    DrawRectangle(x - 10, y - 30, w + 20, h + 40, Color(0, 0, 0, 170));
+    DrawRectangleLines(x - 10, y - 30, w + 20, h + 40, Color(220, 230, 240, 220));
+    drawDebugTextureQuad(texId, x, y, w, h);
+    DrawText(title, x, y - 24, 18, Color(240, 240, 240, 255));
+}
+
+
+def drawDebugMarker3D(x, y, z, halfSize, height)
+{
+    var y0 = y;
+    var y1 = y + height;
+
+    rlDisableTexture();
+    rlBegin(RL_TRIANGLES);
+
+    rlColor4ub(255, 140, 40, 255);
+    rlVertex3f(x - halfSize, y0, z);
+    rlVertex3f(x + halfSize, y0, z);
+    rlVertex3f(x + halfSize, y1, z);
+    rlVertex3f(x - halfSize, y0, z);
+    rlVertex3f(x + halfSize, y1, z);
+    rlVertex3f(x - halfSize, y1, z);
+
+    rlColor4ub(255, 210, 80, 255);
+    rlVertex3f(x, y0, z - halfSize);
+    rlVertex3f(x, y0, z + halfSize);
+    rlVertex3f(x, y1, z + halfSize);
+    rlVertex3f(x, y0, z - halfSize);
+    rlVertex3f(x, y1, z + halfSize);
+    rlVertex3f(x, y1, z - halfSize);
+
+    rlEnd();
+    rlEnableTexture(rlGetTextureIdDefault());
+}
+
+
+class SceneTarget
+{
+    var fbo;
+    var color;
+    var depth;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteTextures(self.depth);
+        if (self.color > 0) glDeleteTextures(self.color);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+def makeSceneTarget(width, height)
+{
+    var rt = SceneTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.color = glGenTextures();
+    rt.depth = glGenTextures();
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindTexture(GL_TEXTURE_2D, rt.depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.color, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, rt.depth, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("Water target incomplete: " + status);
+        rt.destroy();
+        return nil;
+    }
+
+    return rt;
+}
+
+
+class TerrainMesh
+{
+    var vao;
+    var vbo;
+    var ebo;
+    var texture;
+    var indexCount;
+    var width;
+    var height;
+    var sizeX;
+    var sizeZ;
+    var maxHeight;
+    var uvScale;
+    var heights;
+
+    def init()
+    {
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.texture = 0;
+        self.indexCount = 0;
+        self.width = 0;
+        self.height = 0;
+        self.sizeX = 0.0;
+        self.sizeZ = 0.0;
+        self.maxHeight = 0.0;
+        self.uvScale = 1.0;
+        self.heights = nil;
+    }
+
+    def destroy()
+    {
+        if (self.ebo > 0) glDeleteBuffers(self.ebo);
+        if (self.vbo > 0) glDeleteBuffers(self.vbo);
+        if (self.vao > 0) glDeleteVertexArrays(self.vao);
+        if (self.texture > 0) glDeleteTextures(self.texture);
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.texture = 0;
+        self.indexCount = 0;
+    }
+
+    def heightAtIndex(ix, iz)
+    {
+        if (ix < 0) ix = 0;
+        if (iz < 0) iz = 0;
+        if (ix >= self.width) ix = self.width - 1;
+        if (iz >= self.height) iz = self.height - 1;
+        return self.heights.get(iz * self.width + ix);
+    }
+
+    def load(heightPath, texturePath, sizeX, sizeZ, maxHeight, uvScale)
+    {
+        stbi_set_flip_vertically_on_load(0);
+        var (w, h, ch, pixels) = stbi_load(heightPath, 1);
+        if (pixels == nil || w < 2 || h < 2) return false;
+
+        self.width = w;
+        self.height = h;
+        self.sizeX = sizeX;
+        self.sizeZ = sizeZ;
+        self.maxHeight = maxHeight;
+        self.uvScale = uvScale;
+
+        self.heights = Float32Array(0);
+        self.heights.reserve(w * h);
+        for (var i = 0; i < w * h; i += 1)
+            self.heights.add((pixels[i] / 255.0) * maxHeight);
+
+        self.texture = loadTexture2D(texturePath, true, true, true);
+        if (self.texture <= 0) return false;
+
+        var verts = Float32Array(0);
+        verts.reserve(w * h * 8);
+        var halfX = sizeX * 0.5;
+        var halfZ = sizeZ * 0.5;
+        var invW = w - 1.0;
+        var invH = h - 1.0;
+
+        for (var iz = 0; iz < h; iz += 1)
+        {
+            for (var ix = 0; ix < w; ix += 1)
+            {
+                var fx = ix / invW;
+                var fz = iz / invH;
+                var px = fx * sizeX - halfX;
+                var pz = fz * sizeZ - halfZ;
+                var py = self.heightAtIndex(ix, iz);
+
+                var hL = self.heightAtIndex(ix - 1, iz);
+                var hR = self.heightAtIndex(ix + 1, iz);
+                var hD = self.heightAtIndex(ix, iz - 1);
+                var hU = self.heightAtIndex(ix, iz + 1);
+
+                var nx = hL - hR;
+                var ny = 2.0;
+                var nz = hD - hU;
+                var nl = sqrt(nx * nx + ny * ny + nz * nz);
+                if (nl < 0.0001) nl = 1.0;
+                nx = nx / nl;
+                ny = ny / nl;
+                nz = nz / nl;
+
+                verts.add(px, py, pz, nx, ny, nz, fx * uvScale, fz * uvScale);
+            }
+        }
+
+        var indices = Uint32Array(0);
+        indices.reserve((w - 1) * (h - 1) * 6);
+        for (var z = 0; z < h - 1; z += 1)
+        {
+            for (var x = 0; x < w - 1; x += 1)
+            {
+                var a = z * w + x;
+                var b = a + w;
+                indices.add(a, b, a + 1);
+                indices.add(b, b + 1, a + 1);
+            }
+        }
+
+        self.indexCount = indices.length();
+        self.vao = glGenVertexArrays();
+        self.vbo = glGenBuffers();
+        self.ebo = glGenBuffers();
+        glBindVertexArray(self.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.byteLength(), indices, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, 32, 0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, false, 32, 12);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, false, 32, 24);
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        return true;
+    }
+
+    def draw()
+    {
+        glBindTexture(GL_TEXTURE_2D, self.texture);
+        glBindVertexArray(self.vao);
+        glDrawElements(GL_TRIANGLES, self.indexCount, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    def getHeightAt(x, z)
+    {
+        var sx = (x / self.sizeX) + 0.5;
+        var sz = (z / self.sizeZ) + 0.5;
+        if (sx < 0.0) sx = 0.0;
+        if (sx > 1.0) sx = 1.0;
+        if (sz < 0.0) sz = 0.0;
+        if (sz > 1.0) sz = 1.0;
+
+        var gx = sx * (self.width - 1.0);
+        var gz = sz * (self.height - 1.0);
+        var x0 = int(floor(gx));
+        var z0 = int(floor(gz));
+        var x1 = min(x0 + 1, self.width - 1);
+        var z1 = min(z0 + 1, self.height - 1);
+        var tx = gx - x0;
+        var tz = gz - z0;
+
+        var h00 = self.heightAtIndex(x0, z0);
+        var h10 = self.heightAtIndex(x1, z0);
+        var h01 = self.heightAtIndex(x0, z1);
+        var h11 = self.heightAtIndex(x1, z1);
+        var h0 = h00 + (h10 - h00) * tx;
+        var h1 = h01 + (h11 - h01) * tx;
+        return h0 + (h1 - h0) * tz;
+    }
+}
+
+
+class WaterPlane
+{
+    var vao;
+    var vbo;
+    var ebo;
+    var indexCount;
+    var cells;
+
+    def init()
+    {
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.indexCount = 0;
+        self.cells = 0;
+    }
+
+    def destroy()
+    {
+        if (self.ebo > 0) glDeleteBuffers(self.ebo);
+        if (self.vbo > 0) glDeleteBuffers(self.vbo);
+        if (self.vao > 0) glDeleteVertexArrays(self.vao);
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.indexCount = 0;
+    }
+
+    def build(size, y, uvTile, cells)
+    {
+        self.cells = cells;
+        var hs = size * 0.5;
+        var verts = Float32Array(0);
+        var indices = Uint32Array(0);
+        var step = size / cells;
+        var uvStep = uvTile / cells;
+        var iz = 0;
+        var ix = 0;
+        var px = 0.0;
+        var pz = 0.0;
+        var u = 0.0;
+        var v = 0.0;
+        var row = cells + 1;
+        var a = 0;
+        var b = 0;
+
+        verts.reserve((cells + 1) * (cells + 1) * 8);
+        indices.reserve(cells * cells * 6);
+
+        for (iz = 0; iz <= cells; iz += 1)
+        {
+            pz = -hs + iz * step;
+            v = iz * uvStep;
+            for (ix = 0; ix <= cells; ix += 1)
+            {
+                px = -hs + ix * step;
+                u = ix * uvStep;
+                verts.add(px, y, pz, 0.0, 1.0, 0.0, u, v);
+            }
+        }
+
+        for (iz = 0; iz < cells; iz += 1)
+        {
+            for (ix = 0; ix < cells; ix += 1)
+            {
+                a = iz * row + ix;
+                b = a + row;
+                indices.add(a, b, a + 1);
+                indices.add(b, b + 1, a + 1);
+            }
+        }
+
+        self.indexCount = indices.length();
+        self.vao = glGenVertexArrays();
+        self.vbo = glGenBuffers();
+        self.ebo = glGenBuffers();
+        glBindVertexArray(self.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.byteLength(), indices, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, 32, 0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, false, 32, 12);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, false, 32, 24);
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    def draw()
+    {
+        glBindVertexArray(self.vao);
+        glDrawElements(GL_TRIANGLES, self.indexCount, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+    }
+}
+
+
+var terrainVsSrc = @"#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform vec4 uClipPlane;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 worldPos = uModel * vec4(aPos, 1.0);
+    vWorldPos = worldPos.xyz;
+    vNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    vUV = aUV;
+    gl_Position = uProj * uView * worldPos;
+    gl_ClipDistance[0] = dot(worldPos, uClipPlane);
+}
+";
+
+var terrainFsSrc = @"#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+
+uniform sampler2D uTex;
+uniform vec3 uLightDir;
+uniform vec3 uEye;
+uniform float uWaterLevel;
+
+out vec4 FragColor;
+
+void main()
+{
+    vec3 texCol = texture(uTex, vUV).rgb;
+    float slope = 1.0 - clamp(vNormal.y, 0.0, 1.0);
+    vec3 grass = texCol * vec3(0.78, 0.96, 0.78);
+    vec3 rock = texCol * vec3(0.68, 0.66, 0.63);
+    vec3 sand = texCol * vec3(1.06, 0.97, 0.78);
+    vec3 albedo = mix(grass, rock, smoothstep(0.18, 0.58, slope));
+    float shore = smoothstep(uWaterLevel - 1.5, uWaterLevel + 0.8, vWorldPos.y);
+    albedo = mix(sand, albedo, shore);
+
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-uLightDir);
+    vec3 V = normalize(uEye - vWorldPos);
+    vec3 H = normalize(L + V);
+    float diff = max(dot(N, L), 0.0);
+    float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.18;
+    float ambient = 0.25 + N.y * 0.12;
+    vec3 color = albedo * (ambient + diff * 0.85) + vec3(spec);
+    FragColor = vec4(color, 1.0);
+}
+";
+
+
+var heightmapPath = resolveAssetPath(
+    "assets/terrain-heightmap.png",
+    "../assets/terrain-heightmap.png",
+    "../../assets/terrain-heightmap.png"
+);
+var terrainTexPath = resolveAssetPath(
+    "assets/terrain-texture.jpg",
+    "../assets/terrain-texture.jpg",
+    "../../assets/terrain-texture.jpg"
+);
+var waterVsPath = resolveAssetPath(
+    "assets/shaders/water.ps",
+    "../assets/shaders/water.ps",
+    "../../assets/shaders/water.ps"
+);
+var waterFsPath = resolveAssetPath(
+    "assets/shaders/water.fs",
+    "../assets/shaders/water.fs",
+    "../../assets/shaders/water.fs"
+);
+var waterBumpPath = resolveAssetPath(
+    "assets/waterbump.png",
+    "../assets/waterbump.png",
+    "../../assets/waterbump.png"
+);
+var foamPath = resolveAssetPath(
+    "assets/foam.png",
+    "../assets/foam.png",
+    "../../assets/foam.png"
+);
+
+if (heightmapPath == nil || terrainTexPath == nil || waterVsPath == nil || waterFsPath == nil || waterBumpPath == nil || foamPath == nil)
+{
+    print("Water heightmap demo assets missing");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1440, 900, "BuGL - Heightmap Water Foam");
+SetTargetFPS(60);
+InitImGui();
+
+var terrainProg = linkProgram(terrainVsSrc, terrainFsSrc);
+var waterVsSrc = patchShaderSource(readTextFile(waterVsPath));
+var waterFsSrc = patchShaderSource(readTextFile(waterFsPath));
+var waterProg = linkProgram(waterVsSrc, waterFsSrc);
+if (terrainProg <= 0 || waterProg <= 0)
+{
+    if (terrainProg > 0) glDeleteProgram(terrainProg);
+    if (waterProg > 0) glDeleteProgram(waterProg);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var terrain = TerrainMesh();
+if (!terrain.load(heightmapPath, terrainTexPath, 220.0, 220.0, 24.0, 14.0))
+{
+    print("Failed to build terrain mesh");
+    glDeleteProgram(terrainProg);
+    glDeleteProgram(waterProg);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var waterLevel = 7.2;
+var waterCells = 96;
+var waterPlane = WaterPlane();
+waterPlane.build(180.0, waterLevel, 24.0, waterCells);
+
+var bumpTex = loadTexture2D(waterBumpPath, false, true, true);
+var foamTex = loadTexture2D(foamPath, false, true, true);
+if (bumpTex <= 0 || foamTex <= 0)
+{
+    print("Failed to load water textures");
+    if (bumpTex > 0) glDeleteTextures(bumpTex);
+    if (foamTex > 0) glDeleteTextures(foamTex);
+    waterPlane.destroy();
+    terrain.destroy();
+    glDeleteProgram(terrainProg);
+    glDeleteProgram(waterProg);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var screenW = GetScreenWidth();
+var screenH = GetScreenHeight();
+var refractionRt = makeSceneTarget(screenW, screenH);
+var reflectionRt = makeSceneTarget(screenW, screenH);
+if (refractionRt == nil || reflectionRt == nil)
+{
+    if (refractionRt != nil) refractionRt.destroy();
+    if (reflectionRt != nil) reflectionRt.destroy();
+    glDeleteTextures(bumpTex);
+    glDeleteTextures(foamTex);
+    waterPlane.destroy();
+    terrain.destroy();
+    glDeleteProgram(terrainProg);
+    glDeleteProgram(waterProg);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var tModel = glGetUniformLocation(terrainProg, "uModel");
+var tView = glGetUniformLocation(terrainProg, "uView");
+var tProj = glGetUniformLocation(terrainProg, "uProj");
+var tClipPlane = glGetUniformLocation(terrainProg, "uClipPlane");
+var tLightDir = glGetUniformLocation(terrainProg, "uLightDir");
+var tEye = glGetUniformLocation(terrainProg, "uEye");
+var tTex = glGetUniformLocation(terrainProg, "uTex");
+var tWaterLevel = glGetUniformLocation(terrainProg, "uWaterLevel");
+
+var wModel = glGetUniformLocation(waterProg, "model");
+var wView = glGetUniformLocation(waterProg, "view");
+var wProj = glGetUniformLocation(waterProg, "projection");
+var wCamPos = glGetUniformLocation(waterProg, "cameraPos");
+var wCamPosFrag = glGetUniformLocation(waterProg, "u_cameraPosition");
+var wReflect = glGetUniformLocation(waterProg, "reflectionTexture");
+var wRefract = glGetUniformLocation(waterProg, "refractionTexture");
+var wRefractDepth = glGetUniformLocation(waterProg, "refractionDepth");
+var wBump = glGetUniformLocation(waterProg, "waterBump");
+var wFoam = glGetUniformLocation(waterProg, "foamTexture");
+var wWaveHeight = glGetUniformLocation(waterProg, "u_waveHeight");
+var wWaterColor = glGetUniformLocation(waterProg, "u_waterColor");
+var wColorBlend = glGetUniformLocation(waterProg, "u_colorBlendFactor");
+var wTime = glGetUniformLocation(waterProg, "u_time");
+var wMult = glGetUniformLocation(waterProg, "mult");
+var wFoamRange = glGetUniformLocation(waterProg, "u_foamRange");
+var wFoamScale = glGetUniformLocation(waterProg, "u_foamScale");
+var wFoamSpeed = glGetUniformLocation(waterProg, "u_foamSpeed");
+var wFoamIntensity = glGetUniformLocation(waterProg, "u_foamIntensity");
+var wWaveLength = glGetUniformLocation(waterProg, "u_waveLength");
+var wWindForce = glGetUniformLocation(waterProg, "u_windForce");
+var wWindDirection = glGetUniformLocation(waterProg, "u_windDirection");
+var wWaveSpeed = glGetUniformLocation(waterProg, "u_waveSpeed");
+var wNearPlane = glGetUniformLocation(waterProg, "u_nearPlane");
+var wFarPlane = glGetUniformLocation(waterProg, "u_farPlane");
+var wDepthDiscardCutoff = glGetUniformLocation(waterProg, "u_depthDiscardCutoff");
+var wFoamEnabled = glGetUniformLocation(waterProg, "u_foamEnabled");
+var wNumWaves = glGetUniformLocation(waterProg, "u_numWaves");
+var wWave1 = glGetUniformLocation(waterProg, "u_wave1");
+var wWave2 = glGetUniformLocation(waterProg, "u_wave2");
+var wWave3 = glGetUniformLocation(waterProg, "u_wave3");
+var wWave4 = glGetUniformLocation(waterProg, "u_wave4");
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var reflectionViewBuf = @(16, TYPE_FLOAT);
+var identityMat = MatrixIdentity();
+MatrixWriteBuffer(identityMat, modelBuf);
+
+var eyeX = 0.0;
+var eyeZ = 58.0;
+var eyeY = terrain.getHeightAt(eyeX, eyeZ) + 10.0;
+var yaw = -90.0;
+var pitch = -18.0;
+var camNear = 0.1;
+var camFar = 600.0;
+var autoGround = true;
+var hoverHeight = 7.0;
+var showUi = true;
+var showDebugTargets = true;
+var wireframe = false;
+var reflectionDebugMode = 0;
+var timeSec = 0.0;
+
+var waveHeight = 0.65;
+var waveLength = 14.0;
+var waveSpeed = 1.0;
+var windForce = 0.06;
+var windDirX = 0.85;
+var windDirY = 0.28;
+var colorBlend = 0.24;
+var waterColorR = 0.05;
+var waterColorG = 0.20;
+var waterColorB = 0.31;
+var waterColorA = 1.0;
+var foamRange = 2.6;
+var foamScale = 0.16;
+var foamSpeed = 0.08;
+var foamIntensity = 0.9;
+var foamEnabled = true;
+var depthRange = 8.0;
+var depthDiscardCutoff = 0.02;
+var markerX = 0.0;
+var markerZ = 0.0;
+var markerY = waterLevel + 1.0;
+var markerHalfSize = 2.5;
+var markerHeight = 18.0;
+
+var worldUp = Vector3(0.0, 1.0, 0.0);
+var camEye = Vector3(0.0, 0.0, 0.0);
+var camTarget = Vector3(0.0, 0.0, 0.0);
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+    timeSec += dt;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_F1)) showDebugTargets = !showDebugTargets;
+    if (IsKeyPressed(KEY_F2))
+    {
+        reflectionDebugMode += 1;
+        if (reflectionDebugMode > 2) reflectionDebugMode = 0;
+    }
+    if (IsKeyPressed(KEY_P))
+    {
+        wireframe = !wireframe;
+        if (wireframe) glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        else glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    }
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw += mdx * 0.12;
+        pitch -= mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx = fx / fl;
+        fy = fy / fl;
+        fz = fz / fl;
+    }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001)
+    {
+        rx = rx / rl;
+        rz = rz / rl;
+    }
+
+    var viewRightX = fy * worldUp.z - fz * worldUp.y;
+    var viewRightY = fz * worldUp.x - fx * worldUp.z;
+    var viewRightZ = fx * worldUp.y - fy * worldUp.x;
+    var viewRightLen = sqrt(viewRightX * viewRightX + viewRightY * viewRightY + viewRightZ * viewRightZ);
+    if (viewRightLen < 0.0001) viewRightLen = 1.0;
+    viewRightX = viewRightX / viewRightLen;
+    viewRightY = viewRightY / viewRightLen;
+    viewRightZ = viewRightZ / viewRightLen;
+
+    var upX = viewRightY * fz - viewRightZ * fy;
+    var upY = viewRightZ * fx - viewRightX * fz;
+    var upZ = viewRightX * fy - viewRightY * fx;
+    var upl = sqrt(upX * upX + upY * upY + upZ * upZ);
+    if (upl > 0.0001)
+    {
+        upX = upX / upl;
+        upY = upY / upl;
+        upZ = upZ / upl;
+    }
+
+    var move = 18.0 * dt;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) move = move * 2.5;
+    if (IsKeyDown(KEY_W)) { eyeX += fx * move; eyeY += fy * move; eyeZ += fz * move; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * move; eyeY -= fy * move; eyeZ -= fz * move; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * move; eyeZ -= rz * move; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * move; eyeZ += rz * move; }
+    if (!autoGround)
+    {
+        if (IsKeyDown(KEY_Q)) eyeY -= move;
+        if (IsKeyDown(KEY_E)) eyeY += move;
+    }
+
+    if (autoGround)
+    {
+        var groundY = terrain.getHeightAt(eyeX, eyeZ) + hoverHeight;
+        if (eyeY < groundY) eyeY = groundY;
+    }
+
+    var nextScreenW = GetScreenWidth();
+    var nextScreenH = GetScreenHeight();
+    if (nextScreenW != screenW || nextScreenH != screenH)
+    {
+        var nextRefraction = makeSceneTarget(nextScreenW, nextScreenH);
+        var nextReflection = makeSceneTarget(nextScreenW, nextScreenH);
+        if (nextRefraction != nil && nextReflection != nil)
+        {
+            refractionRt.destroy();
+            reflectionRt.destroy();
+            refractionRt = nextRefraction;
+            reflectionRt = nextReflection;
+            screenW = nextScreenW;
+            screenH = nextScreenH;
+        }
+        else
+        {
+            if (nextRefraction != nil) nextRefraction.destroy();
+            if (nextReflection != nil) nextReflection.destroy();
+        }
+    }
+
+    camEye.x = eyeX; camEye.y = eyeY; camEye.z = eyeZ;
+    camTarget.x = eyeX + fx; camTarget.y = eyeY + fy; camTarget.z = eyeZ + fz;
+    var aspect = screenW / max(screenH, 1);
+    var view = MatrixLookAt(camEye, camTarget, worldUp);
+    var proj = MatrixPerspective(60.0 * PI / 180.0, aspect, camNear, camFar);
+
+    var reflectedEye = Vector3(eyeX, waterLevel * 2.0 - eyeY, eyeZ);
+    var reflectedTarget = Vector3(camTarget.x, waterLevel * 2.0 - camTarget.y, camTarget.z);
+    var reflectionView = MatrixLookAt(reflectedEye, reflectedTarget, worldUp);
+
+    if (reflectionDebugMode == 1)
+    {
+        reflectedEye = camEye;
+        reflectionView = view;
+    }
+
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    MatrixWriteBuffer(reflectionView, reflectionViewBuf);
+
+    rlDrawRenderBatchActive();
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_CLIP_DISTANCE0);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, refractionRt.fbo);
+    rlViewport(0, 0, refractionRt.width, refractionRt.height);
+    glClearColor(0.53, 0.72, 0.90, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(terrainProg);
+    if (tModel >= 0) glUniformMatrix4fv(tModel, 1, false, modelBuf);
+    if (tView >= 0) glUniformMatrix4fv(tView, 1, false, viewBuf);
+    if (tProj >= 0) glUniformMatrix4fv(tProj, 1, false, projBuf);
+    if (tClipPlane >= 0) glUniform4f(tClipPlane, 0.0, -1.0, 0.0, waterLevel + 0.05);
+    if (tLightDir >= 0) glUniform3f(tLightDir, -0.45, 0.92, 0.20);
+    if (tEye >= 0) glUniform3f(tEye, eyeX, eyeY, eyeZ);
+    if (tTex >= 0) glUniform1i(tTex, 0);
+    if (tWaterLevel >= 0) glUniform1f(tWaterLevel, waterLevel);
+    glActiveTexture(GL_TEXTURE0);
+    terrain.draw();
+    glUseProgram(0);
+    rlSetMatrixProjection(proj);
+    rlSetMatrixModelview(view);
+    drawDebugMarker3D(markerX, markerY, markerZ, markerHalfSize, markerHeight);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, reflectionRt.fbo);
+    rlViewport(0, 0, reflectionRt.width, reflectionRt.height);
+    glClearColor(0.45, 0.66, 0.88, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(terrainProg);
+    if (tModel >= 0) glUniformMatrix4fv(tModel, 1, false, modelBuf);
+    if (tView >= 0) glUniformMatrix4fv(tView, 1, false, reflectionViewBuf);
+    if (tProj >= 0) glUniformMatrix4fv(tProj, 1, false, projBuf);
+    if (tClipPlane >= 0)
+    {
+        if (reflectionDebugMode == 2) glUniform4f(tClipPlane, 0.0, 1.0, 0.0, 100000.0);
+        else glUniform4f(tClipPlane, 0.0, 1.0, 0.0, -waterLevel + 0.05);
+    }
+    if (tLightDir >= 0) glUniform3f(tLightDir, -0.45, 0.92, 0.20);
+    if (tEye >= 0) glUniform3f(tEye, reflectedEye.x, reflectedEye.y, reflectedEye.z);
+    if (tTex >= 0) glUniform1i(tTex, 0);
+    if (tWaterLevel >= 0) glUniform1f(tWaterLevel, waterLevel);
+    glActiveTexture(GL_TEXTURE0);
+    terrain.draw();
+    glUseProgram(0);
+    rlSetMatrixProjection(proj);
+    rlSetMatrixModelview(reflectionView);
+    drawDebugMarker3D(markerX, markerY, markerZ, markerHalfSize, markerHeight);
+
+    glDisable(GL_CLIP_DISTANCE0);
+
+    rlDisableFramebuffer();
+    rlViewport(0, 0, screenW, screenH);
+
+    BeginDrawing();
+    ClearBackground(Color(120, 170, 220, 255));
+    rlDrawRenderBatchActive();
+
+    rlDisableFramebuffer();
+    rlViewport(0, 0, screenW, screenH);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+
+    glUseProgram(terrainProg);
+    if (tModel >= 0) glUniformMatrix4fv(tModel, 1, false, modelBuf);
+    if (tView >= 0) glUniformMatrix4fv(tView, 1, false, viewBuf);
+    if (tProj >= 0) glUniformMatrix4fv(tProj, 1, false, projBuf);
+    if (tClipPlane >= 0) glUniform4f(tClipPlane, 0.0, 1.0, 0.0, 100000.0);
+    if (tLightDir >= 0) glUniform3f(tLightDir, -0.45, 0.92, 0.20);
+    if (tEye >= 0) glUniform3f(tEye, eyeX, eyeY, eyeZ);
+    if (tTex >= 0) glUniform1i(tTex, 0);
+    if (tWaterLevel >= 0) glUniform1f(tWaterLevel, waterLevel);
+    glActiveTexture(GL_TEXTURE0);
+    terrain.draw();
+    glUseProgram(0);
+    rlSetMatrixProjection(proj);
+    rlSetMatrixModelview(view);
+    drawDebugMarker3D(markerX, markerY, markerZ, markerHalfSize, markerHeight);
+
+    glUseProgram(waterProg);
+    if (wModel >= 0) glUniformMatrix4fv(wModel, 1, false, modelBuf);
+    if (wView >= 0) glUniformMatrix4fv(wView, 1, false, viewBuf);
+    if (wProj >= 0) glUniformMatrix4fv(wProj, 1, false, projBuf);
+    if (wCamPos >= 0) glUniform3f(wCamPos, eyeX, eyeY, eyeZ);
+    if (wCamPosFrag >= 0) glUniform3f(wCamPosFrag, eyeX, eyeY, eyeZ);
+    if (wWaveHeight >= 0) glUniform1f(wWaveHeight, waveHeight);
+    if (wWaterColor >= 0) glUniform4f(wWaterColor, waterColorR, waterColorG, waterColorB, waterColorA);
+    if (wColorBlend >= 0) glUniform1f(wColorBlend, colorBlend);
+    if (wTime >= 0) glUniform1f(wTime, timeSec);
+    if (wMult >= 0) glUniform1f(wMult, depthRange);
+    if (wFoamRange >= 0) glUniform1f(wFoamRange, foamRange);
+    if (wFoamScale >= 0) glUniform1f(wFoamScale, foamScale);
+    if (wFoamSpeed >= 0) glUniform1f(wFoamSpeed, foamSpeed);
+    if (wFoamIntensity >= 0) glUniform1f(wFoamIntensity, foamIntensity);
+    if (wWaveLength >= 0) glUniform1f(wWaveLength, waveLength);
+    if (wWindForce >= 0) glUniform1f(wWindForce, windForce);
+    if (wWindDirection >= 0) glUniform2f(wWindDirection, windDirX, windDirY);
+    if (wWaveSpeed >= 0) glUniform1f(wWaveSpeed, waveSpeed);
+    if (wNearPlane >= 0) glUniform1f(wNearPlane, camNear);
+    if (wFarPlane >= 0) glUniform1f(wFarPlane, camFar);
+    if (wDepthDiscardCutoff >= 0) glUniform1f(wDepthDiscardCutoff, depthDiscardCutoff);
+    if (wFoamEnabled >= 0) glUniform1i(wFoamEnabled, foamEnabled ? 1 : 0);
+    if (wNumWaves >= 0) glUniform1i(wNumWaves, 4);
+    if (wWave1 >= 0) glUniform4f(wWave1, 1.0, 0.2, 0.20, 18.0);
+    if (wWave2 >= 0) glUniform4f(wWave2, -0.6, 0.8, 0.12, 11.0);
+    if (wWave3 >= 0) glUniform4f(wWave3, 0.2, 1.0, 0.08, 7.0);
+    if (wWave4 >= 0) glUniform4f(wWave4, -1.0, 0.1, 0.06, 4.0);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, reflectionRt.color);
+    if (wReflect >= 0) glUniform1i(wReflect, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, refractionRt.color);
+    if (wRefract >= 0) glUniform1i(wRefract, 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, refractionRt.depth);
+    if (wRefractDepth >= 0) glUniform1i(wRefractDepth, 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, bumpTex);
+    if (wBump >= 0) glUniform1i(wBump, 3);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, foamTex);
+    if (wFoam >= 0) glUniform1i(wFoam, 4);
+    waterPlane.draw();
+    glUseProgram(0);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
+
+    rlDisableVertexArray();
+    rlDisableVertexBuffer();
+    rlDisableVertexBufferElement();
+    rlSetTexture(0);
+    rlViewport(0, 0, screenW, screenH);
+    rlMatrixMode(RL_PROJECTION);
+    rlLoadIdentity();
+    rlOrtho(0, screenW, screenH, 0, 0.0, 1.0);
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+
+    DrawRectangle(16, 16, 920, 100, Color(0, 0, 0, 140));
+    DrawText("Heightmap Water Foam  RMB look | WASD move | SHIFT faster | TAB UI | F1 debug | F2 reflection mode | P wireframe", 28, 28, 22, Color(240, 240, 240, 255));
+    DrawText("Heightmap + reflection/refraction + water.ps/water.fs + foam.png", 28, 58, 18, Color(180, 230, 255, 255));
+    var reflectionModeLabel = "normal";
+    if (reflectionDebugMode == 1) reflectionModeLabel = "main-view";
+    elif (reflectionDebugMode == 2) reflectionModeLabel = "no-clip";
+    DrawText("Eye: " + int(eyeX * 100.0) / 100.0 + ", " + int(eyeY * 100.0) / 100.0 + ", " + int(eyeZ * 100.0) / 100.0 + "  FPS: " + GetFPS() + "  Reflection: " + reflectionModeLabel, 28, 82, 18, Color(220, 255, 200, 255));
+
+    if (showDebugTargets)
+    {
+        var dbgW = 280;
+        var dbgH = 158;
+        var dbgY = 18;
+        var dbgX0 = screenW - dbgW * 2 - 44;
+        var dbgX1 = screenW - dbgW - 18;
+        drawDebugPanel(reflectionRt.color, dbgX0, dbgY, dbgW, dbgH, "Reflection");
+        drawDebugPanel(refractionRt.color, dbgX1, dbgY, dbgW, dbgH, "Refraction");
+    }
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = Begin("Water Heightmap");
+        if (panel)
+        {
+            Text("Start simple: terrain heightmap + water foam");
+            var (_, nextGround) = Checkbox("Auto ground", autoGround);
+            autoGround = nextGround;
+            var (_, nextDebugTargets) = Checkbox("Show debug targets", showDebugTargets);
+            showDebugTargets = nextDebugTargets;
+            var (_, nextHover) = SliderFloat("Hover", hoverHeight, 2.0, 18.0);
+            hoverHeight = nextHover;
+            var (_, nextWaveHeight) = SliderFloat("Wave height", waveHeight, 0.05, 1.8);
+            waveHeight = nextWaveHeight;
+            var (_, nextWaveLength) = SliderFloat("Wave length", waveLength, 4.0, 32.0);
+            waveLength = nextWaveLength;
+            var (_, nextWindForce) = SliderFloat("Wind force", windForce, 0.0, 0.2);
+            windForce = nextWindForce;
+            var (_, nextBlend) = SliderFloat("Water blend", colorBlend, 0.0, 1.0);
+            colorBlend = nextBlend;
+            var (_, nextDepthRange) = SliderFloat("Depth range", depthRange, 1.0, 20.0);
+            depthRange = nextDepthRange;
+            var (_, nextFoamRange) = SliderFloat("Foam range", foamRange, 0.2, 6.0);
+            foamRange = nextFoamRange;
+            var (_, nextFoamScale) = SliderFloat("Foam scale", foamScale, 0.02, 0.6);
+            foamScale = nextFoamScale;
+            var (_, nextFoamSpeed) = SliderFloat("Foam speed", foamSpeed, 0.0, 0.4);
+            foamSpeed = nextFoamSpeed;
+            var (_, nextFoamIntensity) = SliderFloat("Foam intensity", foamIntensity, 0.0, 2.0);
+            foamIntensity = nextFoamIntensity;
+            var (_, nextFoamEnabled) = Checkbox("Foam enabled", foamEnabled);
+            foamEnabled = nextFoamEnabled;
+            var (_, nextDepthDiscard) = SliderFloat("Depth discard", depthDiscardCutoff, 0.0, 0.2);
+            depthDiscardCutoff = nextDepthDiscard;
+            var (_, nextR) = SliderFloat("Water R", waterColorR, 0.0, 1.0);
+            waterColorR = nextR;
+            var (_, nextG) = SliderFloat("Water G", waterColorG, 0.0, 1.0);
+            waterColorG = nextG;
+            var (_, nextB) = SliderFloat("Water B", waterColorB, 0.0, 1.0);
+            waterColorB = nextB;
+            Text("Terrain tris: " + int(terrain.indexCount / 3));
+            Text("Water shaders: water.ps + water.fs");
+        }
+        End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+if (wireframe) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+refractionRt.destroy();
+reflectionRt.destroy();
+glDeleteTextures(bumpTex);
+glDeleteTextures(foamTex);
+waterPlane.destroy();
+terrain.destroy();
+glDeleteProgram(terrainProg);
+glDeleteProgram(waterProg);
+ShutdownImGui();
+CloseWindow();

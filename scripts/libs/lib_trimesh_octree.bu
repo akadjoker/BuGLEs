@@ -1,4 +1,7 @@
- 
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
 using math;
 
 class TriangleData
@@ -530,73 +533,65 @@ class TriMeshOctree
 
     def draw()
     {
-        glDisable(GL_TEXTURE_2D);
-        glLineWidth(1.0);
-
-        glBegin(GL_LINES);
+        rlSetTexture(0);
+        rlBegin(RL_LINES);
         for (var i = 0; i < len(self.tris); i += 1)
         {
             var tp = self.tris[i];
-            glColor3f(0.0, 1.0, 0.0);
-            glVertex3f(tp.ax, tp.ay, tp.az); glVertex3f(tp.bx, tp.by, tp.bz);
-            glVertex3f(tp.bx, tp.by, tp.bz); glVertex3f(tp.cx, tp.cy, tp.cz);
-            glVertex3f(tp.cx, tp.cy, tp.cz); glVertex3f(tp.ax, tp.ay, tp.az);
+            rlColor4f(0.0, 1.0, 0.0, 1.0);
+            rlVertex3f(tp.ax, tp.ay, tp.az); rlVertex3f(tp.bx, tp.by, tp.bz);
+            rlVertex3f(tp.bx, tp.by, tp.bz); rlVertex3f(tp.cx, tp.cy, tp.cz);
+            rlVertex3f(tp.cx, tp.cy, tp.cz); rlVertex3f(tp.ax, tp.ay, tp.az);
         }
-        glEnd();
-
-        glEnable(GL_TEXTURE_2D);
+        rlEnd();
     }
 
     def drawLastHit()
     {
         if (self._lastHitTri < 0 || self._lastHitTri >= len(self.tris)) return;
-
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_DEPTH_TEST);
+        rlSetTexture(0);
+        rlDisableDepthTest();
 
         var tp = self.tris[self._lastHitTri];
 
-        glColor4f(1.0, 0.0, 0.0, 0.8);
-        glBegin(GL_TRIANGLES);
-        glVertex3f(tp.ax, tp.ay, tp.az);
-        glVertex3f(tp.bx, tp.by, tp.bz);
-        glVertex3f(tp.cx, tp.cy, tp.cz);
-        glEnd();
+        rlColor4f(1.0, 0.0, 0.0, 0.8);
+        rlBegin(RL_TRIANGLES);
+        rlVertex3f(tp.ax, tp.ay, tp.az);
+        rlVertex3f(tp.bx, tp.by, tp.bz);
+        rlVertex3f(tp.cx, tp.cy, tp.cz);
+        rlEnd();
 
         var cx = (tp.ax + tp.bx + tp.cx) / 3.0;
         var cy = (tp.ay + tp.by + tp.cy) / 3.0;
         var cz = (tp.az + tp.bz + tp.cz) / 3.0;
-        glLineWidth(3.0);
-        glColor3f(1.0, 1.0, 0.0);
-        glBegin(GL_LINES);
-        glVertex3f(cx, cy, cz);
-        glVertex3f(cx + tp.nx * 0.5, cy + tp.ny * 0.5, cz + tp.nz * 0.5);
-        glEnd();
-        glLineWidth(1.0);
+        rlColor4f(1.0, 1.0, 0.0, 1.0);
+        rlBegin(RL_LINES);
+        rlVertex3f(cx, cy, cz);
+        rlVertex3f(cx + tp.nx * 0.5, cy + tp.ny * 0.5, cz + tp.nz * 0.5);
+        rlEnd();
 
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_TEXTURE_2D);
+        rlEnableDepthTest();
     }
 
     def _drawBounds(minX, minY, minZ, maxX, maxY, maxZ, r, g, b)
     {
-        glColor3f(r, g, b);
-        glBegin(GL_LINES);
-        glVertex3f(minX, minY, minZ); glVertex3f(maxX, minY, minZ);
-        glVertex3f(maxX, minY, minZ); glVertex3f(maxX, minY, maxZ);
-        glVertex3f(maxX, minY, maxZ); glVertex3f(minX, minY, maxZ);
-        glVertex3f(minX, minY, maxZ); glVertex3f(minX, minY, minZ);
+        rlColor4f(r, g, b, 1.0);
+        rlBegin(RL_LINES);
+        rlVertex3f(minX, minY, minZ); rlVertex3f(maxX, minY, minZ);
+        rlVertex3f(maxX, minY, minZ); rlVertex3f(maxX, minY, maxZ);
+        rlVertex3f(maxX, minY, maxZ); rlVertex3f(minX, minY, maxZ);
+        rlVertex3f(minX, minY, maxZ); rlVertex3f(minX, minY, minZ);
 
-        glVertex3f(minX, maxY, minZ); glVertex3f(maxX, maxY, minZ);
-        glVertex3f(maxX, maxY, minZ); glVertex3f(maxX, maxY, maxZ);
-        glVertex3f(maxX, maxY, maxZ); glVertex3f(minX, maxY, maxZ);
-        glVertex3f(minX, maxY, maxZ); glVertex3f(minX, maxY, minZ);
+        rlVertex3f(minX, maxY, minZ); rlVertex3f(maxX, maxY, minZ);
+        rlVertex3f(maxX, maxY, minZ); rlVertex3f(maxX, maxY, maxZ);
+        rlVertex3f(maxX, maxY, maxZ); rlVertex3f(minX, maxY, maxZ);
+        rlVertex3f(minX, maxY, maxZ); rlVertex3f(minX, maxY, minZ);
 
-        glVertex3f(minX, minY, minZ); glVertex3f(minX, maxY, minZ);
-        glVertex3f(maxX, minY, minZ); glVertex3f(maxX, maxY, minZ);
-        glVertex3f(maxX, minY, maxZ); glVertex3f(maxX, maxY, maxZ);
-        glVertex3f(minX, minY, maxZ); glVertex3f(minX, maxY, maxZ);
-        glEnd();
+        rlVertex3f(minX, minY, minZ); rlVertex3f(minX, maxY, minZ);
+        rlVertex3f(maxX, minY, minZ); rlVertex3f(maxX, maxY, minZ);
+        rlVertex3f(maxX, minY, maxZ); rlVertex3f(maxX, maxY, maxZ);
+        rlVertex3f(minX, minY, maxZ); rlVertex3f(minX, maxY, maxZ);
+        rlEnd();
     }
 
     def drawOctree(depthMax, visitedOnly)
@@ -604,9 +599,8 @@ class TriMeshOctree
         if (!self.built) self.build();
         if (len(self.tris) <= 0) return;
 
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_DEPTH_TEST);
-        glLineWidth(1.0);
+        rlSetTexture(0);
+        rlDisableDepthTest();
 
         // Placeholder until the real octree returns.
         self._drawBounds(
@@ -615,8 +609,7 @@ class TriMeshOctree
             0.2, 0.9, 1.0
         );
 
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_TEXTURE_2D);
+        rlEnableDepthTest();
     }
 
     def stats()

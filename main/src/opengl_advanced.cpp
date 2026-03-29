@@ -888,6 +888,36 @@ namespace Bindings
 #ifdef GL_STENCIL
         module.addInt("GL_STENCIL", GL_STENCIL);
 #endif
+#ifdef GL_CLIP_DISTANCE0
+        module.addInt("GL_CLIP_DISTANCE0", GL_CLIP_DISTANCE0);
+#endif
+
+#ifdef GL_CLIP_DISTANCE1
+        module.addInt("GL_CLIP_DISTANCE1", GL_CLIP_DISTANCE1);
+#endif
+
+#ifdef GL_CLIP_DISTANCE2
+        module.addInt("GL_CLIP_DISTANCE2", GL_CLIP_DISTANCE2);
+#endif
+
+#ifdef GL_CLIP_DISTANCE3
+        module.addInt("GL_CLIP_DISTANCE3", GL_CLIP_DISTANCE3);
+#endif
+#ifdef GL_CLIP_DISTANCE4
+        module.addInt("GL_CLIP_DISTANCE4", GL_CLIP_DISTANCE4);
+#endif
+#ifdef GL_CLIP_DISTANCE5
+        module.addInt("GL_CLIP_DISTANCE5", GL_CLIP_DISTANCE5);
+#endif
+
+#ifdef GL_CLIP_DISTANCE6
+        module.addInt("GL_CLIP_DISTANCE6", GL_CLIP_DISTANCE6);
+#endif
+#ifdef GL_CLIP_DISTANCE7
+        module.addInt("GL_CLIP_DISTANCE7", GL_CLIP_DISTANCE7);
+#endif
+
+
     }
 }
 #endif // !GRAPHICS_API_OPENGL_ES2 && !GRAPHICS_API_OPENGL_ES3

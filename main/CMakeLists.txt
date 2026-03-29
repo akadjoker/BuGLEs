@@ -90,7 +90,10 @@ list(FILTER MODULE_SOURCES EXCLUDE REGEX "plugin\\.cpp$")
 
 add_executable(main ${SOURCES} ${RAY_SOURCES} ${MODULE_SOURCES})
 
-set_target_properties(main PROPERTIES OUTPUT_NAME "bugl")
+set_target_properties(main PROPERTIES
+    OUTPUT_NAME "bugl"
+    OUTPUT_NAME_DEBUG "dbugl"
+)
 target_include_directories(main PUBLIC include src 
     ${CMAKE_SOURCE_DIR}/vendor/imgui
     ${CMAKE_SOURCE_DIR}/vendor/raylib/src

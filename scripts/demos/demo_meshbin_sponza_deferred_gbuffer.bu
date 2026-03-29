@@ -1,0 +1,871 @@
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import ImGui;
+using ImGui;
+
+include "../libs/lib_meshbin.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Deferred shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Deferred shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def wrapIndex(i, count)
+{
+    if (count <= 0) return 0;
+    while (i >= count) i -= count;
+    while (i < 0) i += count;
+    return i;
+}
+
+
+def drawDebugTextureQuad(texId, x, y, w, h)
+{
+    if (texId <= 0) return;
+    rlSetTexture(texId);
+    rlColor4ub(255, 255, 255, 255);
+    rlBegin(RL_QUADS);
+    rlTexCoord2f(0.0, 1.0); rlVertex2f(x, y);
+    rlTexCoord2f(1.0, 1.0); rlVertex2f(x + w, y);
+    rlTexCoord2f(1.0, 0.0); rlVertex2f(x + w, y + h);
+    rlTexCoord2f(0.0, 0.0); rlVertex2f(x, y + h);
+    rlEnd();
+    rlSetTexture(0);
+}
+
+
+def drawDebugPanel(texId, x, y, w, h, title)
+{
+    DrawRectangle(x - 10, y - 28, w + 20, h + 38, Color(0, 0, 0, 170));
+    DrawRectangleLines(x - 10, y - 28, w + 20, h + 38, Color(220, 230, 240, 220));
+    drawDebugTextureQuad(texId, x, y, w, h);
+    DrawText(title, x, y - 22, 18, Color(240, 240, 240, 255));
+}
+
+
+def drawCross3D(x, y, z, size, r, g, b, a)
+{
+    rlBegin(RL_LINES);
+    rlColor4ub(r, g, b, a);
+    rlVertex3f(x - size, y, z); rlVertex3f(x + size, y, z);
+    rlVertex3f(x, y - size, z); rlVertex3f(x, y + size, z);
+    rlVertex3f(x, y, z - size); rlVertex3f(x, y, z + size);
+    rlEnd();
+}
+
+
+def drawTracer3D(x, y, z, dx, dy, dz, length, r, g, b, a)
+{
+    rlBegin(RL_LINES);
+    rlColor4ub(r, g, b, a);
+    rlVertex3f(x, y, z);
+    rlVertex3f(x - dx * length, y - dy * length, z - dz * length);
+    rlEnd();
+}
+
+
+class BulletLight
+{
+    var x;
+    var y;
+    var z;
+    var dx;
+    var dy;
+    var dz;
+    var speed;
+    var ttl;
+    var maxDistance;
+    var traveled;
+    var radius;
+    var r;
+    var g;
+    var b;
+
+    def init()
+    {
+        self.x = 0.0;
+        self.y = 0.0;
+        self.z = 0.0;
+        self.dx = 0.0;
+        self.dy = 0.0;
+        self.dz = 1.0;
+        self.speed = 0.0;
+        self.ttl = 0.0;
+        self.maxDistance = 0.0;
+        self.traveled = 0.0;
+        self.radius = 0.2;
+        self.r = 255;
+        self.g = 220;
+        self.b = 120;
+    }
+}
+
+
+class GBufferTarget
+{
+    var fbo;
+    var posTex;
+    var normalTex;
+    var albedoTex;
+    var depth;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.posTex = 0;
+        self.normalTex = 0;
+        self.albedoTex = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteRenderbuffers(self.depth);
+        if (self.posTex > 0) glDeleteTextures(self.posTex);
+        if (self.normalTex > 0) glDeleteTextures(self.normalTex);
+        if (self.albedoTex > 0) glDeleteTextures(self.albedoTex);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.posTex = 0;
+        self.normalTex = 0;
+        self.albedoTex = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+def makeGBuffer(width, height)
+{
+    var rt = GBufferTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.posTex = glGenTextures();
+    rt.normalTex = glGenTextures();
+    rt.albedoTex = glGenTextures();
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+
+    glBindTexture(GL_TEXTURE_2D, rt.posTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.posTex, 0);
+
+    glBindTexture(GL_TEXTURE_2D, rt.normalTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, rt.normalTex, 0);
+
+    glBindTexture(GL_TEXTURE_2D, rt.albedoTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, rt.albedoTex, 0);
+
+    rt.depth = glGenRenderbuffers();
+    glBindRenderbuffer(GL_RENDERBUFFER, rt.depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt.depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    glDrawBuffers(3, [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("Deferred GBuffer incomplete: " + status);
+        rt.destroy();
+        return nil;
+    }
+
+    return rt;
+}
+
+
+def drawFullscreenQuad(vao)
+{
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+
+var meshPath = resolveAssetPath(
+    "assets/sponza/sponza.h3d",
+    "../assets/sponza/sponza.h3d",
+    "../../assets/sponza/sponza.h3d"
+);
+
+if (meshPath == nil)
+{
+    print("sponza.h3d not found");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1600, 900, "BuGL - Sponza Deferred GBuffer");
+SetTargetFPS(60);
+InitImGui();
+
+var cam = Camera3D();
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 60.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var eyeX = 0.0;
+var eyeY = 120.0;
+var eyeZ = 260.0;
+var yaw = -90.0;
+var pitch = -18.0;
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load meshbin: " + meshPath);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 300.0;
+var targetRadius = 420.0;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 40.0) sceneRadius = 40.0;
+eyeX = focusX + sceneRadius * 0.8;
+eyeY = focusY + sceneRadius * 0.35;
+eyeZ = focusZ + sceneRadius * 0.8;
+SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+SetCamera3DTarget(cam, focusX, focusY, focusZ);
+
+var maxLights = 64;
+
+var gVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = mat3(transpose(inverse(uModel))) * aNormal;
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var gFsSrc = @"
+#version 330 core
+layout(location = 0) out vec4 gPosition;
+layout(location = 1) out vec4 gNormal;
+layout(location = 2) out vec4 gAlbedo;
+
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+
+uniform sampler2D uTex;
+uniform int uHasTex;
+
+void main()
+{
+    vec3 albedo = uHasTex != 0 ? texture(uTex, vUV).rgb : vec3(0.74, 0.74, 0.74);
+    gPosition = vec4(vWorldPos, 1.0);
+    gNormal = vec4(normalize(vNormal) * 0.5 + 0.5, 1.0);
+    gAlbedo = vec4(albedo, 1.0);
+}
+";
+
+var lightVsSrc = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+out vec2 vUV;
+
+void main()
+{
+    vUV = aUV;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+";
+
+var lightFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D gPositionTex;
+uniform sampler2D gNormalTex;
+uniform sampler2D gAlbedoTex;
+uniform vec3 uViewPos;
+uniform vec3 uAmbient;
+uniform float uLightRadius;
+uniform float uSpecularStrength;
+uniform float uExposure;
+uniform int uLightCount;
+uniform vec3 uLightPos[64];
+uniform vec3 uLightColor[64];
+
+void main()
+{
+    vec3 worldPos = texture(gPositionTex, vUV).xyz;
+    vec3 normal = texture(gNormalTex, vUV).xyz * 2.0 - 1.0;
+    vec3 albedo = texture(gAlbedoTex, vUV).rgb;
+
+    if (length(normal) < 0.001)
+    {
+        discard;
+    }
+
+    normal = normalize(normal);
+    vec3 viewDir = normalize(uViewPos - worldPos);
+    vec3 color = albedo * uAmbient;
+
+    for (int i = 0; i < 64; ++i)
+    {
+        if (i >= uLightCount) break;
+
+        vec3 toLight = uLightPos[i] - worldPos;
+        float dist = length(toLight);
+        if (dist >= uLightRadius) continue;
+
+        vec3 L = toLight / max(dist, 0.0001);
+        float atten = 1.0 - clamp(dist / uLightRadius, 0.0, 1.0);
+        atten = atten * atten;
+
+        float diff = max(dot(normal, L), 0.0);
+        vec3 H = normalize(L + viewDir);
+        float spec = pow(max(dot(normal, H), 0.0), 48.0) * uSpecularStrength;
+
+        vec3 radiance = uLightColor[i] * atten;
+        color += albedo * radiance * diff;
+        color += radiance * spec;
+    }
+
+    color = vec3(1.0) - exp(-color * uExposure);
+    color = pow(color, vec3(1.0 / 2.2));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var progGeom = linkProgram(gVsSrc, gFsSrc);
+var progLight = linkProgram(lightVsSrc, lightFsSrc);
+if (progGeom <= 0 || progLight <= 0)
+{
+    if (progGeom > 0) glDeleteProgram(progGeom);
+    if (progLight > 0) glDeleteProgram(progLight);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var gModel = glGetUniformLocation(progGeom, "uModel");
+var gView = glGetUniformLocation(progGeom, "uView");
+var gProj = glGetUniformLocation(progGeom, "uProj");
+var gTex = glGetUniformLocation(progGeom, "uTex");
+var gHasTex = glGetUniformLocation(progGeom, "uHasTex");
+
+var lPosTex = glGetUniformLocation(progLight, "gPositionTex");
+var lNormalTex = glGetUniformLocation(progLight, "gNormalTex");
+var lAlbedoTex = glGetUniformLocation(progLight, "gAlbedoTex");
+var lViewPos = glGetUniformLocation(progLight, "uViewPos");
+var lAmbient = glGetUniformLocation(progLight, "uAmbient");
+var lLightRadius = glGetUniformLocation(progLight, "uLightRadius");
+var lSpecularStrength = glGetUniformLocation(progLight, "uSpecularStrength");
+var lExposure = glGetUniformLocation(progLight, "uExposure");
+var lLightCount = glGetUniformLocation(progLight, "uLightCount");
+
+var lightPosLoc = [];
+var lightColorLoc = [];
+for (var i = 0; i < maxLights; i += 1)
+{
+    lightPosLoc.push(glGetUniformLocation(progLight, "uLightPos[" + i + "]"));
+    lightColorLoc.push(glGetUniformLocation(progLight, "uLightColor[" + i + "]"));
+}
+
+var quadVerts = Float32Array(0);
+quadVerts.add(
+    -1.0,  1.0,  0.0, 1.0,
+     1.0,  1.0,  1.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0,  1.0,  0.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0, -1.0,  0.0, 0.0
+);
+var quadVAO = glGenVertexArrays();
+var quadVBO = glGenBuffers();
+glBindVertexArray(quadVAO);
+glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+glBufferData(GL_ARRAY_BUFFER, quadVerts.byteLength(), quadVerts, GL_STATIC_DRAW);
+glEnableVertexAttribArray(0);
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 16, 0);
+glEnableVertexAttribArray(1);
+glVertexAttribPointer(1, 2, GL_FLOAT, false, 16, 8);
+glBindVertexArray(0);
+glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+var screenW = GetScreenWidth();
+var screenH = GetScreenHeight();
+var gbuffer = makeGBuffer(screenW, screenH);
+if (gbuffer == nil)
+{
+    glDeleteBuffers(quadVBO);
+    glDeleteVertexArrays(quadVAO);
+    glDeleteProgram(progGeom);
+    glDeleteProgram(progLight);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var lightPaletteR = [1.00, 1.00, 0.35, 0.20, 0.25, 0.35, 1.00, 0.95];
+var lightPaletteG = [0.38, 0.70, 0.85, 0.95, 0.55, 0.55, 0.85, 0.20];
+var lightPaletteB = [0.20, 0.25, 1.00, 0.45, 1.00, 1.00, 0.35, 0.08];
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var uiBg = Color(0, 0, 0, 168);
+var uiFg = Color(240, 240, 240, 255);
+var uiOk = Color(180, 255, 180, 255);
+var uiWarm = Color(255, 220, 170, 255);
+
+var showUi = true;
+var showDebugTargets = true;
+var orbitLightCount = 36;
+var ambientStrength = 0.02;
+var lightRadius = 120.0;
+var lightHeight = 36.0;
+var orbitRadius = 132.0;
+var orbitSpeed = 0.55;
+var specularStrength = 0.18;
+var exposure = 1.0;
+var timeSec = 0.0;
+var bullets = [];
+var bulletSpeed = 220.0;
+var bulletLife = 1.4;
+var bulletMaxDistance = 260.0;
+var bulletRadius = 1.15;
+var bulletLightBoost = 2.8;
+var muzzleOffset = 4.0;
+var fireCooldown = 0.0;
+var fireInterval = 0.09;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    var activeLightCount = 0;
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+    timeSec += dt;
+    fireCooldown -= dt;
+    if (fireCooldown < 0.0) fireCooldown = 0.0;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_F1)) showDebugTargets = !showDebugTargets;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx = fx / fl;
+        fy = fy / fl;
+        fz = fz / fl;
+    }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001)
+    {
+        rx = rx / rl;
+        rz = rz / rl;
+    }
+
+    var moveSpeed = sceneRadius * 0.35;
+    if (moveSpeed < 10.0) moveSpeed = 10.0;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) moveSpeed = moveSpeed * 3.0;
+    var step = moveSpeed * dt;
+
+    if (IsKeyDown(KEY_W)) { eyeX += fx * step; eyeY += fy * step; eyeZ += fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * step; eyeY -= fy * step; eyeZ -= fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * step; eyeZ -= rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * step; eyeZ += rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += step;
+    if (IsKeyDown(KEY_C)) eyeY -= step;
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && fireCooldown <= 0.0)
+    {
+        var bullet = BulletLight();
+        bullet.x = eyeX + fx * muzzleOffset;
+        bullet.y = eyeY + fy * muzzleOffset;
+        bullet.z = eyeZ + fz * muzzleOffset;
+        bullet.dx = fx;
+        bullet.dy = fy;
+        bullet.dz = fz;
+        bullet.speed = bulletSpeed;
+        bullet.ttl = bulletLife;
+        bullet.maxDistance = bulletMaxDistance;
+        bullet.traveled = 0.0;
+        bullet.radius = bulletRadius;
+        bullet.r = 255;
+        bullet.g = 224;
+        bullet.b = 140;
+        bullets.push(bullet);
+        fireCooldown = fireInterval;
+    }
+
+    var bi = 0;
+    while (bi < len(bullets))
+    {
+        var bullet = bullets[bi];
+        var bulletStep = bullet.speed * dt;
+        bullet.x += bullet.dx * bulletStep;
+        bullet.y += bullet.dy * bulletStep;
+        bullet.z += bullet.dz * bulletStep;
+        bullet.traveled += bulletStep;
+        bullet.ttl -= dt;
+
+        if (bullet.ttl <= 0.0 || bullet.traveled >= bullet.maxDistance)
+        {
+            var last = len(bullets) - 1;
+            if (bi != last) bullets[bi] = bullets[last];
+            bullets.pop();
+        }
+        else
+        {
+            bullets[bi] = bullet;
+            bi += 1;
+        }
+    }
+
+    var nextScreenW = GetScreenWidth();
+    var nextScreenH = GetScreenHeight();
+    if (nextScreenW != screenW || nextScreenH != screenH)
+    {
+        var nextGBuffer = makeGBuffer(nextScreenW, nextScreenH);
+        if (nextGBuffer != nil)
+        {
+            gbuffer.destroy();
+            gbuffer = nextGBuffer;
+            screenW = nextScreenW;
+            screenH = nextScreenH;
+        }
+    }
+
+    SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+    SetCamera3DTarget(cam, eyeX + fx, eyeY + fy, eyeZ + fz);
+
+    var modelMat = mesh.makeModelMatrix();
+
+    rlDrawRenderBatchActive();
+    BeginMode3D(cam);
+    var view = rlGetMatrixModelview();
+    var proj = rlGetMatrixProjection();
+    EndMode3D();
+
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.fbo);
+    glViewport(0, 0, gbuffer.width, gbuffer.height);
+    glClearColor(0.0, 0.0, 0.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+    glUseProgram(progGeom);
+    if (gModel >= 0) glUniformMatrix4fv(gModel, 1, false, modelBuf);
+    if (gView >= 0) glUniformMatrix4fv(gView, 1, false, viewBuf);
+    if (gProj >= 0) glUniformMatrix4fv(gProj, 1, false, projBuf);
+    if (gTex >= 0) glUniform1i(gTex, 0);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+    {
+        var b = mesh.buffers[i];
+        var texId = 0;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            if (len(mat.textureIds) > 0) texId = mat.textureIds[0];
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        if (gHasTex >= 0) glUniform1i(gHasTex, texId > 0 ? 1 : 0);
+        b.draw();
+    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    BeginDrawing();
+    ClearBackground(Color(16, 18, 24, 255));
+    rlDrawRenderBatchActive();
+
+    glViewport(0, 0, screenW, screenH);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(progLight);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.posTex);
+    if (lPosTex >= 0) glUniform1i(lPosTex, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.normalTex);
+    if (lNormalTex >= 0) glUniform1i(lNormalTex, 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.albedoTex);
+    if (lAlbedoTex >= 0) glUniform1i(lAlbedoTex, 2);
+    if (lViewPos >= 0) glUniform3f(lViewPos, eyeX, eyeY, eyeZ);
+    if (lAmbient >= 0) glUniform3f(lAmbient, ambientStrength, ambientStrength, ambientStrength);
+    if (lLightRadius >= 0) glUniform1f(lLightRadius, lightRadius);
+    if (lSpecularStrength >= 0) glUniform1f(lSpecularStrength, specularStrength);
+    if (lExposure >= 0) glUniform1f(lExposure, exposure);
+    activeLightCount = 0;
+    for (var i = 0; i < orbitLightCount && activeLightCount < maxLights; i += 1)
+    {
+        var ring = 1.0 + floor(i / 12.0);
+        var theta = timeSec * orbitSpeed * (0.8 + ring * 0.23) + i * 0.37;
+        var radius = orbitRadius * (0.45 + ring * 0.32);
+        var lx = focusX + cos(theta) * radius;
+        var ly = focusY + lightHeight + sin(theta * 1.7 + ring) * (8.0 + ring * 4.0);
+        var lz = focusZ + sin(theta) * radius;
+
+        var palette = wrapIndex(i, len(lightPaletteR));
+        var pulse = 0.65 + 0.35 * (0.5 + 0.5 * sin(timeSec * 2.1 + i * 0.81));
+        var lr = lightPaletteR[palette] * pulse * 1.7;
+        var lg = lightPaletteG[palette] * pulse * 1.7;
+        var lb = lightPaletteB[palette] * pulse * 1.7;
+
+        if (lightPosLoc[activeLightCount] >= 0) glUniform3f(lightPosLoc[activeLightCount], lx, ly, lz);
+        if (lightColorLoc[activeLightCount] >= 0) glUniform3f(lightColorLoc[activeLightCount], lr, lg, lb);
+        activeLightCount += 1;
+    }
+
+    for (var bi = 0; bi < len(bullets) && activeLightCount < maxLights; bi += 1)
+    {
+        var bullet = bullets[bi];
+        var blr = (bullet.r / 255.0) * bulletLightBoost;
+        var blg = (bullet.g / 255.0) * bulletLightBoost;
+        var blb = (bullet.b / 255.0) * bulletLightBoost;
+        if (lightPosLoc[activeLightCount] >= 0) glUniform3f(lightPosLoc[activeLightCount], bullet.x, bullet.y, bullet.z);
+        if (lightColorLoc[activeLightCount] >= 0) glUniform3f(lightColorLoc[activeLightCount], blr, blg, blb);
+        activeLightCount += 1;
+    }
+    if (lLightCount >= 0) glUniform1i(lLightCount, activeLightCount);
+
+    drawFullscreenQuad(quadVAO);
+    glUseProgram(0);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
+
+    rlDisableVertexArray();
+    rlDisableVertexBuffer();
+    rlDisableVertexBufferElement();
+    rlSetTexture(0);
+    rlViewport(0, 0, screenW, screenH);
+    rlMatrixMode(RL_PROJECTION);
+    rlLoadIdentity();
+    rlOrtho(0, screenW, screenH, 0, 0.0, 1.0);
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+
+    BeginMode3D(cam);
+    for (var bi = 0; bi < len(bullets); bi += 1)
+    {
+        var bullet = bullets[bi];
+        drawTracer3D(
+            bullet.x, bullet.y, bullet.z,
+            bullet.dx, bullet.dy, bullet.dz,
+            bullet.radius * 6.0,
+            bullet.r, bullet.g, bullet.b, 255
+        );
+        drawCross3D(
+            bullet.x, bullet.y, bullet.z,
+            bullet.radius,
+            bullet.r, bullet.g, bullet.b, 255
+        );
+    }
+    EndMode3D();
+
+    DrawRectangle(18, 18, 1100, 100, uiBg);
+    DrawText("Sponza Deferred GBuffer  RMB look | WASD move | SPACE/C up-down | SHIFT faster | TAB UI | F1 debug", 32, 32, 22, uiFg);
+    DrawText("Real GBuffer: geometry pass -> position/normal/albedo -> fullscreen lighting pass", 32, 62, 20, uiOk);
+    DrawText("Scene lights: " + orbitLightCount + "  Bullet lights: " + len(bullets) + "  Total: " + activeLightCount + "  FPS: " + GetFPS(), 32, 90, 18, uiWarm);
+
+    if (showDebugTargets)
+    {
+        var dbgW = 230;
+        var dbgH = 130;
+        var dbgY = 18;
+        var dbgX0 = screenW - dbgW * 3 - 56;
+        var dbgX1 = screenW - dbgW * 2 - 37;
+        var dbgX2 = screenW - dbgW - 18;
+        drawDebugPanel(gbuffer.albedoTex, dbgX0, dbgY, dbgW, dbgH, "GBuffer Albedo");
+        drawDebugPanel(gbuffer.normalTex, dbgX1, dbgY, dbgW, dbgH, "GBuffer Normal");
+        drawDebugPanel(gbuffer.posTex, dbgX2, dbgY, dbgW, dbgH, "GBuffer Position");
+    }
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = Begin("Deferred GBuffer");
+        if (panel)
+        {
+            Text("Sponza + deferred shading + real G-buffer");
+            var (_, nextDebug) = Checkbox("Show debug targets (F1)", showDebugTargets);
+            showDebugTargets = nextDebug;
+            var maxOrbitLights = maxLights - 1;
+            if (maxOrbitLights < 1) maxOrbitLights = 1;
+            var (_, nextCount) = SliderInt("Scene lights", orbitLightCount, 1, maxOrbitLights);
+            orbitLightCount = nextCount;
+            var (_, nextRadius) = SliderFloat("Light radius", lightRadius, 20.0, 220.0);
+            lightRadius = nextRadius;
+            var (_, nextOrbitRadius) = SliderFloat("Orbit radius", orbitRadius, 30.0, 220.0);
+            orbitRadius = nextOrbitRadius;
+            var (_, nextHeight) = SliderFloat("Light height", lightHeight, 4.0, 80.0);
+            lightHeight = nextHeight;
+            var (_, nextSpeed) = SliderFloat("Orbit speed", orbitSpeed, 0.0, 2.4);
+            orbitSpeed = nextSpeed;
+            var (_, nextAmbient) = SliderFloat("Ambient", ambientStrength, 0.0, 0.2);
+            ambientStrength = nextAmbient;
+            var (_, nextSpec) = SliderFloat("Specular", specularStrength, 0.0, 0.8);
+            specularStrength = nextSpec;
+            var (_, nextExposure) = SliderFloat("Exposure", exposure, 0.2, 3.0);
+            exposure = nextExposure;
+            var (_, nextBulletSpeed) = SliderFloat("Bullet speed", bulletSpeed, 40.0, 420.0);
+            bulletSpeed = nextBulletSpeed;
+            var (_, nextBulletLife) = SliderFloat("Bullet life", bulletLife, 0.2, 4.0);
+            bulletLife = nextBulletLife;
+            var (_, nextBulletDistance) = SliderFloat("Bullet distance", bulletMaxDistance, 10.0, 800.0);
+            bulletMaxDistance = nextBulletDistance;
+            var (_, nextBulletRadius) = SliderFloat("Bullet radius", bulletRadius, 0.2, 3.0);
+            bulletRadius = nextBulletRadius;
+            var (_, nextBulletLightBoost) = SliderFloat("Bullet light boost", bulletLightBoost, 0.5, 8.0);
+            bulletLightBoost = nextBulletLightBoost;
+            Text("This one is deferred, not forward.");
+        }
+        End();
+        EndImGui();
+    }
+
+    DrawFPS(GetScreenWidth() - 100, 16);
+    EndDrawing();
+}
+
+gbuffer.destroy();
+glDeleteBuffers(quadVBO);
+glDeleteVertexArrays(quadVAO);
+glDeleteProgram(progGeom);
+glDeleteProgram(progLight);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();

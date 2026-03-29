@@ -1,0 +1,519 @@
+import path;
+using path;
+import math;
+using math;
+import ImGui;
+using ImGui;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import GLM;
+using GLM;
+
+include "../libs/lib_meshbin.bu";
+include "../libs/lib_trimesh.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("MeshBin collision shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("MeshBin collision shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def createSolidTexture(r, g, b, a)
+{
+    var pixels = Uint8Array(4);
+    pixels.add(r, g, b, a);
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def buildMeshBinCollision(colMesh, mesh)
+{
+    colMesh.clear();
+
+    var s = mesh.scale;
+    var tx = mesh.posX;
+    var ty = mesh.posY;
+    var tz = mesh.posZ;
+
+    for (var bi = 0; bi < len(mesh.buffers); bi += 1)
+    {
+        var b = mesh.buffers[bi];
+        var i = 0;
+        while (i < len(b.indices))
+        {
+            var i0 = b.indices[i + 0] * 3;
+            var i1 = b.indices[i + 1] * 3;
+            var i2 = b.indices[i + 2] * 3;
+
+            colMesh.addTriangle(
+                b.positions[i0 + 0] * s + tx, b.positions[i0 + 1] * s + ty, b.positions[i0 + 2] * s + tz,
+                b.positions[i1 + 0] * s + tx, b.positions[i1 + 1] * s + ty, b.positions[i1 + 2] * s + tz,
+                b.positions[i2 + 0] * s + tx, b.positions[i2 + 1] * s + ty, b.positions[i2 + 2] * s + tz
+            );
+            i += 3;
+        }
+    }
+
+    colMesh.build();
+}
+
+
+var meshPath = resolveAssetPath(
+    "assets/powerplant/powerplant.h3d",
+    "../assets/powerplant/powerplant.h3d",
+    "../../assets/powerplant/powerplant.h3d"
+);
+if (meshPath == nil)
+{
+    print("factory mesh asset missing");
+    return;
+}
+
+InitWindow(1440, 900, "BuGL - MeshBin Factory Collision");
+SetTargetFPS(60);
+InitImGui();
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load meshbin: " + meshPath);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 300.0;
+var targetRadius = 420.0;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 80.0) sceneRadius = 80.0;
+
+var collider = TriMesh();
+buildMeshBinCollision(collider, mesh);
+print("Factory collision mesh: " + collider.triCount() + " tris");
+
+var vsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoords;
+
+out vec3 FragPos;
+out vec3 Normal;
+out vec2 TexCoords;
+
+uniform mat4 projection;
+uniform mat4 view;
+uniform mat4 model;
+
+void main()
+{
+    FragPos = vec3(model * vec4(aPos, 1.0));
+    Normal = transpose(inverse(mat3(model))) * aNormal;
+    TexCoords = aTexCoords;
+    gl_Position = projection * view * model * vec4(aPos, 1.0);
+}
+";
+
+var fsSrc = @"
+#version 330 core
+out vec4 FragColor;
+
+in vec3 FragPos;
+in vec3 Normal;
+in vec2 TexCoords;
+
+uniform sampler2D diffuseTexture;
+uniform vec3 lightPos;
+uniform vec3 viewPos;
+uniform float ambientStrength;
+
+void main()
+{
+    vec3 base = texture(diffuseTexture, TexCoords).rgb;
+    vec3 n = normalize(Normal);
+    vec3 l = normalize(lightPos - FragPos);
+    vec3 v = normalize(viewPos - FragPos);
+    vec3 h = normalize(l + v);
+
+    float diff = max(dot(n, l), 0.0);
+    float spec = pow(max(dot(n, h), 0.0), 48.0);
+
+    vec3 ambient = base * ambientStrength;
+    vec3 diffuse = base * diff;
+    vec3 specular = vec3(spec * 0.35);
+    FragColor = vec4(ambient + diffuse + specular, 1.0);
+}
+";
+
+var prog = linkProgram(vsSrc, fsSrc);
+if (prog <= 0)
+{
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var uProjection = glGetUniformLocation(prog, "projection");
+var uView = glGetUniformLocation(prog, "view");
+var uModel = glGetUniformLocation(prog, "model");
+var uDiffuse = glGetUniformLocation(prog, "diffuseTexture");
+var uLightPos = glGetUniformLocation(prog, "lightPos");
+var uViewPos = glGetUniformLocation(prog, "viewPos");
+var uAmbient = glGetUniformLocation(prog, "ambientStrength");
+
+var projBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var modelBuf = @(16, TYPE_FLOAT);
+var whiteTex = createSolidTexture(255, 255, 255, 255);
+
+var spawnX = 20.0;
+var spawnY = 22.0;
+var spawnZ = 0.0;
+var spawnYaw = -90.0;
+var spawnPitch = -10.0;
+
+var eyeX = spawnX;
+var eyeY = spawnY;
+var eyeZ = spawnZ;
+var yaw = spawnYaw;
+var pitch = spawnPitch;
+var camNear = 0.05;
+var camFar = max(sceneRadius * 4.0, 2000.0);
+var ambientStrength = 0.18;
+
+var playerRadius = 0.4;
+var playerHalfHeight = 1.9;
+var playerSpeed = 14.0;
+var jumpSpeed = 10.0;
+var gravity = -24.0;
+var velY = 0.0;
+var onGround = false;
+
+var showUi = true;
+var showCollision = false;
+var showLastHit = false;
+var wireframe = false;
+var useGravity = false;
+
+var hudBg = Color(0, 0, 0, 150);
+var hudFg = Color(240, 240, 240, 255);
+var hudOk = Color(180, 255, 180, 255);
+var clearBg = Color(22, 28, 36, 255);
+var worldUp = Vector3(0.0, 1.0, 0.0);
+var camEye = Vector3(0.0, 0.0, 0.0);
+var camTarget = Vector3(0.0, 0.0, 0.0);
+var lightPosX = sceneRadius * 0.65;
+var lightPosY = sceneRadius * 1.35;
+var lightPosZ = sceneRadius * 0.35;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_K)) showCollision = !showCollision;
+    if (IsKeyPressed(KEY_L)) showLastHit = !showLastHit;
+    if (IsKeyPressed(KEY_R))
+    {
+        eyeX = spawnX;
+        eyeY = spawnY;
+        eyeZ = spawnZ;
+        yaw = spawnYaw;
+        pitch = spawnPitch;
+        velY = 0.0;
+        onGround = false;
+    }
+    if (IsKeyPressed(KEY_P))
+    {
+        wireframe = !wireframe;
+        if (wireframe) glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        else glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    }
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw += mdx * 0.12;
+        pitch -= mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx /= fl; fy /= fl; fz /= fl;
+    }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001)
+    {
+        rx /= rl;
+        rz /= rl;
+    }
+
+    var moveX = 0.0;
+    var moveY = 0.0;
+    var moveZ = 0.0;
+    var mv = playerSpeed * dt;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) mv *= 2.0;
+
+    if (IsKeyDown(KEY_W)) { moveX += fx * mv; moveZ += fz * mv; }
+    if (IsKeyDown(KEY_S)) { moveX -= fx * mv; moveZ -= fz * mv; }
+    if (IsKeyDown(KEY_A)) { moveX -= rx * mv; moveZ -= rz * mv; }
+    if (IsKeyDown(KEY_D)) { moveX += rx * mv; moveZ += rz * mv; }
+
+    if (!useGravity)
+    {
+        if (IsKeyDown(KEY_Q)) eyeY -= mv;
+        if (IsKeyDown(KEY_E)) eyeY += mv;
+    }
+
+    if (useGravity && onGround && IsKeyPressed(KEY_SPACE))
+    {
+        velY = jumpSpeed;
+        onGround = false;
+    }
+
+    if (useGravity)
+    {
+        if (onGround && velY < 0.0) velY = 0.0;
+        moveY = velY * dt;
+    }
+
+    var wasOnGround = onGround;
+    onGround = false;
+
+    var dx = moveX;
+    var dy = moveY;
+    var dz = moveZ;
+
+    for (var iter = 0; iter < 4; iter += 1)
+    {
+        var (frac, nx, ny, nz, hit) = collider.traceCapsule(
+            eyeX, eyeY, eyeZ,
+            dx, dy, dz,
+            playerRadius, playerHalfHeight
+        );
+
+        eyeX += dx * frac;
+        eyeY += dy * frac;
+        eyeZ += dz * frac;
+
+        if (!hit) break;
+
+        if (ny > 0.7)
+        {
+            onGround = true;
+            if (velY < 0.0) velY = 0.0;
+        }
+
+        var dot = dx * nx + dy * ny + dz * nz;
+        dx -= nx * dot;
+        dy -= ny * dot;
+        dz -= nz * dot;
+
+        var vl = sqrt(dx * dx + dy * dy + dz * dz);
+        if (vl < 0.001) break;
+    }
+
+    if (useGravity)
+    {
+        if (onGround && velY < 0.0) velY = 0.0;
+        elif (!onGround || !wasOnGround) velY += gravity * dt;
+    }
+
+    camEye.x = eyeX; camEye.y = eyeY; camEye.z = eyeZ;
+    camTarget.x = eyeX + fx; camTarget.y = eyeY + fy; camTarget.z = eyeZ + fz;
+
+    var w = GetScreenWidth();
+    var h = GetScreenHeight();
+    if (h < 1) h = 1;
+    var aspect = w / h;
+
+    var view = MatrixLookAt(camEye, camTarget, worldUp);
+    var proj = MatrixPerspective(70.0 * PI / 180.0, aspect, camNear, camFar);
+    var modelMat = mesh.makeModelMatrix();
+
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    MatrixWriteBuffer(modelMat, modelBuf);
+
+    BeginDrawing();
+    ClearBackground(clearBg);
+
+    rlDrawRenderBatchActive();
+
+    glViewport(0, 0, w, h);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+
+    glUseProgram(prog);
+    if (uProjection >= 0) glUniformMatrix4fv(uProjection, 1, false, projBuf);
+    if (uView >= 0) glUniformMatrix4fv(uView, 1, false, viewBuf);
+    if (uModel >= 0) glUniformMatrix4fv(uModel, 1, false, modelBuf);
+    if (uLightPos >= 0) glUniform3f(uLightPos, lightPosX, lightPosY, lightPosZ);
+    if (uViewPos >= 0) glUniform3f(uViewPos, eyeX, eyeY, eyeZ);
+    if (uAmbient >= 0) glUniform1f(uAmbient, ambientStrength);
+
+    for (var bi = 0; bi < len(mesh.buffers); bi += 1)
+    {
+        var b = mesh.buffers[bi];
+        var texId = whiteTex;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            if (len(mat.textureIds) > 0 && mat.textureIds[0] > 0) texId = mat.textureIds[0];
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        if (uDiffuse >= 0) glUniform1i(uDiffuse, 0);
+        b.draw();
+    }
+
+    glUseProgram(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (showCollision)
+    {
+        rlSetMatrixProjection(proj);
+        rlSetMatrixModelview(view);
+        collider.draw();
+        if (showLastHit) collider.drawLastHit();
+    }
+
+    rlDisableVertexArray();
+    rlDisableVertexBuffer();
+    rlDisableVertexBufferElement();
+    rlSetTexture(0);
+    rlViewport(0, 0, w, h);
+    rlMatrixMode(RL_PROJECTION);
+    rlLoadIdentity();
+    rlOrtho(0, w, h, 0, 0.0, 1.0);
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glUseProgram(0);
+
+    DrawRectangle(16, 16, 760, 110, hudBg);
+    DrawText("MeshBin Factory Collision  RMB look | WASD move | SPACE jump | SHIFT faster | R reset | K collision mesh | L last hit | TAB UI", 28, 28, 20, hudFg);
+    DrawText("Tris: " + collider.triCount() + "  Ground: " + onGround + "  velY: " + velY, 28, 58, 18, hudOk);
+    DrawText("Eye: " + int(eyeX * 100.0) / 100.0 + ", " + int(eyeY * 100.0) / 100.0 + ", " + int(eyeZ * 100.0) / 100.0 + "  FPS: " + GetFPS(), 28, 84, 18, hudFg);
+    DrawFPS(8, 8);
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = Begin("MeshBin Collision");
+        if (panel)
+        {
+            Text("Factory mesh + capsule collision");
+            var (_, nextCollision) = Checkbox("Show collision mesh (K)", showCollision);
+            showCollision = nextCollision;
+            var (_, nextHit) = Checkbox("Show last hit triangle (L)", showLastHit);
+            showLastHit = nextHit;
+            var (_, nextGravity) = Checkbox("Use gravity", useGravity);
+            if (nextGravity != useGravity)
+            {
+                useGravity = nextGravity;
+                if (!useGravity)
+                {
+                    velY = 0.0;
+                    onGround = false;
+                }
+            }
+            var (_, nextAmbient) = SliderFloat("Ambient", ambientStrength, 0.0, 0.8);
+            ambientStrength = nextAmbient;
+            var (_, nextSpeed) = SliderFloat("Move speed", playerSpeed, 2.0, 24.0);
+            playerSpeed = nextSpeed;
+            Text("triangles: " + collider.triCount());
+        }
+        End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+if (wireframe) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+glDeleteTextures(whiteTex);
+glDeleteProgram(prog);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();

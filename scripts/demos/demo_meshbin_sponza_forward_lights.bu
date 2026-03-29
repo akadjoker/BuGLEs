@@ -1,0 +1,608 @@
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import ImGui;
+using ImGui;
+
+include "../libs/lib_meshbin.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Forward lights shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Forward lights shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def wrapIndex(i, count)
+{
+    if (count <= 0) return 0;
+    while (i >= count) i -= count;
+    while (i < 0) i += count;
+    return i;
+}
+
+
+def drawCross3D(x, y, z, size, r, g, b, a)
+{
+    rlBegin(RL_LINES);
+    rlColor4ub(r, g, b, a);
+    rlVertex3f(x - size, y, z); rlVertex3f(x + size, y, z);
+    rlVertex3f(x, y - size, z); rlVertex3f(x, y + size, z);
+    rlVertex3f(x, y, z - size); rlVertex3f(x, y, z + size);
+    rlEnd();
+}
+
+
+def drawTracer3D(x, y, z, dx, dy, dz, length, r, g, b, a)
+{
+    rlBegin(RL_LINES);
+    rlColor4ub(r, g, b, a);
+    rlVertex3f(x, y, z);
+    rlVertex3f(x - dx * length, y - dy * length, z - dz * length);
+    rlEnd();
+}
+
+
+class BulletState
+{
+    var x;
+    var y;
+    var z;
+    var dx;
+    var dy;
+    var dz;
+    var speed;
+    var ttl;
+    var maxDistance;
+    var traveled;
+    var radius;
+    var r;
+    var g;
+    var b;
+
+    def init()
+    {
+        self.x = 0.0;
+        self.y = 0.0;
+        self.z = 0.0;
+        self.dx = 0.0;
+        self.dy = 0.0;
+        self.dz = 1.0;
+        self.speed = 0.0;
+        self.ttl = 0.0;
+        self.maxDistance = 0.0;
+        self.traveled = 0.0;
+        self.radius = 0.2;
+        self.r = 255;
+        self.g = 220;
+        self.b = 120;
+    }
+}
+
+
+var meshPath = resolveAssetPath(
+    "assets/sponza/sponza.h3d",
+    "../assets/sponza/sponza.h3d",
+    "../../assets/sponza/sponza.h3d"
+);
+
+if (meshPath == nil)
+{
+    print("sponza.h3d not found");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1600, 900, "BuGL - Sponza Forward Many Lights");
+SetTargetFPS(60);
+InitImGui();
+
+var cam = Camera3D();
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 60.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var eyeX = 0.0;
+var eyeY = 120.0;
+var eyeZ = 260.0;
+var yaw = -90.0;
+var pitch = -18.0;
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load meshbin: " + meshPath);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 300.0;
+var targetRadius = 420.0;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 40.0) sceneRadius = 40.0;
+eyeX = focusX + sceneRadius * 0.8;
+eyeY = focusY + sceneRadius * 0.35;
+eyeZ = focusZ + sceneRadius * 0.8;
+SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+SetCamera3DTarget(cam, focusX, focusY, focusZ);
+
+var maxLights = 64;
+var vsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = mat3(transpose(inverse(uModel))) * aNormal;
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var fsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uTex;
+uniform int uHasTex;
+uniform vec3 uViewPos;
+uniform vec3 uAmbient;
+uniform int uLightCount;
+uniform float uLightRadius;
+uniform float uSpecularStrength;
+uniform vec3 uLightPos[64];
+uniform vec3 uLightColor[64];
+
+void main()
+{
+    vec3 albedo = uHasTex != 0 ? texture(uTex, vUV).rgb : vec3(0.74, 0.74, 0.74);
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uViewPos - vWorldPos);
+    vec3 color = albedo * uAmbient;
+
+    for (int i = 0; i < 64; ++i)
+    {
+        if (i >= uLightCount) break;
+
+        vec3 toLight = uLightPos[i] - vWorldPos;
+        float dist = length(toLight);
+        if (dist >= uLightRadius) continue;
+
+        vec3 L = toLight / max(dist, 0.0001);
+        float atten = 1.0 - clamp(dist / uLightRadius, 0.0, 1.0);
+        atten = atten * atten;
+
+        float diff = max(dot(N, L), 0.0);
+        vec3 H = normalize(L + V);
+        float spec = pow(max(dot(N, H), 0.0), 48.0) * uSpecularStrength;
+
+        vec3 radiance = uLightColor[i] * atten;
+        color += albedo * radiance * diff;
+        color += radiance * spec;
+    }
+
+    color = color / (color + vec3(1.0));
+    color = pow(color, vec3(1.0 / 2.2));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var prog = linkProgram(vsSrc, fsSrc);
+if (prog <= 0)
+{
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var uModel = glGetUniformLocation(prog, "uModel");
+var uView = glGetUniformLocation(prog, "uView");
+var uProj = glGetUniformLocation(prog, "uProj");
+var uTex = glGetUniformLocation(prog, "uTex");
+var uHasTex = glGetUniformLocation(prog, "uHasTex");
+var uViewPos = glGetUniformLocation(prog, "uViewPos");
+var uAmbient = glGetUniformLocation(prog, "uAmbient");
+var uLightCount = glGetUniformLocation(prog, "uLightCount");
+var uLightRadius = glGetUniformLocation(prog, "uLightRadius");
+var uSpecularStrength = glGetUniformLocation(prog, "uSpecularStrength");
+
+var lightPosLoc = [];
+var lightColorLoc = [];
+for (var i = 0; i < maxLights; i += 1)
+{
+    lightPosLoc.push(glGetUniformLocation(prog, "uLightPos[" + i + "]"));
+    lightColorLoc.push(glGetUniformLocation(prog, "uLightColor[" + i + "]"));
+}
+
+var lightPaletteR = [1.00, 1.00, 0.35, 0.20, 0.25, 0.35, 1.00, 0.95];
+var lightPaletteG = [0.38, 0.70, 0.85, 0.95, 0.55, 0.55, 0.85, 0.20];
+var lightPaletteB = [0.20, 0.25, 1.00, 0.45, 1.00, 1.00, 0.35, 0.08];
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var uiBg = Color(0, 0, 0, 168);
+var uiFg = Color(240, 240, 240, 255);
+var uiOk = Color(180, 255, 180, 255);
+var uiWarm = Color(255, 220, 170, 255);
+
+var showUi = true;
+var showMarkers = false;
+var orbitLightCount = 36;
+var ambientStrength = 0.03;
+var lightRadius = 120.0;
+var lightHeight = 36.0;
+var orbitRadius = 132.0;
+var orbitSpeed = 0.55;
+var specularStrength = 0.18;
+var timeSec = 0.0;
+var bullets = [];
+var bulletSpeed = 220.0;
+var bulletLife = 1.4;
+var bulletMaxDistance = 260.0;
+var bulletRadius = 1.15;
+var bulletLightBoost = 2.8;
+var muzzleOffset = 4.0;
+var fireCooldown = 0.0;
+var fireInterval = 0.09;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    var activeLightCount = 0;
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+    timeSec += dt;
+    fireCooldown -= dt;
+    if (fireCooldown < 0.0) fireCooldown = 0.0;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_L)) showMarkers = !showMarkers;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx = fx / fl;
+        fy = fy / fl;
+        fz = fz / fl;
+    }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001)
+    {
+        rx = rx / rl;
+        rz = rz / rl;
+    }
+
+    var moveSpeed = sceneRadius * 0.35;
+    if (moveSpeed < 10.0) moveSpeed = 10.0;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) moveSpeed = moveSpeed * 3.0;
+    var step = moveSpeed * dt;
+
+    if (IsKeyDown(KEY_W)) { eyeX += fx * step; eyeY += fy * step; eyeZ += fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * step; eyeY -= fy * step; eyeZ -= fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * step; eyeZ -= rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * step; eyeZ += rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += step;
+    if (IsKeyDown(KEY_C)) eyeY -= step;
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && fireCooldown <= 0.0)
+    {
+        var bullet = BulletState();
+        bullet.x = eyeX + fx * muzzleOffset;
+        bullet.y = eyeY + fy * muzzleOffset;
+        bullet.z = eyeZ + fz * muzzleOffset;
+        bullet.dx = fx;
+        bullet.dy = fy;
+        bullet.dz = fz;
+        bullet.speed = bulletSpeed;
+        bullet.ttl = bulletLife;
+        bullet.maxDistance = bulletMaxDistance;
+        bullet.traveled = 0.0;
+        bullet.radius = bulletRadius;
+        bullet.r = 255;
+        bullet.g = 224;
+        bullet.b = 140;
+        bullets.push(bullet);
+        fireCooldown = fireInterval;
+    }
+
+    var bi = 0;
+    while (bi < len(bullets))
+    {
+        var bullet = bullets[bi];
+        var bulletStep = bullet.speed * dt;
+        bullet.x += bullet.dx * bulletStep;
+        bullet.y += bullet.dy * bulletStep;
+        bullet.z += bullet.dz * bulletStep;
+        bullet.traveled += bulletStep;
+        bullet.ttl -= dt;
+
+        if (bullet.ttl <= 0.0 || bullet.traveled >= bullet.maxDistance)
+        {
+            var last = len(bullets) - 1;
+            if (bi != last) bullets[bi] = bullets[last];
+            bullets.pop();
+        }
+        else
+        {
+            bullets[bi] = bullet;
+            bi += 1;
+        }
+    }
+
+    SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+    SetCamera3DTarget(cam, eyeX + fx, eyeY + fy, eyeZ + fz);
+
+    BeginDrawing();
+    ClearBackground(Color(16, 18, 24, 255));
+    BeginMode3D(cam);
+
+    var modelMat = mesh.makeModelMatrix();
+    var view = rlGetMatrixModelview();
+    var proj = rlGetMatrixProjection();
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    rlDrawRenderBatchActive();
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+    glUseProgram(prog);
+    if (uModel >= 0) glUniformMatrix4fv(uModel, 1, false, modelBuf);
+    if (uView >= 0) glUniformMatrix4fv(uView, 1, false, viewBuf);
+    if (uProj >= 0) glUniformMatrix4fv(uProj, 1, false, projBuf);
+    if (uTex >= 0) glUniform1i(uTex, 0);
+    if (uHasTex >= 0) glUniform1i(uHasTex, 0);
+    if (uViewPos >= 0) glUniform3f(uViewPos, eyeX, eyeY, eyeZ);
+    if (uAmbient >= 0) glUniform3f(uAmbient, ambientStrength, ambientStrength, ambientStrength);
+    if (uLightRadius >= 0) glUniform1f(uLightRadius, lightRadius);
+    if (uSpecularStrength >= 0) glUniform1f(uSpecularStrength, specularStrength);
+
+    activeLightCount = 0;
+    for (var i = 0; i < orbitLightCount && activeLightCount < maxLights; i += 1)
+    {
+        var ring = 1.0 + floor(i / 12.0);
+        var theta = timeSec * orbitSpeed * (0.8 + ring * 0.23) + i * 0.37;
+        var radius = orbitRadius * (0.45 + ring * 0.32);
+        var lx = focusX + cos(theta) * radius;
+        var ly = focusY + lightHeight + sin(theta * 1.7 + ring) * (8.0 + ring * 4.0);
+        var lz = focusZ + sin(theta) * radius;
+
+        var palette = wrapIndex(i, len(lightPaletteR));
+        var pulse = 0.65 + 0.35 * (0.5 + 0.5 * sin(timeSec * 2.1 + i * 0.81));
+        var lr = lightPaletteR[palette] * pulse * 1.7;
+        var lg = lightPaletteG[palette] * pulse * 1.7;
+        var lb = lightPaletteB[palette] * pulse * 1.7;
+
+        if (lightPosLoc[activeLightCount] >= 0) glUniform3f(lightPosLoc[activeLightCount], lx, ly, lz);
+        if (lightColorLoc[activeLightCount] >= 0) glUniform3f(lightColorLoc[activeLightCount], lr, lg, lb);
+        activeLightCount += 1;
+    }
+
+    for (var bi = 0; bi < len(bullets) && activeLightCount < maxLights; bi += 1)
+    {
+        var bullet = bullets[bi];
+        var blr = (bullet.r / 255.0) * bulletLightBoost;
+        var blg = (bullet.g / 255.0) * bulletLightBoost;
+        var blb = (bullet.b / 255.0) * bulletLightBoost;
+        if (lightPosLoc[activeLightCount] >= 0) glUniform3f(lightPosLoc[activeLightCount], bullet.x, bullet.y, bullet.z);
+        if (lightColorLoc[activeLightCount] >= 0) glUniform3f(lightColorLoc[activeLightCount], blr, blg, blb);
+        activeLightCount += 1;
+    }
+    if (uLightCount >= 0) glUniform1i(uLightCount, activeLightCount);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+    {
+        var b = mesh.buffers[i];
+        var texId = 0;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            if (len(mat.textureIds) > 0) texId = mat.textureIds[0];
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        if (uHasTex >= 0) glUniform1i(uHasTex, texId > 0 ? 1 : 0);
+        b.draw();
+    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glUseProgram(0);
+
+    if (showMarkers)
+    {
+        for (var i = 0; i < orbitLightCount; i += 1)
+        {
+            var ring = 1.0 + floor(i / 12.0);
+            var theta = timeSec * orbitSpeed * (0.8 + ring * 0.23) + i * 0.37;
+            var radius = orbitRadius * (0.45 + ring * 0.32);
+            var lx = focusX + cos(theta) * radius;
+            var ly = focusY + lightHeight + sin(theta * 1.7 + ring) * (8.0 + ring * 4.0);
+            var lz = focusZ + sin(theta) * radius;
+
+            var palette = wrapIndex(i, len(lightPaletteR));
+            var pulse = 0.65 + 0.35 * (0.5 + 0.5 * sin(timeSec * 2.1 + i * 0.81));
+            var lr = lightPaletteR[palette] * pulse * 1.7;
+            var lg = lightPaletteG[palette] * pulse * 1.7;
+            var lb = lightPaletteB[palette] * pulse * 1.7;
+
+            drawCross3D(
+                lx, ly, lz, 2.6,
+                min(255, int(lr * 120.0)),
+                min(255, int(lg * 120.0)),
+                min(255, int(lb * 120.0)),
+                255
+            );
+        }
+    }
+
+    for (var bi = 0; bi < len(bullets); bi += 1)
+    {
+        var bullet = bullets[bi];
+        drawTracer3D(
+            bullet.x, bullet.y, bullet.z,
+            bullet.dx, bullet.dy, bullet.dz,
+            bullet.radius * 6.0,
+            bullet.r, bullet.g, bullet.b, 255
+        );
+        drawCross3D(
+            bullet.x, bullet.y, bullet.z,
+            bullet.radius,
+            bullet.r, bullet.g, bullet.b, 255
+        );
+    }
+
+    EndMode3D();
+
+    DrawRectangle(18, 18, 1120, 118, uiBg);
+    DrawText("Sponza Forward Lights  RMB look | WASD move | SPACE/C up-down | SHIFT faster | L markers | Mouse1 fire | TAB UI", 32, 32, 22, uiFg);
+    DrawText("Forward renderer with dynamic scene lights + bullet lights", 32, 62, 20, uiOk);
+    DrawText("Scene lights: " + orbitLightCount + "  Bullet lights: " + len(bullets) + "  Total: " + activeLightCount + "  FPS: " + GetFPS(), 32, 92, 18, uiWarm);
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = Begin("Forward Lights");
+        if (panel)
+        {
+            Text("Sponza + many dynamic point lights");
+            var maxOrbitLights = maxLights - 1;
+            if (maxOrbitLights < 1) maxOrbitLights = 1;
+            var (_, nextCount) = SliderInt("Scene lights", orbitLightCount, 1, maxOrbitLights);
+            orbitLightCount = nextCount;
+            var (_, nextRadius) = SliderFloat("Light radius", lightRadius, 30.0, 220.0);
+            lightRadius = nextRadius;
+            var (_, nextOrbitRadius) = SliderFloat("Orbit radius", orbitRadius, 40.0, 220.0);
+            orbitRadius = nextOrbitRadius;
+            var (_, nextHeight) = SliderFloat("Light height", lightHeight, 4.0, 80.0);
+            lightHeight = nextHeight;
+            var (_, nextSpeed) = SliderFloat("Orbit speed", orbitSpeed, 0.0, 2.4);
+            orbitSpeed = nextSpeed;
+            var (_, nextAmbient) = SliderFloat("Ambient", ambientStrength, 0.0, 0.25);
+            ambientStrength = nextAmbient;
+            var (_, nextSpec) = SliderFloat("Specular", specularStrength, 0.0, 0.8);
+            specularStrength = nextSpec;
+            var (_, nextMarkers) = Checkbox("Show markers (L)", showMarkers);
+            showMarkers = nextMarkers;
+            var (_, nextBulletSpeed) = SliderFloat("Bullet speed", bulletSpeed, 40.0, 420.0);
+            bulletSpeed = nextBulletSpeed;
+            var (_, nextBulletLife) = SliderFloat("Bullet life", bulletLife, 0.2, 4.0);
+            bulletLife = nextBulletLife;
+            var (_, nextBulletDistance) = SliderFloat("Bullet distance", bulletMaxDistance, 10.0, 800.0);
+            bulletMaxDistance = nextBulletDistance;
+            var (_, nextBulletRadius) = SliderFloat("Bullet radius", bulletRadius, 0.2, 3.0);
+            bulletRadius = nextBulletRadius;
+            var (_, nextBulletLightBoost) = SliderFloat("Bullet light boost", bulletLightBoost, 0.5, 8.0);
+            bulletLightBoost = nextBulletLightBoost;
+            Text("This is pure forward shading, no deferred or clustered path.");
+        }
+        End();
+        EndImGui();
+    }
+
+    DrawFPS(GetScreenWidth() - 100, 16);
+    EndDrawing();
+}
+
+glDeleteProgram(prog);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();

@@ -320,9 +320,9 @@ def renderCascade(target, mesh, modelMat, lightVP, mvpBuf, progDepth, uLightMVP)
 
 
 var meshPath = resolveAssetPath(
-    "assets/powerplant/powerplant.h3d",
-    "../assets/powerplant/powerplant.h3d",
-    "../../assets/powerplant/powerplant.h3d"
+    "assets/sponza/sponza.h3d",
+    "../assets/sponza/sponza.h3d",
+    "../../assets/sponza/sponza.h3d"
 );
 if (meshPath == nil)
 {
