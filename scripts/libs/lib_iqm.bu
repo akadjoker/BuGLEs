@@ -317,10 +317,24 @@ def iqmUploadTex(p)
 def iqmLoadTexture(texDir, name)
 {
     if (name == "") return 0;
-    var base = path.filename(name) + ".png";
-    if (path.exists(texDir + base)) return iqmUploadTex(texDir + base);
-    if (path.exists(name))          return iqmUploadTex(name);
-    print("IQM: texture not found: " + texDir + base);
+    if (path.exists(name)) return iqmUploadTex(name);
+
+    var direct = path.join(texDir, name);
+    if (path.exists(direct)) return iqmUploadTex(direct);
+
+    var base = path.basename(name);
+    var localBase = path.join(texDir, base);
+    if (path.exists(localBase)) return iqmUploadTex(localBase);
+
+    var stem = path.filename(name);
+    var exts = [".png", ".jpg", ".jpeg", ".tga"];
+    for (var i = 0; i < len(exts); i += 1)
+    {
+        var candidate = path.join(texDir, stem + exts[i]);
+        if (path.exists(candidate)) return iqmUploadTex(candidate);
+    }
+
+    print("IQM: texture not found: " + name + " in " + texDir);
     return 0;
 }
 
@@ -517,6 +531,7 @@ class IQMModel
             var sx = buf.readFloat(); var sy = buf.readFloat(); var sz = buf.readFloat();
 
             var name  = self.textAt(textTable, nameOfs);
+            print(name);
             var joint = IQMJoint(name, parent);
             joint.tx=tx; joint.ty=ty; joint.tz=tz;
             joint.qx=qx; joint.qy=qy; joint.qz=qz; joint.qw=qw;
@@ -878,18 +893,12 @@ class IQMModel
     }
 
     // ----------------------------------------------------------
-    // Update
+    // Compute current joint palette
     // ----------------------------------------------------------
 
-    def update(dt)
+    def applyFrames(frameA, frameB, t)
     {
         if (!self.ready) return;
-        self.animState.update(dt);
-
-        var frameA = self.animState.current;
-        var frameB = self.animState.next;
-        var t      = self.animState.interp;
-
         if (len(self.poses) == 0) return;
 
         // decode frame A
@@ -932,8 +941,10 @@ class IQMModel
                 self.joints[i].skinMat = m;
             }
         }
+    }
 
-        // cache skinMats
+    def skinCpuFromCurrentPalette()
+    {
         var skinMats = [];
         for (var i = 0; i < len(self.joints); i += 1)
             skinMats.push(self.joints[i].skinMat);
@@ -1000,6 +1011,63 @@ class IQMModel
                 dst.nx=onx; dst.ny=ony; dst.nz=onz;
             }
         }
+    }
+
+    def fillSkinPalette(out)
+    {
+        if (out == nil) return 0;
+        var count = len(self.joints);
+        var need = count * 16;
+        if (out.length() < need) return 0;
+
+        var oi = 0;
+        for (var i = 0; i < count; i += 1)
+        {
+            var m = self.joints[i].skinMat;
+            out.set(oi + 0,  m.m0);  out.set(oi + 1,  m.m1);  out.set(oi + 2,  m.m2);  out.set(oi + 3,  m.m3);
+            out.set(oi + 4,  m.m4);  out.set(oi + 5,  m.m5);  out.set(oi + 6,  m.m6);  out.set(oi + 7,  m.m7);
+            out.set(oi + 8,  m.m8);  out.set(oi + 9,  m.m9);  out.set(oi + 10, m.m10); out.set(oi + 11, m.m11);
+            out.set(oi + 12, m.m12); out.set(oi + 13, m.m13); out.set(oi + 14, m.m14); out.set(oi + 15, m.m15);
+            oi = oi + 16;
+        }
+        return count;
+    }
+
+    def fillSkinPaletteBuffer(out)
+    {
+        if (out == nil) return 0;
+        var count = len(self.joints);
+        var need = count * 16;
+        if (out.length() < need) return 0;
+
+        out.seek(0);
+        for (var i = 0; i < count; i += 1)
+        {
+            var m = self.joints[i].skinMat;
+            out.writeFloat(m.m0);  out.writeFloat(m.m1);  out.writeFloat(m.m2);  out.writeFloat(m.m3);
+            out.writeFloat(m.m4);  out.writeFloat(m.m5);  out.writeFloat(m.m6);  out.writeFloat(m.m7);
+            out.writeFloat(m.m8);  out.writeFloat(m.m9);  out.writeFloat(m.m10); out.writeFloat(m.m11);
+            out.writeFloat(m.m12); out.writeFloat(m.m13); out.writeFloat(m.m14); out.writeFloat(m.m15);
+        }
+        out.seek(0);
+        return count;
+    }
+
+    // ----------------------------------------------------------
+    // Update
+    // ----------------------------------------------------------
+
+    def update(dt)
+    {
+        if (!self.ready) return;
+        self.animState.update(dt);
+
+        var frameA = self.animState.current;
+        var frameB = self.animState.next;
+        var t      = self.animState.interp;
+
+        self.applyFrames(frameA, frameB, t);
+        self.skinCpuFromCurrentPalette();
     }
 
     // ----------------------------------------------------------

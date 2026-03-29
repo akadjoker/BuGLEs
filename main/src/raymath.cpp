@@ -124,10 +124,23 @@ namespace Bindings
         }
 
         NativeStructInstance *inst = v.asNativeStructInstance();
-        if (!inst || inst->def != def || !inst->data)
+        if (!inst || !inst->def || !inst->data)
         {
             Error("%s arg %d expects %s", fn, argIndex, typeName);
             return false;
+        }
+
+        if (inst->def != def)
+        {
+            const bool sameName =
+                inst->def->name && def && def->name &&
+                std::strcmp(inst->def->name->chars(), def->name->chars()) == 0;
+            const bool sameSize = def && inst->def->structSize == def->structSize;
+            if (!sameName || !sameSize)
+            {
+                Error("%s arg %d expects %s", fn, argIndex, typeName);
+                return false;
+            }
         }
 
         *outData = inst->data;

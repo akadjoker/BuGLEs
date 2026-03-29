@@ -1,0 +1,423 @@
+import file;
+import math;
+using math;
+import GLM;
+using GLM;
+
+include "../libs/lib_meshbin.bu";
+
+var MESHANIM_MAGIC = 0x414E494D; // "ANIM"
+var MESHANIM_VERSION = 100;
+var MESHANIM_CHUNK_INFO = 0x494E464F; // "INFO"
+var MESHANIM_CHUNK_CHAN = 0x4348414E; // "CHAN"
+var MESHANIM_CHUNK_KEYS = 0x4B455953; // reserved
+
+
+def meshanimReadU32(buf)
+{
+    var v = buf.readInt();
+    if (v < 0) v = v + 4294967296.0;
+    return v;
+}
+
+
+def meshanimReadCString(buf)
+{
+    var s = "";
+    while (buf.tell() < buf.length())
+    {
+        var b = buf.readByte();
+        if (b == 0) break;
+        s = s + char(b);
+    }
+    return s;
+}
+
+
+def meshanimReadFixedString(buf, count)
+{
+    var s = buf.readString(count);
+    var out = "";
+    var zero = char(0);
+    for (var i = 0; i < len(s); i += 1)
+    {
+        if (s[i] == zero) break;
+        out = out + s[i];
+    }
+    return out;
+}
+
+
+class MeshAnimKeyframe
+{
+    var time;
+    var px, py, pz;
+    var qx, qy, qz, qw;
+
+    def init()
+    {
+        self.time = 0.0;
+        self.px = 0.0; self.py = 0.0; self.pz = 0.0;
+        self.qx = 0.0; self.qy = 0.0; self.qz = 0.0; self.qw = 1.0;
+    }
+}
+
+
+class MeshAnimChannel
+{
+    var boneName;
+    var boneIndex;
+    var keyframes;
+
+    def init()
+    {
+        self.boneName = "";
+        self.boneIndex = -1;
+        self.keyframes = [];
+    }
+}
+
+
+class MeshBinAnimation
+{
+    var name;
+    var duration;
+    var ticksPerSecond;
+    var channels;
+    var ready;
+
+    def init()
+    {
+        self.name = "";
+        self.duration = 0.0;
+        self.ticksPerSecond = 25.0;
+        self.channels = [];
+        self.ready = false;
+    }
+
+    def load(filePath)
+    {
+        self.name = "";
+        self.duration = 0.0;
+        self.ticksPerSecond = 25.0;
+        self.channels = [];
+        self.ready = false;
+
+        var handle = file.open(filePath, "r");
+        if (handle == nil || handle <= 0)
+        {
+            print("MeshAnim: failed to open: " + filePath);
+            return false;
+        }
+
+        var buf = file.read_all(handle);
+        file.close(handle);
+        if (buf == nil) return false;
+
+        buf.seek(0);
+        var magic = meshanimReadU32(buf);
+        var version = meshanimReadU32(buf);
+        if (magic != MESHANIM_MAGIC)
+        {
+            print("MeshAnim: invalid magic: " + magic);
+            return false;
+        }
+        if (version != MESHANIM_VERSION)
+            print("MeshAnim: version mismatch: " + version);
+
+        while (buf.tell() < buf.length())
+        {
+            if (buf.tell() + 8 > buf.length()) break;
+            var chunkId = meshanimReadU32(buf);
+            var chunkLen = meshanimReadU32(buf);
+            var nextPos = int(buf.tell() + chunkLen);
+            if (chunkId == MESHANIM_CHUNK_INFO)
+                self.readInfoChunk(buf);
+            else if (chunkId == MESHANIM_CHUNK_CHAN)
+                self.readChannelChunk(buf);
+            buf.seek(int(nextPos));
+        }
+
+        self.ready = len(self.channels) > 0;
+        return self.ready;
+    }
+
+    def readInfoChunk(buf)
+    {
+        self.name = meshanimReadFixedString(buf, 64);
+        self.duration = buf.readFloat();
+        self.ticksPerSecond = buf.readFloat();
+        meshanimReadU32(buf); // numChannels, not strictly needed here
+    }
+
+    def readChannelChunk(buf)
+    {
+        var ch = MeshAnimChannel();
+        ch.boneName = meshanimReadCString(buf);
+        var numKeys = meshanimReadU32(buf);
+        for (var i = 0; i < numKeys; i += 1)
+        {
+            var k = MeshAnimKeyframe();
+            k.time = buf.readFloat();
+            k.px = buf.readFloat();
+            k.py = buf.readFloat();
+            k.pz = buf.readFloat();
+            k.qx = buf.readFloat();
+            k.qy = buf.readFloat();
+            k.qz = buf.readFloat();
+            k.qw = buf.readFloat();
+            buf.readFloat(); buf.readFloat(); buf.readFloat();
+            ch.keyframes.push(k);
+        }
+        self.channels.push(ch);
+    }
+}
+
+
+class MeshAnimPoseBone
+{
+    var localMat;
+    var globalMat;
+    var skinMat;
+
+    def init()
+    {
+        self.localMat = MatrixIdentity();
+        self.globalMat = MatrixIdentity();
+        self.skinMat = MatrixIdentity();
+    }
+}
+
+
+class MeshBinSkinAnimator
+{
+    var model;
+    var animation;
+    var poses;
+    var time;
+    var speed;
+    var looping;
+    var ready;
+    var paletteBuf;
+
+    def init()
+    {
+        self.model = nil;
+        self.animation = nil;
+        self.poses = [];
+        self.time = 0.0;
+        self.speed = 1.0;
+        self.looping = true;
+        self.ready = false;
+        self.paletteBuf = nil;
+    }
+
+    def buildMatrix(tx, ty, tz, qx, qy, qz, qw)
+    {
+        var q = Quaternion(qx, qy, qz, qw);
+        var m = QuaternionToMatrix(q);
+        m.m12 = tx;
+        m.m13 = ty;
+        m.m14 = tz;
+        return m;
+    }
+
+    def findBone(name)
+    {
+        if (self.model == nil) return -1;
+        for (var i = 0; i < len(self.model.bones); i += 1)
+            if (self.model.bones[i].name == name) return i;
+        return -1;
+    }
+
+    def bind(model, animation)
+    {
+        self.model = model;
+        self.animation = animation;
+        self.poses = [];
+        self.time = 0.0;
+        self.ready = false;
+
+        if (model == nil || animation == nil) return false;
+        if (!model.ready || !animation.ready) return false;
+        if (len(model.bones) <= 0) return false;
+
+        for (var i = 0; i < len(model.bones); i += 1)
+            self.poses.push(MeshAnimPoseBone());
+
+        for (var i = 0; i < len(animation.channels); i += 1)
+            animation.channels[i].boneIndex = self.findBone(animation.channels[i].boneName);
+
+        self.ready = true;
+        self.updatePose(0.0);
+        return true;
+    }
+
+    def sampleChannelToLocal(channel, sampleTime)
+    {
+        var keys = channel.keyframes;
+        if (len(keys) <= 0) return nil;
+        if (len(keys) == 1) 
+        {
+            var k = keys[0];
+            return self.buildMatrix(k.px, k.py, k.pz, k.qx, k.qy, k.qz, k.qw);
+        }
+
+        if (sampleTime <= keys[0].time)
+        {
+            var k = keys[0];
+            return self.buildMatrix(k.px, k.py, k.pz, k.qx, k.qy, k.qz, k.qw);
+        }
+
+        for (var i = 0; i < len(keys) - 1; i += 1)
+        {
+            var ka = keys[i];
+            var kb = keys[i + 1];
+            if (sampleTime <= kb.time)
+            {
+                var dt = kb.time - ka.time;
+                var t = 0.0;
+                if (dt > 0.000001) t = (sampleTime - ka.time) / dt;
+                t = clamp(t, 0.0, 1.0);
+
+                var px = ka.px + (kb.px - ka.px) * t;
+                var py = ka.py + (kb.py - ka.py) * t;
+                var pz = ka.pz + (kb.pz - ka.pz) * t;
+                var qa = Quaternion(ka.qx, ka.qy, ka.qz, ka.qw);
+                var qb = Quaternion(kb.qx, kb.qy, kb.qz, kb.qw);
+                var qr = QuaternionSlerp(qa, qb, t);
+                return self.buildMatrix(px, py, pz, qr.x, qr.y, qr.z, qr.w);
+            }
+        }
+
+        var last = keys[len(keys) - 1];
+        return self.buildMatrix(last.px, last.py, last.pz, last.qx, last.qy, last.qz, last.qw);
+    }
+
+    def updatePose(sampleTime)
+    {
+        if (!self.ready) return;
+
+        for (var i = 0; i < len(self.model.bones); i += 1)
+            self.poses[i].localMat = self.model.bones[i].localPose;
+
+        for (var i = 0; i < len(self.animation.channels); i += 1)
+        {
+            var ch = self.animation.channels[i];
+            if (ch.boneIndex < 0 || ch.boneIndex >= len(self.poses)) continue;
+            var sampled = self.sampleChannelToLocal(ch, sampleTime);
+            if (sampled != nil) self.poses[ch.boneIndex].localMat = sampled;
+        }
+
+        for (var i = 0; i < len(self.model.bones); i += 1)
+        {
+            var bone = self.model.bones[i];
+            var pose = self.poses[i];
+            if (bone.parentIndex < 0)
+                pose.globalMat = pose.localMat;
+            else
+                pose.globalMat = MatrixMultiply(pose.localMat, self.poses[bone.parentIndex].globalMat);
+            pose.skinMat = MatrixMultiply(bone.inverseBindPose, pose.globalMat);
+        }
+    }
+
+    def fillSkinPaletteBuffer(out)
+    {
+        if (!self.ready) return 0;
+        if (out == nil) return 0;
+        var count = len(self.poses);
+        var need = count * 16;
+        if (out.length() < need) return 0;
+
+        out.seek(0);
+        for (var i = 0; i < count; i += 1)
+        {
+            var m = self.poses[i].skinMat;
+            out.writeFloat(m.m0);  out.writeFloat(m.m1);  out.writeFloat(m.m2);  out.writeFloat(m.m3);
+            out.writeFloat(m.m4);  out.writeFloat(m.m5);  out.writeFloat(m.m6);  out.writeFloat(m.m7);
+            out.writeFloat(m.m8);  out.writeFloat(m.m9);  out.writeFloat(m.m10); out.writeFloat(m.m11);
+            out.writeFloat(m.m12); out.writeFloat(m.m13); out.writeFloat(m.m14); out.writeFloat(m.m15);
+        }
+        out.seek(0);
+        return count;
+    }
+
+    def applyCpuSkin()
+    {
+        if (!self.ready) return;
+
+        for (var bi = 0; bi < len(self.model.buffers); bi += 1)
+        {
+            var buffer = self.model.buffers[bi];
+            if (!buffer.isSkinned()) continue;
+
+            if (len(buffer.skinnedPositions) != len(buffer.positions))
+            {
+                buffer.skinnedPositions.clear();
+                for (var i = 0; i < len(buffer.positions); i += 1) buffer.skinnedPositions.push(buffer.positions[i]);
+            }
+            if (len(buffer.skinnedNormals) != len(buffer.normals))
+            {
+                buffer.skinnedNormals.clear();
+                for (var i = 0; i < len(buffer.normals); i += 1) buffer.skinnedNormals.push(buffer.normals[i]);
+            }
+
+            for (var vi = 0; vi < buffer.vertexCount; vi += 1)
+            {
+                var p = vi * 3;
+                var s = vi * 4;
+                var sx = buffer.positions[p + 0];
+                var sy = buffer.positions[p + 1];
+                var sz = buffer.positions[p + 2];
+                var snx = buffer.normals[p + 0];
+                var sny = buffer.normals[p + 1];
+                var snz = buffer.normals[p + 2];
+
+                var ox = 0.0; var oy = 0.0; var oz = 0.0;
+                var onx = 0.0; var ony = 0.0; var onz = 0.0;
+
+                for (var k = 0; k < 4; k += 1)
+                {
+                    var boneIndex = buffer.skinBoneIds[s + k];
+                    var w = buffer.skinWeights[s + k];
+                    if (w <= 0.0) continue;
+                    if (boneIndex < 0 || boneIndex >= len(self.poses)) continue;
+
+                    var sm = self.poses[boneIndex].skinMat;
+                    ox += (sm.m0 * sx + sm.m4 * sy + sm.m8  * sz + sm.m12) * w;
+                    oy += (sm.m1 * sx + sm.m5 * sy + sm.m9  * sz + sm.m13) * w;
+                    oz += (sm.m2 * sx + sm.m6 * sy + sm.m10 * sz + sm.m14) * w;
+                    onx += (sm.m0 * snx + sm.m4 * sny + sm.m8  * snz) * w;
+                    ony += (sm.m1 * snx + sm.m5 * sny + sm.m9  * snz) * w;
+                    onz += (sm.m2 * snx + sm.m6 * sny + sm.m10 * snz) * w;
+                }
+
+                buffer.skinnedPositions[p + 0] = ox;
+                buffer.skinnedPositions[p + 1] = oy;
+                buffer.skinnedPositions[p + 2] = oz;
+                buffer.skinnedNormals[p + 0] = onx;
+                buffer.skinnedNormals[p + 1] = ony;
+                buffer.skinnedNormals[p + 2] = onz;
+            }
+
+            buffer.updateSkinnedGpu(buffer.skinnedPositions, buffer.skinnedNormals);
+        }
+    }
+
+    def update(dt)
+    {
+        if (!self.ready) return;
+        self.time = self.time + dt * self.speed;
+        if (self.animation.duration > 0.000001)
+        {
+            if (self.looping)
+            {
+                while (self.time > self.animation.duration) self.time = self.time - self.animation.duration;
+            }
+            else if (self.time > self.animation.duration)
+                self.time = self.animation.duration;
+        }
+        self.updatePose(self.time);
+        self.applyCpuSkin();
+    }
+}

@@ -53,7 +53,19 @@ if (!model.load(modelPath, texDir))
 }
 
 model.scaleVal = 0.05;
-if (model.animCount() > 0) model.setAnimByIndex(0);
+if (model.animCount() > 0)
+{
+    var startAnim = -1;
+    for (var ai = 0; ai < model.animCount(); ai += 1)
+    {
+        var nm = model.anims[ai].name;
+        if (nm == "run") { startAnim = ai; break; }
+        if (startAnim < 0 && nm == "idle") startAnim = ai;
+        if (startAnim < 0 && nm == "walk") startAnim = ai;
+    }
+    if (startAnim < 0) startAnim = 0;
+    model.setAnimByIndex(startAnim);
+}
 
 // Build trimesh collider from IQM bind vertices.
 var colMesh = TriMesh();

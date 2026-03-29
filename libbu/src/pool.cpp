@@ -59,8 +59,12 @@ void StringPool::freeTransient(String *s)
 
 void StringPool::clear()
 {
-    Info("String pool clear %d strings", map.size());
-    Info("String Pool cllocated %s bytes", formatBytes(bytesAllocated));
+    const size_t pooledObjects = map.size();
+    const size_t uniqueKeys = pool.count;
+
+    Info("String pool clear %zu objects", pooledObjects);
+    Info("String pool unique keys %zu", uniqueKeys);
+    Info("String pool allocated %s bytes", formatBytes(bytesAllocated));
 
     for (size_t i = 0; i < map.size(); i++)
     {

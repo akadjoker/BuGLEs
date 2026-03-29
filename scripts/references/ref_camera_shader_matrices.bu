@@ -1,0 +1,97 @@
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import GLM;
+using GLM;
+
+// Reference: matrix/camera patterns that are known to work in BuGL.
+// Keep this file as the "do not waste time again" reference.
+
+// Known-good:
+// - MatrixPerspective(...)
+// - MatrixOrtho(...)
+// - MatrixLookAt(...)
+// - MatrixMultiply(a, b)
+// - MatrixWriteBuffer(matrix, buffer)
+// - rlGetMatrixModelview()
+// - rlGetMatrixProjection()
+// - rlGetMatrixTransform()
+//
+// Root cause we hit before:
+// - there were multiple native Vector3 registrations in the runtime
+// - raymath compared native struct definitions by pointer identity
+// - MatrixLookAt(...) then rejected a perfectly valid Vector3 from another binding
+// - fixed in raymath.cpp by accepting compatible native structs with same name/size
+//
+// Rule:
+// - never pass Matrix directly to glUniformMatrix4fv
+// - always convert into a preallocated float buffer first
+
+def refMakeLookAt(ex, ey, ez, tx, ty, tz, upx, upy, upz)
+{
+    var vzx = ex - tx;
+    var vzy = ey - ty;
+    var vzz = ez - tz;
+    var zlen = sqrt(vzx * vzx + vzy * vzy + vzz * vzz);
+    if (zlen < 0.000001) zlen = 1.0;
+    vzx = vzx / zlen;
+    vzy = vzy / zlen;
+    vzz = vzz / zlen;
+
+    var vxx = upy * vzz - upz * vzy;
+    var vxy = upz * vzx - upx * vzz;
+    var vxz = upx * vzy - upy * vzx;
+    var xlen = sqrt(vxx * vxx + vxy * vxy + vxz * vxz);
+    if (xlen < 0.000001) xlen = 1.0;
+    vxx = vxx / xlen;
+    vxy = vxy / xlen;
+    vxz = vxz / xlen;
+
+    var vyx = vzy * vxz - vzz * vxy;
+    var vyy = vzz * vxx - vzx * vxz;
+    var vyz = vzx * vxy - vzy * vxx;
+
+    var m = MatrixIdentity();
+    m.m0 = vxx; m.m1 = vyx; m.m2 = vzx; m.m3 = 0.0;
+    m.m4 = vxy; m.m5 = vyy; m.m6 = vzy; m.m7 = 0.0;
+    m.m8 = vxz; m.m9 = vyz; m.m10 = vzz; m.m11 = 0.0;
+    m.m12 = -(vxx * ex + vxy * ey + vxz * ez);
+    m.m13 = -(vyx * ex + vyy * ey + vyz * ez);
+    m.m14 = -(vzx * ex + vzy * ey + vzz * ez);
+    m.m15 = 1.0;
+    return m;
+}
+
+def refUploadModelViewProj(uModel, uView, uProj, modelMat, modelBuf, viewBuf, projBuf)
+{
+    var view = rlGetMatrixModelview();
+    var proj = rlGetMatrixProjection();
+
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    if (uModel >= 0) glUniformMatrix4fv(uModel, 1, false, modelBuf);
+    if (uView >= 0) glUniformMatrix4fv(uView, 1, false, viewBuf);
+    if (uProj >= 0) glUniformMatrix4fv(uProj, 1, false, projBuf);
+}
+
+// Minimal usage:
+// var modelBuf = @(16, TYPE_FLOAT);
+// var viewBuf = @(16, TYPE_FLOAT);
+// var projBuf = @(16, TYPE_FLOAT);
+//
+// BeginMode3D(cam);
+// rlDrawRenderBatchActive();
+// glUseProgram(program);
+// refUploadModelViewProj(uModel, uView, uProj, MatrixIdentity(), modelBuf, viewBuf, projBuf);
+// drawMesh();
+// glUseProgram(0);
+// EndMode3D();
+//
+// Notes:
+// - Do not pass Matrix objects directly to glUniformMatrix4fv.
+// - Convert with MatrixWriteBuffer first.
+// - GetMouseDelta() is typically used as: var (dx, dy) = GetMouseDelta();
+// - MatrixLookAt() is safe again after the Vector3 compatibility fix.

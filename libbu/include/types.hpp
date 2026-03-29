@@ -9,8 +9,8 @@ typedef const char* (*FileLoaderCallback)(const char* filename, size_t* outSize,
 
 static constexpr int MAX_PRIVATES = 28;
  
-static constexpr int STACK_MAX = 256;
-static constexpr int FRAMES_MAX = 64;
+static constexpr int STACK_MAX = 2048;
+static constexpr int FRAMES_MAX = 256;
 static constexpr int GOSUB_MAX = 16;
 static constexpr int TRY_MAX = 4;
 
@@ -37,4 +37,3 @@ enum class FunctionType  : uint8
     TYPE_INITIALIZER,   // init (construtor)
     TYPE_SCRIPT         // top-level script
 };
-

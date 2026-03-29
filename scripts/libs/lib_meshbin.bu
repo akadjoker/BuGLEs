@@ -1,0 +1,659 @@
+import file;
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import STB;
+using STB;
+import GLM;
+using GLM;
+
+var MESHBIN_MAGIC = 0x4D455348; // "MESH"
+var MESHBIN_VERSION = 100;
+
+var MESHBIN_BUFFER_FLAG_SKINNED = 1 << 0;
+var MESHBIN_BUFFER_FLAG_TANGENTS = 1 << 1;
+var MESHBIN_BUFFER_FLAG_COLORS = 1 << 2;
+
+var MESHBIN_CHUNK_MATS = 0x4D415453; // "MATS"
+var MESHBIN_CHUNK_BUFF = 0x42554646; // "BUFF"
+var MESHBIN_CHUNK_VRTS = 0x56525453; // "VRTS"
+var MESHBIN_CHUNK_IDXS = 0x49445853; // "IDXS"
+var MESHBIN_CHUNK_SKEL = 0x534B454C; // "SKEL"
+var MESHBIN_CHUNK_SKIN = 0x534B494E; // "SKIN"
+var MESHBIN_CHUNK_ANIM = 0x414E494D; // "ANIM"
+
+
+def meshbinReadU32(buf)
+{
+    var v = buf.readInt();
+    if (v < 0) v = v + 4294967296.0;
+    return v;
+}
+
+
+def meshbinReadChunkHeader(buf)
+{
+    return [meshbinReadU32(buf), meshbinReadU32(buf)];
+}
+
+
+def meshbinReadCString(buf)
+{
+    var s = "";
+    while (buf.tell() < buf.length())
+    {
+        var b = buf.readByte();
+        if (b == 0) break;
+        s = s + char(b);
+    }
+    return s;
+}
+
+
+def meshbinReadMat4(buf)
+{
+    var m = MatrixIdentity();
+    m.m0 = buf.readFloat();  m.m1 = buf.readFloat();  m.m2 = buf.readFloat();  m.m3 = buf.readFloat();
+    m.m4 = buf.readFloat();  m.m5 = buf.readFloat();  m.m6 = buf.readFloat();  m.m7 = buf.readFloat();
+    m.m8 = buf.readFloat();  m.m9 = buf.readFloat();  m.m10 = buf.readFloat(); m.m11 = buf.readFloat();
+    m.m12 = buf.readFloat(); m.m13 = buf.readFloat(); m.m14 = buf.readFloat(); m.m15 = buf.readFloat();
+    return m;
+}
+
+
+def meshbinLoadTexture2D(texPath)
+{
+    stbi_set_flip_vertically_on_load(1);
+    var (w, h, channels, pixels) = stbi_load(texPath, 4);
+    if (pixels == nil || w == nil || h == nil) return 0;
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def meshbinStripExt(name)
+{
+    if (name == nil || name == "") return name;
+    var lastDot = -1;
+    for (var i = 0; i < len(name); i += 1)
+        if (name[i] == ".") lastDot = i;
+    if (lastDot < 0) return name;
+    var out = "";
+    for (var i = 0; i < lastDot; i += 1) out = out + name[i];
+    return out;
+}
+
+
+class MeshBinMaterial
+{
+    var name;
+    var diffuseR, diffuseG, diffuseB;
+    var specularR, specularG, specularB;
+    var shininess;
+    var textureNames;
+    var textureIds;
+
+    def init()
+    {
+        self.name = "";
+        self.diffuseR = 1.0; self.diffuseG = 1.0; self.diffuseB = 1.0;
+        self.specularR = 0.0; self.specularG = 0.0; self.specularB = 0.0;
+        self.shininess = 0.0;
+        self.textureNames = [];
+        self.textureIds = [];
+    }
+}
+
+
+class MeshBinBone
+{
+    var name;
+    var parentIndex;
+    var localPose;
+    var inverseBindPose;
+
+    def init()
+    {
+        self.name = "";
+        self.parentIndex = -1;
+        self.localPose = MatrixIdentity();
+        self.inverseBindPose = MatrixIdentity();
+    }
+}
+
+
+class MeshBinBuffer
+{
+    var materialIndex;
+    var flags;
+    var positions;
+    var normals;
+    var texcoords;
+    var indices;
+    var skinBoneIds;
+    var skinWeights;
+    var vao, vbo, ebo;
+    var vertexCount;
+    var indexCount;
+    var dynamicVerts;
+    var skinnedPositions;
+    var skinnedNormals;
+    var minX, minY, minZ;
+    var maxX, maxY, maxZ;
+
+    def init()
+    {
+        self.materialIndex = 0;
+        self.flags = 0;
+        self.positions = [];
+        self.normals = [];
+        self.texcoords = [];
+        self.indices = [];
+        self.skinBoneIds = [];
+        self.skinWeights = [];
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.vertexCount = 0;
+        self.indexCount = 0;
+        self.dynamicVerts = Float32Array(0);
+        self.skinnedPositions = [];
+        self.skinnedNormals = [];
+        self.resetBounds();
+    }
+
+    def resetBounds()
+    {
+        self.minX =  1000000000.0; self.minY =  1000000000.0; self.minZ =  1000000000.0;
+        self.maxX = -1000000000.0; self.maxY = -1000000000.0; self.maxZ = -1000000000.0;
+    }
+
+    def addBound(x, y, z)
+    {
+        if (x < self.minX) self.minX = x;
+        if (y < self.minY) self.minY = y;
+        if (z < self.minZ) self.minZ = z;
+        if (x > self.maxX) self.maxX = x;
+        if (y > self.maxY) self.maxY = y;
+        if (z > self.maxZ) self.maxZ = z;
+    }
+
+    def destroy()
+    {
+        if (self.ebo > 0) glDeleteBuffers(self.ebo);
+        if (self.vbo > 0) glDeleteBuffers(self.vbo);
+        if (self.vao > 0) glDeleteVertexArrays(self.vao);
+        self.vao = 0; self.vbo = 0; self.ebo = 0;
+        self.indexCount = 0;
+        self.vertexCount = 0;
+    }
+
+    def isSkinned()
+    {
+        if ((self.flags & MESHBIN_BUFFER_FLAG_SKINNED) != 0) return true;
+        return false;
+    }
+
+    def upload()
+    {
+        self.destroy();
+        self.vertexCount = int(len(self.positions) / 3);
+        self.indexCount = len(self.indices);
+        if (self.vertexCount <= 0 || self.indexCount <= 0) return false;
+
+        self.dynamicVerts.clear();
+        self.dynamicVerts.reserve(self.vertexCount * 16);
+        for (var i = 0; i < self.vertexCount; i += 1)
+        {
+            var p = i * 3;
+            var t = i * 2;
+            var s = i * 4;
+            var b0 = 0.0; var b1 = 0.0; var b2 = 0.0; var b3 = 0.0;
+            var w0 = 0.0; var w1 = 0.0; var w2 = 0.0; var w3 = 0.0;
+            if (self.isSkinned())
+            {
+                b0 = self.skinBoneIds[s + 0]; b1 = self.skinBoneIds[s + 1];
+                b2 = self.skinBoneIds[s + 2]; b3 = self.skinBoneIds[s + 3];
+                w0 = self.skinWeights[s + 0]; w1 = self.skinWeights[s + 1];
+                w2 = self.skinWeights[s + 2]; w3 = self.skinWeights[s + 3];
+            }
+            self.dynamicVerts.add(
+                self.positions[p + 0], self.positions[p + 1], self.positions[p + 2],
+                self.normals[p + 0], self.normals[p + 1], self.normals[p + 2],
+                self.texcoords[t + 0], self.texcoords[t + 1],
+                b0, b1, b2, b3,
+                w0, w1, w2, w3
+            );
+        }
+
+        var idx = Uint32Array(0);
+        for (var i = 0; i < self.indexCount; i += 1) idx.add(self.indices[i]);
+
+        self.vao = glGenVertexArrays();
+        self.vbo = glGenBuffers();
+        self.ebo = glGenBuffers();
+
+        glBindVertexArray(self.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        var usage = self.isSkinned() ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW;
+        glBufferData(GL_ARRAY_BUFFER, self.dynamicVerts.byteLength(), self.dynamicVerts, usage);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.byteLength(), idx, GL_STATIC_DRAW);
+
+        var stride = 16 * 4;
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, stride, 0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, false, stride, 3 * 4);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, false, stride, 6 * 4);
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 4, GL_FLOAT, false, stride, 8 * 4);
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 4, GL_FLOAT, false, stride, 12 * 4);
+
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+        if (self.isSkinned())
+        {
+            self.skinnedPositions.clear();
+            self.skinnedNormals.clear();
+            for (var i = 0; i < len(self.positions); i += 1) self.skinnedPositions.push(self.positions[i]);
+            for (var i = 0; i < len(self.normals); i += 1) self.skinnedNormals.push(self.normals[i]);
+        }
+        return true;
+    }
+
+    def updateSkinnedGpu(posArray, nrmArray)
+    {
+        if (self.vao <= 0 || self.vbo <= 0) return;
+        if (len(posArray) != len(self.positions)) return;
+        if (len(nrmArray) != len(self.normals)) return;
+
+        self.dynamicVerts.clear();
+        self.dynamicVerts.reserve(self.vertexCount * 16);
+        for (var i = 0; i < self.vertexCount; i += 1)
+        {
+            var p = i * 3;
+            var t = i * 2;
+            var s = i * 4;
+            self.dynamicVerts.add(
+                posArray[p + 0], posArray[p + 1], posArray[p + 2],
+                nrmArray[p + 0], nrmArray[p + 1], nrmArray[p + 2],
+                self.texcoords[t + 0], self.texcoords[t + 1],
+                self.skinBoneIds[s + 0], self.skinBoneIds[s + 1], self.skinBoneIds[s + 2], self.skinBoneIds[s + 3],
+                self.skinWeights[s + 0], self.skinWeights[s + 1], self.skinWeights[s + 2], self.skinWeights[s + 3]
+            );
+        }
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, self.dynamicVerts.byteLength(), self.dynamicVerts);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    def draw()
+    {
+        if (self.vao <= 0 || self.indexCount <= 0) return;
+        glBindVertexArray(self.vao);
+        glDrawElements(GL_TRIANGLES, self.indexCount, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+    }
+}
+
+
+class MeshBinModel
+{
+    var sourcePath;
+    var baseDir;
+    var materials;
+    var bones;
+    var buffers;
+    var texCachePaths;
+    var texCacheIds;
+    var posX, posY, posZ;
+    var rotX, rotY, rotZ;
+    var scale;
+    var ready;
+    var minX, minY, minZ;
+    var maxX, maxY, maxZ;
+    var centerX, centerY, centerZ;
+    var sizeX, sizeY, sizeZ;
+
+    def init()
+    {
+        self.sourcePath = "";
+        self.baseDir = "";
+        self.materials = [];
+        self.bones = [];
+        self.buffers = [];
+        self.texCachePaths = [];
+        self.texCacheIds = [];
+        self.posX = 0.0; self.posY = 0.0; self.posZ = 0.0;
+        self.rotX = 0.0; self.rotY = 0.0; self.rotZ = 0.0;
+        self.scale = 1.0;
+        self.ready = false;
+        self.resetBounds();
+    }
+
+    def resetBounds()
+    {
+        self.minX =  1000000000.0; self.minY =  1000000000.0; self.minZ =  1000000000.0;
+        self.maxX = -1000000000.0; self.maxY = -1000000000.0; self.maxZ = -1000000000.0;
+        self.centerX = 0.0; self.centerY = 0.0; self.centerZ = 0.0;
+        self.sizeX = 0.0; self.sizeY = 0.0; self.sizeZ = 0.0;
+    }
+
+    def addBound(x, y, z)
+    {
+        if (x < self.minX) self.minX = x;
+        if (y < self.minY) self.minY = y;
+        if (z < self.minZ) self.minZ = z;
+        if (x > self.maxX) self.maxX = x;
+        if (y > self.maxY) self.maxY = y;
+        if (z > self.maxZ) self.maxZ = z;
+    }
+
+    def finalizeBounds()
+    {
+        if (self.minX > self.maxX) return;
+        self.centerX = (self.minX + self.maxX) * 0.5;
+        self.centerY = (self.minY + self.maxY) * 0.5;
+        self.centerZ = (self.minZ + self.maxZ) * 0.5;
+        self.sizeX = self.maxX - self.minX;
+        self.sizeY = self.maxY - self.minY;
+        self.sizeZ = self.maxZ - self.minZ;
+    }
+
+    def destroy()
+    {
+        for (var i = 0; i < len(self.buffers); i += 1) self.buffers[i].destroy();
+        for (var i = 0; i < len(self.texCacheIds); i += 1)
+            if (self.texCacheIds[i] > 0) glDeleteTextures(self.texCacheIds[i]);
+        self.materials = [];
+        self.bones = [];
+        self.buffers = [];
+        self.texCachePaths = [];
+        self.texCacheIds = [];
+        self.ready = false;
+        self.resetBounds();
+    }
+
+    def materialCount()
+    {
+        return len(self.materials);
+    }
+
+    def boneCount()
+    {
+        return len(self.bones);
+    }
+
+    def bufferCount()
+    {
+        return len(self.buffers);
+    }
+
+    def hasSkeleton()
+    {
+        if (len(self.bones) > 0) return true;
+        return false;
+    }
+
+    def loadTextureCached(texPath)
+    {
+        if (texPath == nil || texPath == "") return 0;
+        for (var i = 0; i < len(self.texCachePaths); i += 1)
+            if (self.texCachePaths[i] == texPath) return self.texCacheIds[i];
+        var texId = meshbinLoadTexture2D(texPath);
+        if (texId > 0)
+        {
+            self.texCachePaths.push(texPath);
+            self.texCacheIds.push(texId);
+        }
+        return texId;
+    }
+
+    def resolveTexturePath(name)
+    {
+        if (name == nil || name == "") return nil;
+        if (path.exists(name)) return name;
+        var p = self.baseDir + name;
+        if (path.exists(p)) return p;
+        var fname = path.filename(name);
+        p = self.baseDir + fname;
+        if (path.exists(p)) return p;
+        p = self.baseDir + "textures/" + name;
+        if (path.exists(p)) return p;
+        p = self.baseDir + "textures/" + fname;
+        if (path.exists(p)) return p;
+
+        var bare = meshbinStripExt(fname);
+        var exts = [".png", ".jpg", ".jpeg", ".tga", ".bmp", ".dds"];
+        for (var i = 0; i < len(exts); i += 1)
+        {
+            p = self.baseDir + bare + exts[i];
+            if (path.exists(p)) return p;
+            p = self.baseDir + "textures/" + bare + exts[i];
+            if (path.exists(p)) return p;
+        }
+        return nil;
+    }
+
+    def makeModelMatrix()
+    {
+        var degToRad = PI / 180.0;
+        var m = MatrixScale(self.scale, self.scale, self.scale);
+        m = MatrixMultiply(m, MatrixRotateZ(self.rotZ * degToRad));
+        m = MatrixMultiply(m, MatrixRotateY(self.rotY * degToRad));
+        m = MatrixMultiply(m, MatrixRotateX(self.rotX * degToRad));
+        m = MatrixMultiply(m, MatrixTranslate(self.posX, self.posY, self.posZ));
+        return m;
+    }
+
+    def load(filePath)
+    {
+        self.destroy();
+        self.sourcePath = filePath;
+        self.baseDir = path.dirname(filePath) + "/";
+
+        var handle = file.open(filePath, "r");
+        if (handle == nil || handle <= 0)
+        {
+            print("MeshBin: failed to open: " + filePath);
+            return false;
+        }
+
+        var buf = file.read_all(handle);
+        file.close(handle);
+        if (buf == nil)
+        {
+            print("MeshBin: read_all failed: " + filePath);
+            return false;
+        }
+
+        buf.seek(0);
+        var magic = meshbinReadU32(buf);
+        var version = meshbinReadU32(buf);
+        if (magic != MESHBIN_MAGIC)
+        {
+            print("MeshBin: invalid magic: " + magic);
+            return false;
+        }
+        if (int(version / 100) > int(MESHBIN_VERSION / 100))
+            print("MeshBin: newer version: " + version);
+
+        while (buf.tell() < buf.length())
+        {
+            if (buf.tell() >= buf.length()) break;
+            var hdr = meshbinReadChunkHeader(buf);
+            var chunkId = hdr[0];
+            var chunkLen = hdr[1];
+            var chunkEnd = int(buf.tell() + chunkLen);
+
+            if (chunkId == MESHBIN_CHUNK_MATS)
+                self.readMaterialsChunk(buf);
+            else if (chunkId == MESHBIN_CHUNK_SKEL)
+                self.readSkeletonChunk(buf);
+            else if (chunkId == MESHBIN_CHUNK_BUFF)
+                self.readBufferChunk(buf, chunkLen);
+            else
+                buf.seek(int(chunkEnd));
+
+            if (buf.tell() < chunkEnd) buf.seek(int(chunkEnd));
+        }
+
+        self.finalizeBounds();
+        self.ready = len(self.buffers) > 0;
+        return self.ready;
+    }
+
+    def readMaterialsChunk(buf)
+    {
+        var numMaterials = meshbinReadU32(buf);
+        for (var i = 0; i < numMaterials; i += 1)
+        {
+            var mat = MeshBinMaterial();
+            mat.name = meshbinReadCString(buf);
+            mat.diffuseR = buf.readFloat();
+            mat.diffuseG = buf.readFloat();
+            mat.diffuseB = buf.readFloat();
+            mat.specularR = buf.readFloat();
+            mat.specularG = buf.readFloat();
+            mat.specularB = buf.readFloat();
+            mat.shininess = buf.readFloat();
+            var numLayers = buf.readByte();
+            for (var j = 0; j < numLayers; j += 1)
+            {
+                var texName = meshbinReadCString(buf);
+                mat.textureNames.push(texName);
+                mat.textureIds.push(self.loadTextureCached(self.resolveTexturePath(texName)));
+            }
+            self.materials.push(mat);
+        }
+    }
+
+    def readSkeletonChunk(buf)
+    {
+        var numBones = meshbinReadU32(buf);
+        for (var i = 0; i < numBones; i += 1)
+        {
+            var b = MeshBinBone();
+            b.name = meshbinReadCString(buf);
+            b.parentIndex = buf.readInt();
+            b.localPose = meshbinReadMat4(buf);
+            b.inverseBindPose = meshbinReadMat4(buf);
+            self.bones.push(b);
+        }
+    }
+
+    def readBufferChunk(buf, chunkLen)
+    {
+        var endPos = int(buf.tell() + chunkLen);
+        var buffer = MeshBinBuffer();
+        buffer.materialIndex = meshbinReadU32(buf);
+        buffer.flags = meshbinReadU32(buf);
+
+        while (buf.tell() < endPos)
+        {
+            var subHdr = meshbinReadChunkHeader(buf);
+            var subId = subHdr[0];
+            var subLen = subHdr[1];
+            var subEnd = int(buf.tell() + subLen);
+            if (subId == MESHBIN_CHUNK_VRTS)
+                self.readVerticesChunk(buf, buffer);
+            else if (subId == MESHBIN_CHUNK_IDXS)
+                self.readIndicesChunk(buf, buffer);
+            else if (subId == MESHBIN_CHUNK_SKIN)
+                self.readSkinChunk(buf, buffer);
+            else
+                buf.seek(int(subEnd));
+            if (buf.tell() < subEnd) buf.seek(int(subEnd));
+        }
+
+        buffer.upload();
+        self.buffers.push(buffer);
+        self.addBound(buffer.minX, buffer.minY, buffer.minZ);
+        self.addBound(buffer.maxX, buffer.maxY, buffer.maxZ);
+    }
+
+    def readVerticesChunk(buf, buffer)
+    {
+        var numVertices = meshbinReadU32(buf);
+        for (var i = 0; i < numVertices; i += 1)
+        {
+            var x = buf.readFloat();
+            var y = buf.readFloat();
+            var z = buf.readFloat();
+            var nx = buf.readFloat();
+            var ny = buf.readFloat();
+            var nz = buf.readFloat();
+            var u = buf.readFloat();
+            var v = buf.readFloat();
+            buffer.positions.push(x); buffer.positions.push(y); buffer.positions.push(z);
+            buffer.normals.push(nx); buffer.normals.push(ny); buffer.normals.push(nz);
+            buffer.texcoords.push(u); buffer.texcoords.push(v);
+            buffer.addBound(x, y, z);
+        }
+    }
+
+    def readIndicesChunk(buf, buffer)
+    {
+        var numIndices = meshbinReadU32(buf);
+        for (var i = 0; i < numIndices; i += 3)
+        {
+            buffer.indices.push(meshbinReadU32(buf));
+            buffer.indices.push(meshbinReadU32(buf));
+            buffer.indices.push(meshbinReadU32(buf));
+        }
+    }
+
+    def readSkinChunk(buf, buffer)
+    {
+        var numVertices = meshbinReadU32(buf);
+        for (var i = 0; i < numVertices; i += 1)
+        {
+            buffer.skinBoneIds.push(buf.readByte());
+            buffer.skinBoneIds.push(buf.readByte());
+            buffer.skinBoneIds.push(buf.readByte());
+            buffer.skinBoneIds.push(buf.readByte());
+            buffer.skinWeights.push(buf.readFloat());
+            buffer.skinWeights.push(buf.readFloat());
+            buffer.skinWeights.push(buf.readFloat());
+            buffer.skinWeights.push(buf.readFloat());
+        }
+    }
+
+    def draw()
+    {
+        if (!self.ready) return;
+        for (var i = 0; i < len(self.buffers); i += 1)
+        {
+            var b = self.buffers[i];
+            var texId = 0;
+            if (b.materialIndex >= 0 && b.materialIndex < len(self.materials))
+            {
+                var mat = self.materials[b.materialIndex];
+                if (len(mat.textureIds) > 0) texId = mat.textureIds[0];
+            }
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, texId);
+            b.draw();
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+}

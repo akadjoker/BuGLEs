@@ -44,6 +44,7 @@ var model = B3DModel();
 if (!model.load(modelPath, texDir))
 {
     print("Failed to load B3D: " + modelPath);
+    DestroyCamera3D(cam);
     CloseWindow();
     return;
 }
@@ -91,4 +92,5 @@ while (!WindowShouldClose())
     EndDrawing();
 }
 
+DestroyCamera3D(cam);
 CloseWindow();

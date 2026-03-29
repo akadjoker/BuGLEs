@@ -1,0 +1,1309 @@
+import file;
+import path;
+using path;
+import math;
+using math;
+import ImGui;
+using ImGui;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import GLM;
+using GLM;
+
+include "../libs/lib_meshbin.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def readTextFile(filePath)
+{
+    if (filePath == nil || !path.exists(filePath)) return nil;
+    var handle = file.open(filePath, "r");
+    if (handle == nil || handle <= 0) return nil;
+    var buf = file.read_all(handle);
+    file.close(handle);
+    if (buf == nil) return nil;
+    buf.seek(0);
+    return buf.readString(buf.length());
+}
+
+
+def strReplace(text, fromText, toText)
+{
+    if (text == nil) return nil;
+    if (fromText == nil || fromText == "") return text;
+
+    var out = "";
+    var i = 0;
+    var fromLen = len(fromText);
+    var textLen = len(text);
+
+    while (i < textLen)
+    {
+        var match = true;
+        if (i + fromLen > textLen) match = false;
+        if (match)
+        {
+            for (var j = 0; j < fromLen; j += 1)
+            {
+                if (text[i + j] != fromText[j])
+                {
+                    match = false;
+                    break;
+                }
+            }
+        }
+
+        if (match)
+        {
+            out = out + toText;
+            i = i + fromLen;
+        }
+        else
+        {
+            out = out + text[i];
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+
+def patchShadowShaderSource(src)
+{
+    if (src == nil) return nil;
+    src = strReplace(src, "#version 300 es", "#version 330 core");
+    src = strReplace(src, "precision highp float;\r\n", "");
+    src = strReplace(src, "precision highp float;\n", "");
+    src = strReplace(src, "precision mediump float;\r\n", "");
+    src = strReplace(src, "precision mediump float;\n", "");
+    return src;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Factory shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Factory shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def createSolidTexture(r, g, b, a)
+{
+    var pixels = Uint8Array(4);
+    pixels.add(r, g, b, a);
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+class ShadowTarget
+{
+    var fbo;
+    var depth;
+    var color;
+    var size;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.depth = 0;
+        self.color = 0;
+        self.size = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteTextures(self.depth);
+        if (self.color > 0) glDeleteTextures(self.color);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.depth = 0;
+        self.color = 0;
+        self.size = 0;
+    }
+}
+
+
+class PostTarget
+{
+    var fbo;
+    var color;
+    var depth;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteRenderbuffers(self.depth);
+        if (self.color > 0) glDeleteTextures(self.color);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+def makeShadowTarget(size)
+{
+    var st = ShadowTarget();
+    st.size = size;
+    st.fbo = glGenFramebuffers();
+    st.depth = glGenTextures();
+    st.color = glGenTextures();
+
+    glBindTexture(GL_TEXTURE_2D, st.depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size, size, 0, 0x1902, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindTexture(GL_TEXTURE_2D, st.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, st.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, st.depth, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, st.color, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("Factory CSM target incomplete: " + status);
+        st.destroy();
+        return nil;
+    }
+
+    return st;
+}
+
+
+def makePostTarget(width, height, withDepth)
+{
+    var rt = PostTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.color = glGenTextures();
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.color, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+
+    if (withDepth)
+    {
+        rt.depth = glGenRenderbuffers();
+        glBindRenderbuffer(GL_RENDERBUFFER, rt.depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt.depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    }
+
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("Factory post target incomplete: " + status);
+        rt.destroy();
+        return nil;
+    }
+
+    return rt;
+}
+
+
+def drawFullscreenQuad(vao)
+{
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+def renderDepthMesh(mesh, modelMat, lightVP, mvpBuf, uLightMVP)
+{
+    var lightMVP = MatrixMultiply(modelMat, lightVP);
+    MatrixWriteBuffer(lightMVP, mvpBuf);
+    glUniformMatrix4fv(uLightMVP, 1, false, mvpBuf);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+        mesh.buffers[i].draw();
+}
+
+
+def renderCascade(target, mesh, modelMat, lightVP, mvpBuf, progDepth, uLightMVP)
+{
+    glViewport(0, 0, target.size, target.size);
+    glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(progDepth);
+    renderDepthMesh(mesh, modelMat, lightVP, mvpBuf, uLightMVP);
+    glUseProgram(0);
+}
+
+
+var meshPath = resolveAssetPath(
+    "assets/powerplant/powerplant.h3d",
+    "../assets/powerplant/powerplant.h3d",
+    "../../assets/powerplant/powerplant.h3d"
+);
+if (meshPath == nil)
+{
+    print("factory mesh/shader assets missing");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(720,480,"BuGL - BigMesh Factory CSM");
+SetTargetFPS(60);
+InitImGui();
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load meshbin: " + meshPath);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 300.0;
+var targetRadius = 420.0;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 80.0) sceneRadius = 80.0;
+var sceneCenterX = 0.0;
+var sceneCenterY = 0.0;
+var sceneCenterZ = 0.0;
+
+var depthVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+
+uniform mat4 uLightMVP;
+
+void main()
+{
+    gl_Position = uLightMVP * vec4(aPos, 1.0);
+}
+";
+
+var depthFsSrc = @"
+#version 330 core
+layout(location = 0) out vec4 FragColor;
+
+void main()
+{
+    FragColor = vec4(1.0);
+}
+";
+
+var sceneVsSrc = @"
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec2 aTexCoords;
+
+out vec3 FragPos;
+out vec3 Normal;
+out vec2 TexCoords;
+out vec4 FragPosViewSpace;
+
+uniform mat4 projection;
+uniform mat4 view;
+uniform mat4 model;
+
+void main()
+{
+    FragPos = vec3(model * vec4(aPos, 1.0));
+    Normal = transpose(inverse(mat3(model))) * aNormal;
+    TexCoords = aTexCoords;
+    FragPosViewSpace = view * vec4(FragPos, 1.0);
+    gl_Position = projection * view * model * vec4(aPos, 1.0);
+}
+";
+
+var sceneFsSrc = @"
+#version 330 core
+out vec4 FragColor;
+
+in vec3 FragPos;
+in vec3 Normal;
+in vec2 TexCoords;
+in vec4 FragPosViewSpace;
+
+uniform sampler2D diffuseTexture;
+uniform sampler2D shadowMap[4];
+
+uniform vec3 lightPos;
+uniform vec3 viewPos;
+uniform mat4 lightSpaceMatrices[4];
+uniform float cascadePlaneDistances[4];
+uniform int cascadeCount;
+uniform bool showCascades;
+uniform float farPlane;
+uniform vec2 shadowMapSize;
+uniform float ambientStrength;
+
+const vec2 poissonDisk[16] = vec2[](
+   vec2(-0.94201624, -0.39906216),
+   vec2(0.94558609, -0.76890725),
+   vec2(-0.094184101, -0.92938870),
+   vec2(0.34495938, 0.29387760),
+   vec2(-0.91588581, 0.45771432),
+   vec2(-0.81544232, -0.87912464),
+   vec2(-0.38277543, 0.27676845),
+   vec2(0.97484398, 0.75648379),
+   vec2(0.44323325, -0.97511554),
+   vec2(0.53742981, -0.47373420),
+   vec2(-0.26496911, -0.41893023),
+   vec2(0.79197514, 0.19090188),
+   vec2(-0.24188840, 0.99706507),
+   vec2(-0.81409955, 0.91437590),
+   vec2(0.19984126, 0.78641367),
+   vec2(0.14383161, -0.14100790)
+);
+
+float SampleShadowMap(int cascadeIndex, vec2 uv)
+{
+    if (cascadeIndex == 0) return texture(shadowMap[0], uv).r;
+    else if (cascadeIndex == 1) return texture(shadowMap[1], uv).r;
+    else if (cascadeIndex == 2) return texture(shadowMap[2], uv).r;
+    return texture(shadowMap[3], uv).r;
+}
+
+float ShadowCalculationPCF(int cascadeIndex, vec4 fragPosLightSpace)
+{
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    projCoords = projCoords * 0.5 + 0.5;
+
+    if (projCoords.z > 1.0) return 0.0;
+    if (projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0) return 0.0;
+
+    float currentDepth = projCoords.z;
+    vec3 normal = normalize(Normal);
+    vec3 lightDir = normalize(lightPos - FragPos);
+    float NdotL = max(dot(normal, lightDir), 0.0);
+
+    float baseBias = max(0.0002, 0.000005);
+    float slopeBias = 0.0001 * (1.0 - NdotL);
+    float cascadeScale = 1.0 + float(cascadeIndex) * 0.2;
+    float bias = (baseBias + slopeBias) * cascadeScale;
+
+    float shadow = 0.0;
+    vec2 texelSize = 1.0 / shadowMapSize;
+    float diskRadius = 0.68;
+    for (int i = 0; i < 16; ++i)
+    {
+        vec2 offset = poissonDisk[i] * texelSize * diskRadius;
+        float pcfDepth = SampleShadowMap(cascadeIndex, projCoords.xy + offset);
+        shadow += (currentDepth - bias) > pcfDepth ? 1.0 : 0.0;
+    }
+    shadow /= 16.0;
+    return shadow;
+}
+
+vec3 GetCascadeColor(int cascadeIndex)
+{
+    if (cascadeIndex == 0) return vec3(1.0, 0.0, 0.0);
+    else if (cascadeIndex == 1) return vec3(0.0, 1.0, 0.0);
+    else if (cascadeIndex == 2) return vec3(0.0, 0.0, 1.0);
+    return vec3(1.0, 1.0, 0.0);
+}
+
+void main()
+{
+    vec3 color = texture(diffuseTexture, TexCoords).rgb;
+    vec3 normal = normalize(Normal);
+    vec3 lightColor = vec3(1.0);
+
+    vec3 ambient = ambientStrength * lightColor;
+    vec3 lightDir = normalize(lightPos - FragPos);
+    float diff = max(dot(lightDir, normal), 0.0);
+    vec3 diffuse = diff * lightColor;
+    vec3 viewDir = normalize(viewPos - FragPos);
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfwayDir), 0.0), 64.0);
+    vec3 specular = spec * lightColor;
+
+    float depthValue = abs(FragPosViewSpace.z);
+    int cascadeIndex = -1;
+    for (int i = 0; i < cascadeCount; ++i)
+    {
+        if (depthValue < cascadePlaneDistances[i])
+        {
+            cascadeIndex = i;
+            break;
+        }
+    }
+    if (cascadeIndex == -1) cascadeIndex = cascadeCount - 1;
+
+    float shadow = 0.0;
+    if (cascadeIndex < cascadeCount - 1)
+    {
+        float cascadeDistance = cascadePlaneDistances[cascadeIndex];
+        float blendRatio = smoothstep(cascadeDistance * 0.85, cascadeDistance, depthValue);
+        if (blendRatio > 0.001)
+        {
+            vec3 offsetFragPos = FragPos + normalize(Normal) * 0.0015;
+            vec4 fragPosLight1 = lightSpaceMatrices[cascadeIndex] * vec4(offsetFragPos, 1.0);
+            float shadow1 = ShadowCalculationPCF(cascadeIndex, fragPosLight1);
+            vec4 fragPosLight2 = lightSpaceMatrices[cascadeIndex + 1] * vec4(offsetFragPos, 1.0);
+            float shadow2 = ShadowCalculationPCF(cascadeIndex + 1, fragPosLight2);
+            shadow = mix(shadow1, shadow2, blendRatio);
+        }
+        else
+        {
+            vec3 offsetFragPos = FragPos + normalize(Normal) * 0.0015;
+            vec4 fragPosLightSpace = lightSpaceMatrices[cascadeIndex] * vec4(offsetFragPos, 1.0);
+            shadow = ShadowCalculationPCF(cascadeIndex, fragPosLightSpace);
+        }
+    }
+    else
+    {
+        vec3 offsetFragPos = FragPos + normalize(Normal) * 0.0015;
+        vec4 fragPosLightSpace = lightSpaceMatrices[cascadeIndex] * vec4(offsetFragPos, 1.0);
+        shadow = ShadowCalculationPCF(cascadeIndex, fragPosLightSpace);
+    }
+
+    vec3 lighting = (ambient + (1.0 - shadow) * (diffuse + specular)) * color;
+    if (showCascades) lighting *= GetCascadeColor(cascadeIndex);
+    FragColor = vec4(lighting, 1.0);
+}
+";
+
+var quadVsSrc = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+out vec2 vUV;
+
+void main()
+{
+    vUV = aUV;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+";
+
+var skyFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform vec3 uForward;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec3 uSunDir;
+uniform float uAspect;
+uniform float uTanHalfFov;
+
+void main()
+{
+    vec2 uv = vUV * 2.0 - 1.0;
+    vec3 rayDir = normalize(
+        uForward +
+        uv.x * uAspect * uTanHalfFov * uRight -
+        uv.y * uTanHalfFov * uUp
+    );
+
+    float h = clamp(rayDir.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 horizon = vec3(0.87, 0.73, 0.58);
+    vec3 zenith = vec3(0.22, 0.46, 0.80);
+    vec3 nadir = vec3(0.03, 0.05, 0.09);
+    vec3 sky = mix(horizon, zenith, smoothstep(0.0, 0.82, h));
+    sky = mix(nadir, sky, smoothstep(-0.35, 0.08, rayDir.y));
+
+    float sunDot = max(dot(rayDir, normalize(uSunDir)), 0.0);
+    float sunDisk = pow(sunDot, 2048.0);
+    float sunGlow = pow(sunDot, 32.0) * 0.30 + pow(sunDot, 128.0) * 0.90;
+    vec3 sunColor = vec3(1.0, 0.88, 0.62) * (sunDisk * 6.0 + sunGlow);
+
+    FragColor = vec4(sky + sunColor, 1.0);
+}
+";
+
+var brightFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uScene;
+uniform float uThreshold;
+uniform float uBoost;
+
+void main()
+{
+    vec3 col = texture(uScene, vUV).rgb;
+    float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    float knee = max(uThreshold * 0.5, 0.0001);
+    float soft = clamp(lum - uThreshold + knee, 0.0, 2.0 * knee);
+    soft = (soft * soft) / max(4.0 * knee, 0.0001);
+    float hard = max(lum - uThreshold, 0.0);
+    float bright = max(soft, hard) / max(lum, 0.0001);
+    FragColor = vec4(col * bright * uBoost, 1.0);
+}
+";
+
+var blurFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uTex;
+uniform vec2 uTexelDir;
+
+void main()
+{
+    float w0 = 0.2270270270;
+    float w1 = 0.1945945946;
+    float w2 = 0.1216216216;
+    float w3 = 0.0540540541;
+    float w4 = 0.0162162162;
+
+    vec3 col = texture(uTex, vUV).rgb * w0;
+    col += texture(uTex, vUV + uTexelDir * 1.0).rgb * w1;
+    col += texture(uTex, vUV - uTexelDir * 1.0).rgb * w1;
+    col += texture(uTex, vUV + uTexelDir * 2.0).rgb * w2;
+    col += texture(uTex, vUV - uTexelDir * 2.0).rgb * w2;
+    col += texture(uTex, vUV + uTexelDir * 3.0).rgb * w3;
+    col += texture(uTex, vUV - uTexelDir * 3.0).rgb * w3;
+    col += texture(uTex, vUV + uTexelDir * 4.0).rgb * w4;
+    col += texture(uTex, vUV - uTexelDir * 4.0).rgb * w4;
+    FragColor = vec4(col, 1.0);
+}
+";
+
+var compositeFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+uniform float uBloomStrength;
+uniform float uExposure;
+
+void main()
+{
+    vec3 hdr = texture(uScene, vUV).rgb;
+    vec3 bloom = texture(uBloom, vUV).rgb;
+    vec3 col = hdr + bloom * uBloomStrength;
+    col = vec3(1.0) - exp(-col * uExposure);
+    col = pow(col, vec3(1.0 / 2.2));
+    FragColor = vec4(col, 1.0);
+}
+";
+
+var progDepth = linkProgram(depthVsSrc, depthFsSrc);
+var progScene = linkProgram(sceneVsSrc, sceneFsSrc);
+var progSky = linkProgram(quadVsSrc, skyFsSrc);
+var progBright = linkProgram(quadVsSrc, brightFsSrc);
+var progBlur = linkProgram(quadVsSrc, blurFsSrc);
+var progComposite = linkProgram(quadVsSrc, compositeFsSrc);
+if (progDepth <= 0 || progScene <= 0 || progSky <= 0 || progBright <= 0 || progBlur <= 0 || progComposite <= 0)
+{
+    if (progDepth > 0) glDeleteProgram(progDepth);
+    if (progScene > 0) glDeleteProgram(progScene);
+    if (progSky > 0) glDeleteProgram(progSky);
+    if (progBright > 0) glDeleteProgram(progBright);
+    if (progBlur > 0) glDeleteProgram(progBlur);
+    if (progComposite > 0) glDeleteProgram(progComposite);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var dLightMVP = glGetUniformLocation(progDepth, "uLightMVP");
+var sProjection = glGetUniformLocation(progScene, "projection");
+var sView = glGetUniformLocation(progScene, "view");
+var sModel = glGetUniformLocation(progScene, "model");
+var sDiffuse = glGetUniformLocation(progScene, "diffuseTexture");
+var sShadow0 = glGetUniformLocation(progScene, "shadowMap[0]");
+var sShadow1 = glGetUniformLocation(progScene, "shadowMap[1]");
+var sShadow2 = glGetUniformLocation(progScene, "shadowMap[2]");
+var sShadow3 = glGetUniformLocation(progScene, "shadowMap[3]");
+var sLightPos = glGetUniformLocation(progScene, "lightPos");
+var sViewPos = glGetUniformLocation(progScene, "viewPos");
+var sLightMat0 = glGetUniformLocation(progScene, "lightSpaceMatrices[0]");
+var sLightMat1 = glGetUniformLocation(progScene, "lightSpaceMatrices[1]");
+var sLightMat2 = glGetUniformLocation(progScene, "lightSpaceMatrices[2]");
+var sLightMat3 = glGetUniformLocation(progScene, "lightSpaceMatrices[3]");
+var sSplit0 = glGetUniformLocation(progScene, "cascadePlaneDistances[0]");
+var sSplit1 = glGetUniformLocation(progScene, "cascadePlaneDistances[1]");
+var sSplit2 = glGetUniformLocation(progScene, "cascadePlaneDistances[2]");
+var sSplit3 = glGetUniformLocation(progScene, "cascadePlaneDistances[3]");
+var sCascadeCount = glGetUniformLocation(progScene, "cascadeCount");
+var sShowCascades = glGetUniformLocation(progScene, "showCascades");
+var sFarPlane = glGetUniformLocation(progScene, "farPlane");
+var sShadowMapSize = glGetUniformLocation(progScene, "shadowMapSize");
+var sAmbientStrength = glGetUniformLocation(progScene, "ambientStrength");
+var skyForward = glGetUniformLocation(progSky, "uForward");
+var skyRight = glGetUniformLocation(progSky, "uRight");
+var skyUp = glGetUniformLocation(progSky, "uUp");
+var skySunDir = glGetUniformLocation(progSky, "uSunDir");
+var skyAspect = glGetUniformLocation(progSky, "uAspect");
+var skyTanHalfFov = glGetUniformLocation(progSky, "uTanHalfFov");
+var brightScene = glGetUniformLocation(progBright, "uScene");
+var brightThreshold = glGetUniformLocation(progBright, "uThreshold");
+var brightBoost = glGetUniformLocation(progBright, "uBoost");
+var blurTex = glGetUniformLocation(progBlur, "uTex");
+var blurTexelDir = glGetUniformLocation(progBlur, "uTexelDir");
+var compositeScene = glGetUniformLocation(progComposite, "uScene");
+var compositeBloom = glGetUniformLocation(progComposite, "uBloom");
+var compositeStrength = glGetUniformLocation(progComposite, "uBloomStrength");
+var compositeExposure = glGetUniformLocation(progComposite, "uExposure");
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var lightBuf0 = @(16, TYPE_FLOAT);
+var lightBuf1 = @(16, TYPE_FLOAT);
+var lightBuf2 = @(16, TYPE_FLOAT);
+var lightBuf3 = @(16, TYPE_FLOAT);
+var lightMvpBuf = @(16, TYPE_FLOAT);
+var screenW = GetScreenWidth();
+var screenH = GetScreenHeight();
+
+var whiteTex = createSolidTexture(255, 255, 255, 255);
+var sceneRt = makePostTarget(screenW, screenH, true);
+var bloomRtA = makePostTarget(screenW, screenH, false);
+var bloomRtB = makePostTarget(screenW, screenH, false);
+if (sceneRt == nil || bloomRtA == nil || bloomRtB == nil)
+{
+    if (sceneRt != nil) sceneRt.destroy();
+    if (bloomRtA != nil) bloomRtA.destroy();
+    if (bloomRtB != nil) bloomRtB.destroy();
+    glDeleteTextures(whiteTex);
+    glDeleteProgram(progDepth);
+    glDeleteProgram(progScene);
+    glDeleteProgram(progSky);
+    glDeleteProgram(progBright);
+    glDeleteProgram(progBlur);
+    glDeleteProgram(progComposite);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var quadVerts = Float32Array(0);
+quadVerts.add(
+    -1.0,  1.0,  0.0, 1.0,
+     1.0,  1.0,  1.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0,  1.0,  0.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0, -1.0,  0.0, 0.0
+);
+var quadVAO = glGenVertexArrays();
+var quadVBO = glGenBuffers();
+glBindVertexArray(quadVAO);
+glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+glBufferData(GL_ARRAY_BUFFER, quadVerts.byteLength(), quadVerts, GL_STATIC_DRAW);
+glEnableVertexAttribArray(0);
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 16, 0);
+glEnableVertexAttribArray(1);
+glVertexAttribPointer(1, 2, GL_FLOAT, false, 16, 8);
+glBindVertexArray(0);
+glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+var shadowSize = 1024;
+var csm0 = makeShadowTarget(shadowSize);
+var csm1 = makeShadowTarget(shadowSize);
+var csm2 = makeShadowTarget(shadowSize);
+var csm3 = makeShadowTarget(shadowSize);
+if (csm0 == nil || csm1 == nil || csm2 == nil || csm3 == nil)
+{
+    if (csm0 != nil) csm0.destroy();
+    if (csm1 != nil) csm1.destroy();
+    if (csm2 != nil) csm2.destroy();
+    if (csm3 != nil) csm3.destroy();
+    sceneRt.destroy();
+    bloomRtA.destroy();
+    bloomRtB.destroy();
+    glDeleteBuffers(quadVBO);
+    glDeleteVertexArrays(quadVAO);
+    glDeleteTextures(whiteTex);
+    glDeleteProgram(progDepth);
+    glDeleteProgram(progScene);
+    glDeleteProgram(progSky);
+    glDeleteProgram(progBright);
+    glDeleteProgram(progBlur);
+    glDeleteProgram(progComposite);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var eyeX = sceneCenterX + sceneRadius * 0.85;
+var eyeY = sceneCenterY + sceneRadius * 0.34;
+var eyeZ = sceneCenterZ + sceneRadius * 0.85;
+var yaw = -135.0;
+var pitch = -18.0;
+var camNear = 0.5;
+var camFar = max(sceneRadius * 3.0, 650.0);
+var split0 = max(sceneRadius * 0.25, 90.0);
+var split1 = max(sceneRadius * 0.52, 180.0);
+var split2 = max(sceneRadius * 1.15, 340.0);
+if (split1 <= split0 + 20.0) split1 = split0 + 20.0;
+if (split2 <= split1 + 20.0) split2 = split1 + 20.0;
+if (split2 >= camFar - 20.0) split2 = camFar - 20.0;
+
+var lightYaw = -38.0;
+var lightPitch = -52.0;
+var lightDistance = sceneRadius * 2.8;
+var showUi = true;
+var showCascades = false;
+var show2d = false;
+var bloomEnabled = true;
+var bloomThresholdVal = 0.72;
+var bloomStrengthVal = 0.90;
+var bloomBoostVal = 1.85;
+var bloomPasses = 6;
+var exposureVal = 1.0;
+var ambientStrengthVal = 0.15;
+
+var uiBg = Color(0, 0, 0, 160);
+var uiFg = Color(240, 240, 240, 255);
+var uiOk = Color(180, 255, 180, 255);
+var uiWarm = Color(255, 220, 170, 255);
+var clearBg = Color(28, 34, 42, 255);
+
+var worldUp = Vector3(0.0, 1.0, 0.0);
+var camEye = Vector3(0.0, 0.0, 0.0);
+var camTarget = Vector3(0.0, 0.0, 0.0);
+var lightEye0 = Vector3(0.0, 0.0, 0.0);
+var lightEye1 = Vector3(0.0, 0.0, 0.0);
+var lightEye2 = Vector3(0.0, 0.0, 0.0);
+var lightEye3 = Vector3(0.0, 0.0, 0.0);
+var lightTarget0 = Vector3(0.0, 0.0, 0.0);
+var lightTarget1 = Vector3(0.0, 0.0, 0.0);
+var lightTarget2 = Vector3(0.0, 0.0, 0.0);
+var lightTarget3 = Vector3(0.0, 0.0, 0.0);
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_V)) showCascades = !showCascades;
+
+    var move = sceneRadius * 0.55 * dt;
+    if (move < 8.0) move = 25.0 * dt;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) move = move * 3.0;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx = fx / fl; fy = fy / fl; fz = fz / fl;
+    }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001)
+    {
+        rx = rx / rl;
+        rz = rz / rl;
+    }
+
+    if (IsKeyDown(KEY_W)) { eyeX += fx * move; eyeY += fy * move; eyeZ += fz * move; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * move; eyeY -= fy * move; eyeZ -= fz * move; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * move; eyeZ -= rz * move; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * move; eyeZ += rz * move; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += move;
+    if (IsKeyDown(KEY_C)) eyeY -= move;
+
+    if (split0 < 10.0) split0 = 10.0;
+    if (split1 <= split0 + 10.0) split1 = split0 + 10.0;
+    if (split2 <= split1 + 10.0) split2 = split1 + 10.0;
+    if (split2 >= camFar - 10.0) split2 = camFar - 10.0;
+
+    var nextScreenW = GetScreenWidth();
+    var nextScreenH = GetScreenHeight();
+    if (nextScreenW != screenW || nextScreenH != screenH)
+    {
+        var nextSceneRt = makePostTarget(nextScreenW, nextScreenH, true);
+        var nextBloomRtA = makePostTarget(nextScreenW, nextScreenH, false);
+        var nextBloomRtB = makePostTarget(nextScreenW, nextScreenH, false);
+        if (nextSceneRt != nil && nextBloomRtA != nil && nextBloomRtB != nil)
+        {
+            sceneRt.destroy();
+            bloomRtA.destroy();
+            bloomRtB.destroy();
+            sceneRt = nextSceneRt;
+            bloomRtA = nextBloomRtA;
+            bloomRtB = nextBloomRtB;
+            screenW = nextScreenW;
+            screenH = nextScreenH;
+        }
+        else
+        {
+            if (nextSceneRt != nil) nextSceneRt.destroy();
+            if (nextBloomRtA != nil) nextBloomRtA.destroy();
+            if (nextBloomRtB != nil) nextBloomRtB.destroy();
+        }
+    }
+
+    camEye.x = eyeX; camEye.y = eyeY; camEye.z = eyeZ;
+    camTarget.x = eyeX + fx; camTarget.y = eyeY + fy; camTarget.z = eyeZ + fz;
+    var aspect = screenW / screenH;
+    var view = MatrixLookAt(camEye, camTarget, worldUp);
+    var proj = MatrixPerspective(60.0 * PI / 180.0, aspect, camNear, camFar);
+    var modelMat = mesh.makeModelMatrix();
+
+    var lightYawRad = lightYaw * PI / 180.0;
+    var lightPitchRad = lightPitch * PI / 180.0;
+    var ldx = cos(lightPitchRad) * cos(lightYawRad);
+    var ldy = sin(lightPitchRad);
+    var ldz = cos(lightPitchRad) * sin(lightYawRad);
+    var llen = sqrt(ldx * ldx + ldy * ldy + ldz * ldz);
+    if (llen < 0.00001) llen = 1.0;
+    ldx = ldx / llen; ldy = ldy / llen; ldz = ldz / llen;
+
+    var lightPosX = sceneCenterX - ldx * lightDistance;
+    var lightPosY = sceneCenterY - ldy * lightDistance;
+    var lightPosZ = sceneCenterZ - ldz * lightDistance;
+
+    var c0d = split0 * 0.5;
+    var c1d = (split0 + split1) * 0.5;
+    var c2d = (split1 + split2) * 0.5;
+    var c3d = (split2 + camFar) * 0.5;
+
+    var t0x = eyeX + fx * c0d;
+    var t0y = eyeY + fy * c0d;
+    var t0z = eyeZ + fz * c0d;
+    var t1x = eyeX + fx * c1d;
+    var t1y = eyeY + fy * c1d;
+    var t1z = eyeZ + fz * c1d;
+    var t2x = eyeX + fx * c2d;
+    var t2y = eyeY + fy * c2d;
+    var t2z = eyeZ + fz * c2d;
+    var t3x = eyeX + fx * c3d;
+    var t3y = eyeY + fy * c3d;
+    var t3z = eyeZ + fz * c3d;
+
+    var size0 = max(split0 * 0.75, 70.0);
+    var size1 = max(split1 * 0.64, 140.0);
+    var size2 = max(split2 * 0.62, 260.0);
+    var size3 = max(camFar * 0.52, sceneRadius * 0.9);
+    var lightFar = max(sceneRadius * 8.0, camFar * 1.5);
+
+    var lightEye0x = t0x - ldx * lightDistance;
+    var lightEye0y = t0y - ldy * lightDistance;
+    var lightEye0z = t0z - ldz * lightDistance;
+    var lightEye1x = t1x - ldx * lightDistance;
+    var lightEye1y = t1y - ldy * lightDistance;
+    var lightEye1z = t1z - ldz * lightDistance;
+    var lightEye2x = t2x - ldx * lightDistance;
+    var lightEye2y = t2y - ldy * lightDistance;
+    var lightEye2z = t2z - ldz * lightDistance;
+    var lightEye3x = t3x - ldx * lightDistance;
+    var lightEye3y = t3y - ldy * lightDistance;
+    var lightEye3z = t3z - ldz * lightDistance;
+
+    lightEye0.x = lightEye0x; lightEye0.y = lightEye0y; lightEye0.z = lightEye0z;
+    lightEye1.x = lightEye1x; lightEye1.y = lightEye1y; lightEye1.z = lightEye1z;
+    lightEye2.x = lightEye2x; lightEye2.y = lightEye2y; lightEye2.z = lightEye2z;
+    lightEye3.x = lightEye3x; lightEye3.y = lightEye3y; lightEye3.z = lightEye3z;
+    lightTarget0.x = t0x; lightTarget0.y = t0y; lightTarget0.z = t0z;
+    lightTarget1.x = t1x; lightTarget1.y = t1y; lightTarget1.z = t1z;
+    lightTarget2.x = t2x; lightTarget2.y = t2y; lightTarget2.z = t2z;
+    lightTarget3.x = t3x; lightTarget3.y = t3y; lightTarget3.z = t3z;
+
+    var lightView0 = MatrixLookAt(lightEye0, lightTarget0, worldUp);
+    var lightView1 = MatrixLookAt(lightEye1, lightTarget1, worldUp);
+    var lightView2 = MatrixLookAt(lightEye2, lightTarget2, worldUp);
+    var lightView3 = MatrixLookAt(lightEye3, lightTarget3, worldUp);
+    var lightProj0 = MatrixOrtho(-size0, size0, -size0, size0, 0.5, lightFar);
+    var lightProj1 = MatrixOrtho(-size1, size1, -size1, size1, 0.5, lightFar);
+    var lightProj2 = MatrixOrtho(-size2, size2, -size2, size2, 0.5, lightFar);
+    var lightProj3 = MatrixOrtho(-size3, size3, -size3, size3, 0.5, lightFar);
+    var lightVP0 = MatrixMultiply(lightView0, lightProj0);
+    var lightVP1 = MatrixMultiply(lightView1, lightProj1);
+    var lightVP2 = MatrixMultiply(lightView2, lightProj2);
+    var lightVP3 = MatrixMultiply(lightView3, lightProj3);
+    var tanHalfFov = tan(60.0 * PI / 360.0);
+    var upX = rz * fy;
+    var upY = rx * fz - rz * fx;
+    var upZ = -rx * fy;
+    var upl = sqrt(upX * upX + upY * upY + upZ * upZ);
+    if (upl > 0.0001)
+    {
+        upX = upX / upl;
+        upY = upY / upl;
+        upZ = upZ / upl;
+    }
+    var sunDirX = -ldx;
+    var sunDirY = -ldy;
+    var sunDirZ = -ldz;
+
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    MatrixWriteBuffer(lightVP0, lightBuf0);
+    MatrixWriteBuffer(lightVP1, lightBuf1);
+    MatrixWriteBuffer(lightVP2, lightBuf2);
+    MatrixWriteBuffer(lightVP3, lightBuf3);
+
+   
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_FRONT);
+    renderCascade(csm0, mesh, modelMat, lightVP0, lightMvpBuf, progDepth, dLightMVP);
+    renderCascade(csm1, mesh, modelMat, lightVP1, lightMvpBuf, progDepth, dLightMVP);
+    renderCascade(csm2, mesh, modelMat, lightVP2, lightMvpBuf, progDepth, dLightMVP);
+    renderCascade(csm3, mesh, modelMat, lightVP3, lightMvpBuf, progDepth, dLightMVP);
+    glCullFace(GL_BACK);
+
+    BeginDrawing();
+    ClearBackground(clearBg);
+
+    rlDrawRenderBatchActive();
+
+    rlEnableFramebuffer(sceneRt.fbo);
+    rlViewport(0, 0, sceneRt.width, sceneRt.height);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(progSky);
+    if (skyForward >= 0) glUniform3f(skyForward, fx, fy, fz);
+    if (skyRight >= 0) glUniform3f(skyRight, rx, 0.0, rz);
+    if (skyUp >= 0) glUniform3f(skyUp, upX, upY, upZ);
+    if (skySunDir >= 0) glUniform3f(skySunDir, sunDirX, sunDirY, sunDirZ);
+    if (skyAspect >= 0) glUniform1f(skyAspect, aspect);
+    if (skyTanHalfFov >= 0) glUniform1f(skyTanHalfFov, tanHalfFov);
+    drawFullscreenQuad(quadVAO);
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+
+    glUseProgram(progScene);
+    if (sProjection >= 0) glUniformMatrix4fv(sProjection, 1, false, projBuf);
+    if (sView >= 0) glUniformMatrix4fv(sView, 1, false, viewBuf);
+    if (sModel >= 0) glUniformMatrix4fv(sModel, 1, false, modelBuf);
+    if (sLightMat0 >= 0) glUniformMatrix4fv(sLightMat0, 1, false, lightBuf0);
+    if (sLightMat1 >= 0) glUniformMatrix4fv(sLightMat1, 1, false, lightBuf1);
+    if (sLightMat2 >= 0) glUniformMatrix4fv(sLightMat2, 1, false, lightBuf2);
+    if (sLightMat3 >= 0) glUniformMatrix4fv(sLightMat3, 1, false, lightBuf3);
+    if (sSplit0 >= 0) glUniform1f(sSplit0, split0);
+    if (sSplit1 >= 0) glUniform1f(sSplit1, split1);
+    if (sSplit2 >= 0) glUniform1f(sSplit2, split2);
+    if (sSplit3 >= 0) glUniform1f(sSplit3, camFar);
+    if (sCascadeCount >= 0) glUniform1i(sCascadeCount, 4);
+    if (sShowCascades >= 0) glUniform1i(sShowCascades, showCascades);
+    if (sFarPlane >= 0) glUniform1f(sFarPlane, camFar);
+    if (sShadowMapSize >= 0) glUniform2f(sShadowMapSize, shadowSize + 0.0, shadowSize + 0.0);
+    if (sAmbientStrength >= 0) glUniform1f(sAmbientStrength, ambientStrengthVal);
+    if (sLightPos >= 0) glUniform3f(sLightPos, lightPosX, lightPosY, lightPosZ);
+    if (sViewPos >= 0) glUniform3f(sViewPos, eyeX, eyeY, eyeZ);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, csm0.depth);
+    if (sShadow0 >= 0) glUniform1i(sShadow0, 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, csm1.depth);
+    if (sShadow1 >= 0) glUniform1i(sShadow1, 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, csm2.depth);
+    if (sShadow2 >= 0) glUniform1i(sShadow2, 3);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, csm3.depth);
+    if (sShadow3 >= 0) glUniform1i(sShadow3, 4);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+    {
+        var b = mesh.buffers[i];
+        var texId = whiteTex;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            if (len(mat.textureIds) > 0 && mat.textureIds[0] > 0) texId = mat.textureIds[0];
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        if (sDiffuse >= 0) glUniform1i(sDiffuse, 0);
+        b.draw();
+    }
+
+    glUseProgram(0);
+
+    if (bloomEnabled)
+    {
+        rlEnableFramebuffer(bloomRtA.fbo);
+        rlViewport(0, 0, bloomRtA.width, bloomRtA.height);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glUseProgram(progBright);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, sceneRt.color);
+        if (brightScene >= 0) glUniform1i(brightScene, 0);
+        if (brightThreshold >= 0) glUniform1f(brightThreshold, bloomThresholdVal);
+        if (brightBoost >= 0) glUniform1f(brightBoost, bloomBoostVal);
+        drawFullscreenQuad(quadVAO);
+
+        var blurHorizontal = true;
+        var blurSource = bloomRtA.color;
+        for (var blurPass = 0; blurPass < bloomPasses; blurPass += 1)
+        {
+            if (blurHorizontal)
+            {
+                rlEnableFramebuffer(bloomRtB.fbo);
+                rlViewport(0, 0, bloomRtB.width, bloomRtB.height);
+            }
+            else
+            {
+                rlEnableFramebuffer(bloomRtA.fbo);
+                rlViewport(0, 0, bloomRtA.width, bloomRtA.height);
+            }
+
+            glUseProgram(progBlur);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, blurSource);
+            if (blurTex >= 0) glUniform1i(blurTex, 0);
+            if (blurTexelDir >= 0)
+            {
+                if (blurHorizontal) glUniform2f(blurTexelDir, 1.0 / screenW, 0.0);
+                else glUniform2f(blurTexelDir, 0.0, 1.0 / screenH);
+            }
+            drawFullscreenQuad(quadVAO);
+
+            if (blurHorizontal) blurSource = bloomRtB.color;
+            else blurSource = bloomRtA.color;
+            blurHorizontal = !blurHorizontal;
+        }
+    }
+
+    rlDisableFramebuffer();
+    rlViewport(0, 0, screenW, screenH);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(progComposite);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sceneRt.color);
+    if (compositeScene >= 0) glUniform1i(compositeScene, 0);
+    glActiveTexture(GL_TEXTURE1);
+    if (bloomEnabled)
+    {
+        if ((bloomPasses & 1) == 0) glBindTexture(GL_TEXTURE_2D, bloomRtA.color);
+        else glBindTexture(GL_TEXTURE_2D, bloomRtB.color);
+    }
+    else glBindTexture(GL_TEXTURE_2D, 0);
+    if (compositeBloom >= 0) glUniform1i(compositeBloom, 1);
+    if (compositeStrength >= 0) glUniform1f(compositeStrength, bloomEnabled ? bloomStrengthVal : 0.0);
+    if (compositeExposure >= 0) glUniform1f(compositeExposure, exposureVal);
+    drawFullscreenQuad(quadVAO);
+
+    rlDisableVertexArray();
+    rlDisableVertexBuffer();
+    rlDisableVertexBufferElement();
+    rlSetTexture(0);
+    rlViewport(0, 0, screenW, screenH);
+    rlMatrixMode(RL_PROJECTION);
+    rlLoadIdentity();
+    rlOrtho(0, screenW, screenH, 0, 0.0, 1.0);
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glUseProgram(0);
+    
+    if (show2d)
+    {
+        DrawRectangle(18, 18, 1080, 118, uiBg);
+        DrawText("MeshBin Factory CSM  RMB look | WASD move | SPACE/C up-down | SHIFT faster | V cascades | TAB UI", 32, 32, 22, uiFg);
+        DrawText("Buffers: " + len(mesh.buffers) + "  Materials: " + len(mesh.materials) + "  Shadow: " + shadowSize + "  FPS: " + GetFPS(), 32, 62, 20, uiOk);
+        DrawText("Split0: " + int(split0) + "  Split1: " + int(split1) + "  Split2: " + int(split2) + "  Far: " + int(camFar) + "  Cascades: 4 " + (showCascades ? "debug on" : "lit"), 32, 90, 18, uiWarm);
+        rlDrawRenderBatchActive();
+    }
+    DrawFPS(5,5);
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = Begin("Factory CSM");
+        if (panel)
+        {
+            Text("Cascade shadow map + sky + bloom");
+            var (_, nextShow) = Checkbox("Show cascades (V)", showCascades);
+            showCascades = nextShow;
+            var (_, nextShow2d) = Checkbox("Show 2D info", show2d);
+            show2d = nextShow2d;
+            var (_, nextBloomEnabled) = Checkbox("Bloom", bloomEnabled);
+            bloomEnabled = nextBloomEnabled;
+            var (_, nextAmbient) = SliderFloat("Ambient strength", ambientStrengthVal, 0.0, 0.8);
+            ambientStrengthVal = nextAmbient;
+            var (_, nextSplit0) = SliderFloat("Split 0", split0, 20.0, camFar - 40.0);
+            split0 = nextSplit0;
+            var (_, nextSplit1) = SliderFloat("Split 1", split1, split0 + 10.0, camFar - 20.0);
+            split1 = nextSplit1;
+            var (_, nextSplit2) = SliderFloat("Split 2", split2, split1 + 10.0, camFar - 10.0);
+            split2 = nextSplit2;
+            var (_, nextBloomThreshold) = SliderFloat("Bloom threshold", bloomThresholdVal, 0.6, 2.5);
+            bloomThresholdVal = nextBloomThreshold;
+            var (_, nextBloomBoost) = SliderFloat("Bloom boost", bloomBoostVal, 0.5, 3.0);
+            bloomBoostVal = nextBloomBoost;
+            var (_, nextBloomStrength) = SliderFloat("Bloom strength", bloomStrengthVal, 0.0, 1.5);
+            bloomStrengthVal = nextBloomStrength;
+            var (_, nextExposure) = SliderFloat("Exposure", exposureVal, 0.4, 2.4);
+            exposureVal = nextExposure;
+            var (_, nextBloomPasses) = SliderInt("Bloom passes", bloomPasses, 2, 12);
+            bloomPasses = nextBloomPasses;
+            var (_, nextYaw) = SliderFloat("Light yaw", lightYaw, -180.0, 180.0);
+            lightYaw = nextYaw;
+            var (_, nextPitch) = SliderFloat("Light pitch", lightPitch, -89.0, -5.0);
+            lightPitch = nextPitch;
+            var (_, nextShadow) = SliderInt("Shadow map size", shadowSize, 512, 2048);
+            if (nextShadow != shadowSize)
+            {
+                var next0 = makeShadowTarget(nextShadow);
+                var next1 = makeShadowTarget(nextShadow);
+                var next2 = makeShadowTarget(nextShadow);
+                var next3 = makeShadowTarget(nextShadow);
+                if (next0 != nil && next1 != nil && next2 != nil && next3 != nil)
+                {
+                    csm0.destroy();
+                    csm1.destroy();
+                    csm2.destroy();
+                    csm3.destroy();
+                    csm0 = next0;
+                    csm1 = next1;
+                    csm2 = next2;
+                    csm3 = next3;
+                    shadowSize = nextShadow;
+                }
+                else
+                {
+                    if (next0 != nil) next0.destroy();
+                    if (next1 != nil) next1.destroy();
+                    if (next2 != nil) next2.destroy();
+                    if (next3 != nil) next3.destroy();
+                }
+            }
+            Text("Sun follows the light direction. Bloom is post-process on the HDR scene.");
+        }
+        End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+csm0.destroy();
+csm1.destroy();
+csm2.destroy();
+csm3.destroy();
+sceneRt.destroy();
+bloomRtA.destroy();
+bloomRtB.destroy();
+glDeleteBuffers(quadVBO);
+glDeleteVertexArrays(quadVAO);
+glDeleteTextures(whiteTex);
+glDeleteProgram(progDepth);
+glDeleteProgram(progScene);
+glDeleteProgram(progSky);
+glDeleteProgram(progBright);
+glDeleteProgram(progBlur);
+glDeleteProgram(progComposite);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();

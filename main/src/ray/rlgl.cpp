@@ -6,28 +6,53 @@
 
 namespace RLGLBindings
 {
-
-    static bool arrayToMatrix(Value &val, Matrix &out)
+    static NativeStructDef *getMatrixDef(Interpreter *vm)
     {
-        if (!val.isArray()) return false;
-        ArrayInstance *a = val.asArray();
-        if (!a || a->values.size() < 16) return false;
-        float f[16];
-        for (int i = 0; i < 16; i++) f[i] = (float)a->values[i].asNumber();
-        out = {f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7],
-               f[8],f[9],f[10],f[11],f[12],f[13],f[14],f[15]};
-        return true;
+        if (!vm) return nullptr;
+        Value sv;
+        if (!vm->tryGetGlobal("Matrix", &sv) || !sv.isNativeStruct()) return nullptr;
+        Value iv = vm->createNativeStruct(sv.asNativeStructId(), 0, nullptr);
+        NativeStructInstance *inst = iv.asNativeStructInstance();
+        return inst ? inst->def : nullptr;
     }
 
-    static void pushMatrix16(Interpreter *vm, Matrix m)
+    static bool valueToMatrix(Interpreter *vm, const Value &val, Matrix &out)
     {
-        Value arr = vm->makeArray();
-        ArrayInstance *a = arr.asArray();
-        float vals[16] = {m.m0,m.m1,m.m2,m.m3,m.m4,m.m5,m.m6,m.m7,
-                          m.m8,m.m9,m.m10,m.m11,m.m12,m.m13,m.m14,m.m15};
-        for (int i = 0; i < 16; i++)
-            a->values.push(vm->makeFloat(vals[i]));
-        vm->push(arr);
+        if (val.isNativeStructInstance())
+        {
+            NativeStructDef *matDef = getMatrixDef(vm);
+            NativeStructInstance *inst = val.asNativeStructInstance();
+            if (matDef && inst && inst->def == matDef && inst->data)
+            {
+                out = *(Matrix *)inst->data;
+                return true;
+            }
+        }
+
+        if (val.isArray())
+        {
+            ArrayInstance *a = val.asArray();
+            if (!a || a->values.size() < 16) return false;
+            float f[16];
+            for (int i = 0; i < 16; i++) f[i] = (float)a->values[i].asNumber();
+            out = {f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7],
+                   f[8],f[9],f[10],f[11],f[12],f[13],f[14],f[15]};
+            return true;
+        }
+
+        return false;
+    }
+
+    static bool pushMatrixNative(Interpreter *vm, Matrix m)
+    {
+        NativeStructDef *matDef = getMatrixDef(vm);
+        if (!matDef) return false;
+        Value out = vm->createNativeStruct(matDef->id, 0, nullptr);
+        NativeStructInstance *inst = out.asNativeStructInstance();
+        if (!inst || !inst->data) return false;
+        *(Matrix *)inst->data = m;
+        vm->push(out);
+        return true;
     }
 
 
@@ -577,7 +602,7 @@ namespace RLGLBindings
     {
         if (argc != 1) return 0;
         Matrix m;
-        if (!arrayToMatrix(args[0], m)) return 0;
+        if (!valueToMatrix(vm, args[0], m)) return 0;
         float mat[16] = {m.m0,m.m1,m.m2,m.m3,m.m4,m.m5,m.m6,m.m7,
                          m.m8,m.m9,m.m10,m.m11,m.m12,m.m13,m.m14,m.m15};
         rlMultMatrixf(mat);
@@ -857,7 +882,7 @@ namespace RLGLBindings
     {
         if (argc != 1) return 0;
         Matrix m;
-        if (!arrayToMatrix(args[0], m)) return 0;
+        if (!valueToMatrix(vm, args[0], m)) return 0;
         rlSetMatrixModelview(m);
         return 0;
     }
@@ -866,27 +891,24 @@ namespace RLGLBindings
     {
         if (argc != 1) return 0;
         Matrix m;
-        if (!arrayToMatrix(args[0], m)) return 0;
+        if (!valueToMatrix(vm, args[0], m)) return 0;
         rlSetMatrixProjection(m);
         return 0;
     }
 
     int native_rlGetMatrixModelview(Interpreter *vm, int argc, Value *args)
     {
-        pushMatrix16(vm, rlGetMatrixModelview());
-        return 1;
+        return pushMatrixNative(vm, rlGetMatrixModelview()) ? 1 : 0;
     }
 
     int native_rlGetMatrixProjection(Interpreter *vm, int argc, Value *args)
     {
-        pushMatrix16(vm, rlGetMatrixProjection());
-        return 1;
+        return pushMatrixNative(vm, rlGetMatrixProjection()) ? 1 : 0;
     }
 
     int native_rlGetMatrixTransform(Interpreter *vm, int argc, Value *args)
     {
-        pushMatrix16(vm, rlGetMatrixTransform());
-        return 1;
+        return pushMatrixNative(vm, rlGetMatrixTransform()) ? 1 : 0;
     }
 
     // --- Shader buffer objects (SSBO - compute) ---

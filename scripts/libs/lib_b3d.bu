@@ -309,6 +309,8 @@ class B3DModel
 
     var showSkeleton;
     var skinMats;
+    var _debugNodeCount;
+    var _debugNodeDepth;
 
     def init()
     {
@@ -328,6 +330,8 @@ class B3DModel
         self.scaleVal = 1.0;
         self.showSkeleton = false;
         self.skinMats = [];
+        self._debugNodeCount = 0;
+        self._debugNodeDepth = 0;
     }
 
     // ----------------------------------------------------------
@@ -450,6 +454,9 @@ class B3DModel
 
     def readNODE(buf, parentIdx)
     {
+        self._debugNodeDepth = self._debugNodeDepth + 1;
+        self._debugNodeCount = self._debugNodeCount + 1;
+        var nodePosStart = buf.tell();
         var name = self.readString(buf);
         var px = buf.readFloat();
         var py = buf.readFloat();
@@ -475,6 +482,15 @@ class B3DModel
         self.joints.push(joint);
         joint.buildLocalMatrix(0);
 
+        if (self._debugNodeCount <= 40)
+        {
+            print("NODE dbg #" + self._debugNodeCount +
+                  " depth=" + self._debugNodeDepth +
+                  " start=" + nodePosStart +
+                  " name='" + name + "'" +
+                  " parent=" + parentIdx);
+        }
+
         // marca quantas surfaces existiam antes deste NODE
         var surfsBefore = len(self.surfaces);
 
@@ -496,6 +512,7 @@ class B3DModel
         // resolve as surfaces deste NODE (depois das BONEs já terem sido lidas)
         for (var si = surfsBefore; si < len(self.surfaces); si += 1)
             self.resolveSurface(self.surfaces[si]);
+        self._debugNodeDepth = self._debugNodeDepth - 1;
     }
 
     // ----------------------------------------------------------

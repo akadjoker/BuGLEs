@@ -1,0 +1,774 @@
+import file;
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import GLM;
+using GLM;
+import STB;
+using STB;
+
+var XMESH_SDKMESH_FILE_VERSION = 101;
+var XMESH_SDKMESH_FILE_VERSION_V2 = 200;
+var XMESH_MAX_VERTEX_ELEMENTS = 32;
+var XMESH_MAX_VERTEX_STREAMS = 16;
+
+var XMESH_D3DDECLTYPE_FLOAT1 = 0;
+var XMESH_D3DDECLTYPE_FLOAT2 = 1;
+var XMESH_D3DDECLTYPE_FLOAT3 = 2;
+var XMESH_D3DDECLTYPE_FLOAT4 = 3;
+var XMESH_D3DDECLTYPE_D3DCOLOR = 4;
+var XMESH_D3DDECLTYPE_UBYTE4 = 5;
+var XMESH_D3DDECLTYPE_UBYTE4N = 8;
+var XMESH_D3DDECLTYPE_SHORT4N = 10;
+var XMESH_D3DDECLTYPE_DEC3N = 14;
+var XMESH_D3DDECLTYPE_FLOAT16_2 = 15;
+var XMESH_D3DDECLTYPE_FLOAT16_4 = 16;
+var XMESH_D3DDECLTYPE_UNUSED = 17;
+
+var XMESH_D3DDECLUSAGE_POSITION = 0;
+var XMESH_D3DDECLUSAGE_NORMAL = 3;
+var XMESH_D3DDECLUSAGE_TEXCOORD = 5;
+
+var XMESH_PT_TRIANGLE_LIST = 0;
+var XMESH_PT_TRIANGLE_STRIP = 1;
+
+var XMESH_IT_16BIT = 0;
+var XMESH_IT_32BIT = 1;
+
+
+def xmeshReadU32(buf)
+{
+    var v = buf.readInt();
+    if (v < 0) v = v + 4294967296.0;
+    return v;
+}
+
+
+def xmeshReadU64(buf)
+{
+    var lo = xmeshReadU32(buf);
+    var hi = xmeshReadU32(buf);
+    return lo + hi * 4294967296.0;
+}
+
+
+def xmeshReadFixedString(buf, count)
+{
+    return buf.readString(count);
+}
+
+
+def xmeshStripNull(text)
+{
+    var out = "";
+    for (var i = 0; i < len(text); i += 1)
+    {
+        if (text[i] == char(0)) break;
+        out = out + text[i];
+    }
+    return out;
+}
+
+
+def xmeshSeek(buf, pos)
+{
+    buf.seek(int(pos));
+}
+
+
+def strLastIndexOf(text, pat)
+{
+    var last = -1;
+    var plen = len(pat);
+    var limit = len(text) - plen;
+    for (var i = 0; i <= limit; i += 1)
+    {
+        var ok = true;
+        for (var j = 0; j < plen; j += 1)
+        {
+            if (text[i + j] != pat[j]) { ok = false; break; }
+        }
+        if (ok) last = i;
+    }
+    return last;
+}
+
+
+def strSub(text, start, end)
+{
+    var out = "";
+    if (start < 0) start = 0;
+    if (end > len(text)) end = len(text);
+    for (var i = start; i < end; i += 1) out = out + text[i];
+    return out;
+}
+
+
+def xmeshStripExt(name)
+{
+    var dot = strLastIndexOf(name, ".");
+    if (dot < 0) return name;
+    return strSub(name, 0, dot);
+}
+
+
+def xmeshHalfToFloat(h)
+{
+    var sgn = int((h >> 15) & 1);
+    var expv = int((h >> 10) & 31);
+    var mant = int(h & 1023);
+    var bits32 = 0;
+
+    if (expv == 0)
+    {
+        if (mant == 0) bits32 = sgn << 31;
+        else
+        {
+            while ((mant & 1024) == 0)
+            {
+                mant = mant << 1;
+                expv = expv - 1;
+            }
+            expv = expv + 1;
+            mant = mant & (~1024);
+            bits32 = (sgn << 31) | ((expv + 112) << 23) | (mant << 13);
+        }
+    }
+    else if (expv == 31)
+        bits32 = (sgn << 31) | 2139095040 | (mant << 13);
+    else
+        bits32 = (sgn << 31) | ((expv + 112) << 23) | (mant << 13);
+
+    var tmp = @(4, TYPE_UINT8);
+    tmp.write_int(bits32);
+    tmp.rewind();
+    return tmp.read_float();
+}
+
+
+def xmeshReadVec3(buf, pos, dtype)
+{
+    xmeshSeek(buf, pos);
+    if (dtype == XMESH_D3DDECLTYPE_FLOAT3 || dtype == XMESH_D3DDECLTYPE_FLOAT4)
+        return [buf.readFloat(), buf.readFloat(), buf.readFloat()];
+
+    if (dtype == XMESH_D3DDECLTYPE_FLOAT16_4)
+    {
+        var hx = buf.readShort(); if (hx < 0) hx = hx + 65536;
+        var hy = buf.readShort(); if (hy < 0) hy = hy + 65536;
+        var hz = buf.readShort(); if (hz < 0) hz = hz + 65536;
+        return [xmeshHalfToFloat(hx), xmeshHalfToFloat(hy), xmeshHalfToFloat(hz)];
+    }
+
+    if (dtype == XMESH_D3DDECLTYPE_DEC3N)
+    {
+        var raw = xmeshReadU32(buf);
+        var ix = int((raw >> 0) & 1023); if (ix >= 512) ix = ix - 1024;
+        var iy = int((raw >> 10) & 1023); if (iy >= 512) iy = iy - 1024;
+        var iz = int((raw >> 20) & 1023); if (iz >= 512) iz = iz - 1024;
+        return [ix / 511.0, iy / 511.0, iz / 511.0];
+    }
+
+    if (dtype == XMESH_D3DDECLTYPE_SHORT4N)
+    {
+        var sx = buf.readShort();
+        var sy = buf.readShort();
+        var sz = buf.readShort();
+        return [sx / 32767.0, sy / 32767.0, sz / 32767.0];
+    }
+
+    return [0.0, 0.0, 0.0];
+}
+
+
+def xmeshReadVec2(buf, pos, dtype)
+{
+    xmeshSeek(buf, pos);
+    if (dtype == XMESH_D3DDECLTYPE_FLOAT2 || dtype == XMESH_D3DDECLTYPE_FLOAT3)
+        return [buf.readFloat(), buf.readFloat()];
+
+    if (dtype == XMESH_D3DDECLTYPE_FLOAT16_2)
+    {
+        var hu = buf.readShort(); if (hu < 0) hu = hu + 65536;
+        var hv = buf.readShort(); if (hv < 0) hv = hv + 65536;
+        return [xmeshHalfToFloat(hu), xmeshHalfToFloat(hv)];
+    }
+
+    return [0.0, 0.0];
+}
+
+
+def xmeshReadIndex(buf, pos, indexType)
+{
+    xmeshSeek(buf, pos);
+    if (indexType == XMESH_IT_32BIT) return xmeshReadU32(buf);
+
+    var idx = buf.readShort();
+    if (idx < 0) idx = idx + 65536;
+    return idx;
+}
+
+
+def xmeshLoadTexture2D(texPath)
+{
+    stbi_set_flip_vertically_on_load(1);
+    var (w, h, channels, pixels) = stbi_load(texPath, 4);
+    if (pixels == nil || w == nil || h == nil) return 0;
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+class XMeshLayout
+{
+    var posOffset, normalOffset, texOffset;
+    var posType, normalType, texType;
+
+    def init()
+    {
+        self.posOffset = -1;
+        self.normalOffset = -1;
+        self.texOffset = -1;
+        self.posType = XMESH_D3DDECLTYPE_FLOAT3;
+        self.normalType = XMESH_D3DDECLTYPE_FLOAT3;
+        self.texType = XMESH_D3DDECLTYPE_FLOAT2;
+    }
+}
+
+
+class XMeshVBHeader
+{
+    var numVertices, sizeBytes, strideBytes, dataOffset, layout;
+    def init()
+    {
+        self.numVertices = 0;
+        self.sizeBytes = 0;
+        self.strideBytes = 0;
+        self.dataOffset = 0;
+        self.layout = XMeshLayout();
+    }
+}
+
+
+class XMeshIBHeader
+{
+    var numIndices, sizeBytes, indexType, dataOffset;
+    def init()
+    {
+        self.numIndices = 0;
+        self.sizeBytes = 0;
+        self.indexType = XMESH_IT_16BIT;
+        self.dataOffset = 0;
+    }
+}
+
+
+class XMeshSubsetInfo
+{
+    var name, materialId, primitiveType, indexStart, indexCount, vertexStart, vertexCount;
+    def init()
+    {
+        self.name = "";
+        self.materialId = 0;
+        self.primitiveType = XMESH_PT_TRIANGLE_LIST;
+        self.indexStart = 0;
+        self.indexCount = 0;
+        self.vertexStart = 0;
+        self.vertexCount = 0;
+    }
+}
+
+
+class XMeshMaterialInfo
+{
+    var name, diffuseTexture;
+    def init()
+    {
+        self.name = "";
+        self.diffuseTexture = "";
+    }
+}
+
+
+class XMeshDraw
+{
+    var name, texPath, texId, vao, vbo, ebo, indexCount;
+
+    def init()
+    {
+        self.name = "";
+        self.texPath = "";
+        self.texId = 0;
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.indexCount = 0;
+    }
+
+    def destroy()
+    {
+        if (self.ebo > 0) glDeleteBuffers(self.ebo);
+        if (self.vbo > 0) glDeleteBuffers(self.vbo);
+        if (self.vao > 0) glDeleteVertexArrays(self.vao);
+        if (self.texId > 0) glDeleteTextures(self.texId);
+        self.ebo = 0;
+        self.vbo = 0;
+        self.vao = 0;
+        self.texId = 0;
+        self.indexCount = 0;
+    }
+
+    def build(name, verts, indices, texId, texPath)
+    {
+        self.destroy();
+        self.name = name;
+        self.texId = texId;
+        self.texPath = texPath;
+        self.indexCount = indices.length();
+        if (self.indexCount <= 0 || verts.length() <= 0) return false;
+
+        self.vao = glGenVertexArrays();
+        self.vbo = glGenBuffers();
+        self.ebo = glGenBuffers();
+
+        glBindVertexArray(self.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.byteLength(), indices, GL_STATIC_DRAW);
+
+        var stride = 8 * 4;
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, stride, 0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, false, stride, 3 * 4);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, false, stride, 6 * 4);
+
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        return true;
+    }
+
+    def draw()
+    {
+        if (self.vao <= 0 || self.indexCount <= 0) return;
+        if (self.texId > 0)
+        {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, self.texId);
+        }
+        else glBindTexture(GL_TEXTURE_2D, 0);
+        glBindVertexArray(self.vao);
+        glDrawElements(GL_TRIANGLES, self.indexCount, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+    }
+}
+
+
+class XMeshModel
+{
+    var draws;
+    var ready;
+    var sourcePath;
+    var baseDir;
+    var posX, posY, posZ;
+    var rotX, rotY, rotZ;
+    var scale;
+    var texCachePaths;
+    var texCacheIds;
+    var minX, minY, minZ;
+    var maxX, maxY, maxZ;
+    var centerX, centerY, centerZ;
+    var sizeX, sizeY, sizeZ;
+
+    def init()
+    {
+        self.draws = [];
+        self.ready = false;
+        self.sourcePath = "";
+        self.baseDir = "";
+        self.posX = 0.0; self.posY = 0.0; self.posZ = 0.0;
+        self.rotX = 0.0; self.rotY = 0.0; self.rotZ = 0.0;
+        self.scale = 1.0;
+        self.texCachePaths = [];
+        self.texCacheIds = [];
+        self.resetBounds();
+    }
+
+    def destroy()
+    {
+        for (var i = 0; i < len(self.draws); i += 1) self.draws[i].destroy();
+        self.draws = [];
+        self.texCachePaths = [];
+        self.texCacheIds = [];
+        self.ready = false;
+        self.resetBounds();
+    }
+
+    def resetBounds()
+    {
+        self.minX =  1000000000.0; self.minY =  1000000000.0; self.minZ =  1000000000.0;
+        self.maxX = -1000000000.0; self.maxY = -1000000000.0; self.maxZ = -1000000000.0;
+        self.centerX = 0.0; self.centerY = 0.0; self.centerZ = 0.0;
+        self.sizeX = 0.0; self.sizeY = 0.0; self.sizeZ = 0.0;
+    }
+
+    def addBoundPoint(x, y, z)
+    {
+        if (x < self.minX) self.minX = x;
+        if (y < self.minY) self.minY = y;
+        if (z < self.minZ) self.minZ = z;
+        if (x > self.maxX) self.maxX = x;
+        if (y > self.maxY) self.maxY = y;
+        if (z > self.maxZ) self.maxZ = z;
+    }
+
+    def finalizeBounds()
+    {
+        if (self.minX > self.maxX) return;
+        self.centerX = (self.minX + self.maxX) * 0.5;
+        self.centerY = (self.minY + self.maxY) * 0.5;
+        self.centerZ = (self.minZ + self.maxZ) * 0.5;
+        self.sizeX = self.maxX - self.minX;
+        self.sizeY = self.maxY - self.minY;
+        self.sizeZ = self.maxZ - self.minZ;
+    }
+
+    def loadTextureCached(texPath)
+    {
+        if (texPath == nil || texPath == "") return 0;
+        for (var i = 0; i < len(self.texCachePaths); i += 1)
+            if (self.texCachePaths[i] == texPath) return self.texCacheIds[i];
+        var texId = xmeshLoadTexture2D(texPath);
+        if (texId > 0)
+        {
+            self.texCachePaths.push(texPath);
+            self.texCacheIds.push(texId);
+        }
+        return texId;
+    }
+
+    def resolveTexturePath(diffuseTexture)
+    {
+        if (diffuseTexture == nil || diffuseTexture == "") return nil;
+
+        var name = path.filename(diffuseTexture);
+        var bare = xmeshStripExt(name);
+        var exts = [".png", ".jpg", ".jpeg", ".bmp", ".tga"];
+
+        var exact = self.baseDir + name;
+        if (path.exists(exact)) return exact;
+
+        for (var i = 0; i < len(exts); i += 1)
+        {
+            var p = self.baseDir + bare + exts[i];
+            if (path.exists(p)) return p;
+        }
+        return nil;
+    }
+
+    def makeModelMatrix()
+    {
+        var degToRad = PI / 180.0;
+        var m = MatrixScale(self.scale, self.scale, self.scale);
+        m = MatrixMultiply(m, MatrixRotateZ(self.rotZ * degToRad));
+        m = MatrixMultiply(m, MatrixRotateY(self.rotY * degToRad));
+        m = MatrixMultiply(m, MatrixRotateX(self.rotX * degToRad));
+        m = MatrixMultiply(m, MatrixTranslate(self.posX, self.posY, self.posZ));
+        return m;
+    }
+
+    def draw()
+    {
+        if (!self.ready) return;
+        for (var i = 0; i < len(self.draws); i += 1) self.draws[i].draw();
+    }
+
+    def load(filePath)
+    {
+        self.destroy();
+        self.resetBounds();
+        self.sourcePath = filePath;
+        self.baseDir = path.dirname(filePath) + "/";
+
+        var handle = file.open(filePath, "r");
+        if (handle == nil || handle <= 0)
+        {
+            print("XMesh: failed to open: " + filePath);
+            return false;
+        }
+
+        var buf = file.read_all(handle);
+        file.close(handle);
+        if (buf == nil)
+        {
+            print("XMesh: read_all failed: " + filePath);
+            return false;
+        }
+
+        xmeshSeek(buf, 0);
+        var version = xmeshReadU32(buf);
+        var isBigEndian = buf.readByte();
+        buf.readByte(); buf.readByte(); buf.readByte();
+        var headerSize = xmeshReadU64(buf);
+        var nonBufferDataSize = xmeshReadU64(buf);
+        var bufferDataSize = xmeshReadU64(buf);
+        var numVertexBuffers = xmeshReadU32(buf);
+        var numIndexBuffers = xmeshReadU32(buf);
+        var numMeshes = xmeshReadU32(buf);
+        var numTotalSubsets = xmeshReadU32(buf);
+        var numFrames = xmeshReadU32(buf);
+        var numMaterials = xmeshReadU32(buf);
+        var vertexStreamHeadersOffset = xmeshReadU64(buf);
+        var indexStreamHeadersOffset = xmeshReadU64(buf);
+        var meshDataOffset = xmeshReadU64(buf);
+        var subsetDataOffset = xmeshReadU64(buf);
+        var frameDataOffset = xmeshReadU64(buf);
+        var materialDataOffset = xmeshReadU64(buf);
+
+        if (version != XMESH_SDKMESH_FILE_VERSION && version != XMESH_SDKMESH_FILE_VERSION_V2)
+        {
+            print("XMesh: unsupported sdkmesh version " + version);
+            return false;
+        }
+        if (isBigEndian != 0)
+        {
+            print("XMesh: big-endian sdkmesh not supported yet");
+            return false;
+        }
+
+        var bufferBase = headerSize + nonBufferDataSize;
+
+        var vbHeaders = [];
+        for (var i = 0; i < numVertexBuffers; i += 1)
+        {
+            xmeshSeek(buf, vertexStreamHeadersOffset + i * 288);
+            var vh = XMeshVBHeader();
+            vh.numVertices = xmeshReadU64(buf);
+            vh.sizeBytes = xmeshReadU64(buf);
+            vh.strideBytes = xmeshReadU64(buf);
+            var layout = XMeshLayout();
+            for (var di = 0; di < XMESH_MAX_VERTEX_ELEMENTS; di += 1)
+            {
+                var declStream = buf.readShort();
+                var declOffset = buf.readShort();
+                var declType = buf.readByte();
+                var declMethod = buf.readByte();
+                var usage = buf.readByte();
+                var usageIndex = buf.readByte();
+                if (declType != XMESH_D3DDECLTYPE_UNUSED &&
+                    usage == XMESH_D3DDECLUSAGE_POSITION && usageIndex == 0)
+                {
+                    layout.posOffset = declOffset;
+                    layout.posType = declType;
+                }
+                else if (declType != XMESH_D3DDECLTYPE_UNUSED &&
+                         usage == XMESH_D3DDECLUSAGE_NORMAL && usageIndex == 0)
+                {
+                    layout.normalOffset = declOffset;
+                    layout.normalType = declType;
+                }
+                else if (declType != XMESH_D3DDECLTYPE_UNUSED &&
+                         usage == XMESH_D3DDECLUSAGE_TEXCOORD && usageIndex == 0)
+                {
+                    layout.texOffset = declOffset;
+                    layout.texType = declType;
+                }
+            }
+            vh.layout = layout;
+            vh.dataOffset = xmeshReadU64(buf);
+            vbHeaders.push(vh);
+        }
+
+        var ibHeaders = [];
+        for (var i = 0; i < numIndexBuffers; i += 1)
+        {
+            xmeshSeek(buf, indexStreamHeadersOffset + i * 32);
+            var ih = XMeshIBHeader();
+            ih.numIndices = xmeshReadU64(buf);
+            ih.sizeBytes = xmeshReadU64(buf);
+            ih.indexType = xmeshReadU32(buf);
+            xmeshReadU32(buf);
+            ih.dataOffset = xmeshReadU64(buf);
+            ibHeaders.push(ih);
+        }
+
+        var materials = [];
+        for (var i = 0; i < numMaterials; i += 1)
+        {
+            var mpos = materialDataOffset + i * 1256;
+            xmeshSeek(buf, mpos);
+            var mat = XMeshMaterialInfo();
+            mat.name = xmeshStripNull(xmeshReadFixedString(buf, 100));
+            xmeshReadFixedString(buf, 260);
+            mat.diffuseTexture = xmeshStripNull(xmeshReadFixedString(buf, 260));
+            materials.push(mat);
+        }
+
+        var subsets = [];
+        for (var i = 0; i < numTotalSubsets; i += 1)
+        {
+            var spos = subsetDataOffset + i * 144;
+            xmeshSeek(buf, spos);
+            var ss = XMeshSubsetInfo();
+            ss.name = xmeshStripNull(xmeshReadFixedString(buf, 100));
+            ss.materialId = xmeshReadU32(buf);
+            ss.primitiveType = xmeshReadU32(buf);
+            xmeshReadU32(buf);
+            ss.indexStart = xmeshReadU64(buf);
+            ss.indexCount = xmeshReadU64(buf);
+            ss.vertexStart = xmeshReadU64(buf);
+            ss.vertexCount = xmeshReadU64(buf);
+            subsets.push(ss);
+        }
+
+        var drawCount = 0;
+        for (var mi = 0; mi < numMeshes; mi += 1)
+        {
+            var meshPos = meshDataOffset + mi * 224;
+            xmeshSeek(buf, meshPos);
+            var meshName = xmeshStripNull(xmeshReadFixedString(buf, 100));
+            var numMeshVB = buf.readByte();
+            buf.readByte(); buf.readByte(); buf.readByte();
+            var vbIndices = [];
+            for (var bi = 0; bi < XMESH_MAX_VERTEX_STREAMS; bi += 1)
+                vbIndices.push(xmeshReadU32(buf));
+            var ibIndex = xmeshReadU32(buf);
+            var numMeshSubsets = xmeshReadU32(buf);
+            var numFrameInfluences = xmeshReadU32(buf);
+            buf.readFloat(); buf.readFloat(); buf.readFloat();
+            buf.readFloat(); buf.readFloat(); buf.readFloat();
+            xmeshReadU32(buf);
+            var subsetIndexOffset = xmeshReadU64(buf);
+            var frameInfluenceOffset = xmeshReadU64(buf);
+
+            if (numMeshVB <= 0) continue;
+            var vbIndex = vbIndices[0];
+            if (vbIndex < 0 || vbIndex >= len(vbHeaders)) continue;
+            if (ibIndex < 0 || ibIndex >= len(ibHeaders)) continue;
+
+            var vbHeader = vbHeaders[vbIndex];
+            var ibHeader = ibHeaders[ibIndex];
+            var layout = vbHeader.layout;
+            if (layout.posOffset < 0) layout.posOffset = 0;
+            var vbBase = vbHeader.dataOffset;
+            var ibBase = ibHeader.dataOffset;
+            if ((vbBase + vbHeader.sizeBytes) > buf.length())
+            {
+                print("XMesh: skip mesh with bad VB range: " + meshName);
+                continue;
+            }
+            if ((ibBase + ibHeader.sizeBytes) > buf.length())
+            {
+                print("XMesh: skip mesh with bad IB range: " + meshName);
+                continue;
+            }
+
+            var verts = Float32Array(0);
+            var stride = vbHeader.strideBytes;
+            for (var vi = 0; vi < vbHeader.numVertices; vi += 1)
+            {
+                var vp = vbBase + vi * stride;
+                var pos = xmeshReadVec3(buf, vp + layout.posOffset, layout.posType);
+                var nrm = [0.0, 1.0, 0.0];
+                if (layout.normalOffset >= 0)
+                    nrm = xmeshReadVec3(buf, vp + layout.normalOffset, layout.normalType);
+                var uv = [0.0, 0.0];
+                if (layout.texOffset >= 0)
+                    uv = xmeshReadVec2(buf, vp + layout.texOffset, layout.texType);
+
+                self.addBoundPoint(pos[0], pos[1], pos[2]);
+                verts.add(pos[0], pos[1], pos[2],
+                          nrm[0], nrm[1], nrm[2],
+                          uv[0], 1.0 - uv[1]);
+            }
+
+            var subsetRefs = [];
+            var subsetBytes = numMeshSubsets * 4;
+            if ((subsetIndexOffset + subsetBytes) > buf.length())
+            {
+                print("XMesh: skip mesh with bad subset table: " + meshName);
+                continue;
+            }
+            xmeshSeek(buf, subsetIndexOffset);
+            for (var si = 0; si < numMeshSubsets; si += 1)
+                subsetRefs.push(buf.readInt());
+
+            var indexElemSize = ibHeader.indexType == XMESH_IT_32BIT ? 4 : 2;
+            for (var si = 0; si < len(subsetRefs); si += 1)
+            {
+                var globalSubsetIndex = subsetRefs[si];
+                if (globalSubsetIndex < 0 || globalSubsetIndex >= len(subsets)) continue;
+                var ss = subsets[globalSubsetIndex];
+                if (ss.primitiveType != XMESH_PT_TRIANGLE_LIST && ss.primitiveType != XMESH_PT_TRIANGLE_STRIP) continue;
+                if ((ss.indexStart + ss.indexCount) > ibHeader.numIndices) continue;
+                if ((ss.vertexStart + ss.vertexCount) > vbHeader.numVertices) continue;
+
+                var indices = Uint32Array(0);
+                if (ss.primitiveType == XMESH_PT_TRIANGLE_LIST)
+                {
+                    for (var ii = 0; ii + 2 < ss.indexCount; ii += 3)
+                    {
+                        for (var k = 0; k < 3; k += 1)
+                        {
+                            var pos = ibBase + (ss.indexStart + ii + k) * indexElemSize;
+                            var idx = xmeshReadIndex(buf, pos, ibHeader.indexType);
+                            indices.add(idx + ss.vertexStart);
+                        }
+                    }
+                }
+                else
+                {
+                    for (var ii = 0; ii + 2 < ss.indexCount; ii += 1)
+                    {
+                        var p0 = ibBase + (ss.indexStart + ii + 0) * indexElemSize;
+                        var p1 = ibBase + (ss.indexStart + ii + 1) * indexElemSize;
+                        var p2 = ibBase + (ss.indexStart + ii + 2) * indexElemSize;
+                        var i0 = xmeshReadIndex(buf, p0, ibHeader.indexType);
+                        var i1 = xmeshReadIndex(buf, p1, ibHeader.indexType);
+                        var i2 = xmeshReadIndex(buf, p2, ibHeader.indexType);
+                        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                        if ((ii & 1) == 1)
+                        {
+                            var tmp = i0; i0 = i1; i1 = tmp;
+                        }
+                        indices.add(i0 + ss.vertexStart, i1 + ss.vertexStart, i2 + ss.vertexStart);
+                    }
+                }
+
+                if (indices.length() <= 0) continue;
+
+                var texPath = nil;
+                if (ss.materialId >= 0 && ss.materialId < len(materials))
+                    texPath = self.resolveTexturePath(materials[ss.materialId].diffuseTexture);
+                var texId = self.loadTextureCached(texPath);
+
+                var draw = XMeshDraw();
+                var drawName = meshName + ":" + ss.name;
+                draw.build(drawName, verts, indices, texId, texPath == nil ? "" : texPath);
+                self.draws.push(draw);
+                drawCount = drawCount + 1;
+            }
+        }
+
+        self.finalizeBounds();
+        self.ready = len(self.draws) > 0;
+        print("XMesh loaded: " + len(self.draws) + " draw units from " + numMeshes + " meshes");
+        return self.ready;
+    }
+}

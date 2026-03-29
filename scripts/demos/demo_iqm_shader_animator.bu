@@ -1,0 +1,758 @@
+import path;
+using path;
+import math;
+using math;
+import ImGui;
+using ImGui;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+
+include "../libs/lib_iqm.bu";
+include "../libs/lib_animation.bu";
+include "../libs/lib_md3.bu";
+
+var IQM_GPU_MAX_BONES = 128;
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def iqmShaderCompile(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("IQM shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def iqmShaderLink(vsSrc, fsSrc)
+{
+    var vs = iqmShaderCompile(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = iqmShaderCompile(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("IQM shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def md3ApplyTextureAll(model, texPath)
+{
+    var ok = false;
+    for (var i = 0; i < model.surfaceCount(); i += 1)
+        if (model.setSurfaceTexture(i, texPath)) ok = true;
+    return ok;
+}
+
+
+
+
+
+def iqmFindJointIndex(model, names)
+{
+    if (model == nil) return -1;
+    for (var ni = 0; ni < len(names); ni += 1)
+    {
+        var want = names[ni];
+        for (var ji = 0; ji < model.jointCount(); ji += 1)
+            if (model.joints[ji].name == want) return ji;
+    }
+    return -1;
+}
+
+
+def iqmJointName(model, index)
+{
+    if (model == nil) return "";
+    if (index < 0 || index >= model.jointCount()) return "";
+    return model.joints[index].name;
+}
+
+
+def drawMd3OnIqmJoint(model, weapon, jointIndex)
+{
+    if (weapon == nil || !weapon.ready) return;
+    if (jointIndex < 0 || jointIndex >= model.jointCount()) return;
+
+    rlPushMatrix();
+    rlTranslatef(model.posX, model.posY, model.posZ);
+    rlRotatef(-90.0, 1.0, 0.0, 0.0);
+    rlRotatef(model.rotX, 1.0, 0.0, 0.0);
+    rlRotatef(model.rotY, 0.0, 1.0, 0.0);
+    rlRotatef(model.rotZ, 0.0, 0.0, 1.0);
+    rlScalef(model.scaleVal, model.scaleVal, model.scaleVal);
+    var iqmModelWorld = rlGetMatrixTransform();
+    rlPopMatrix();
+
+    var degToRad = PI / 180.0;
+    var weaponLocal = MatrixScale(weapon.scale, weapon.scale, weapon.scale);
+    weaponLocal = MatrixMultiply(weaponLocal, MatrixRotateZ(weapon.rotationZ * degToRad));
+    weaponLocal = MatrixMultiply(weaponLocal, MatrixRotateY(weapon.rotationY * degToRad));
+    weaponLocal = MatrixMultiply(weaponLocal, MatrixRotateX(weapon.rotationX * degToRad));
+    weaponLocal = MatrixMultiply(weaponLocal, MatrixRotateX(weapon.axisPitch * degToRad));
+    weaponLocal = MatrixMultiply(weaponLocal, MatrixTranslate(weapon.positionX, weapon.positionY, weapon.positionZ));
+    var weaponWorld = MatrixMultiply(weaponLocal, model.joints[jointIndex].globalMat);
+    weaponWorld = MatrixMultiply(weaponWorld, iqmModelWorld);
+
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CW);
+    rlPushMatrix();
+    rlMultMatrixf(weaponWorld);
+    weapon.drawSurfaces();
+    rlPopMatrix();
+    glFrontFace(GL_CCW);
+}
+
+
+def iqmModelMatrix(model)
+{
+    rlPushMatrix();
+    rlTranslatef(model.posX, model.posY, model.posZ);
+    rlRotatef(-90.0, 1.0, 0.0, 0.0);
+    rlRotatef(model.rotX, 1.0, 0.0, 0.0);
+    rlRotatef(model.rotY, 0.0, 1.0, 0.0);
+    rlRotatef(model.rotZ, 0.0, 0.0, 1.0);
+    rlScalef(model.scaleVal, model.scaleVal, model.scaleVal);
+    var m = rlGetMatrixTransform();
+    rlPopMatrix();
+    return m;
+}
+
+
+def iqmTransformPoint(m, x, y, z)
+{
+    return [
+        m.m0 * x + m.m4 * y + m.m8  * z + m.m12,
+        m.m1 * x + m.m5 * y + m.m9  * z + m.m13,
+        m.m2 * x + m.m6 * y + m.m10 * z + m.m14
+    ];
+}
+
+
+def drawIqmJointMarker(model, jointIndex)
+{
+    if (model == nil) return;
+    if (jointIndex < 0 || jointIndex >= model.jointCount()) return;
+
+    var j = model.joints[jointIndex];
+    var modelMat = iqmModelMatrix(model);
+
+    var o  = iqmTransformPoint(modelMat, j.globalMat.m12, j.globalMat.m13, j.globalMat.m14);
+    var ax = iqmTransformPoint(modelMat, j.globalMat.m12 + j.globalMat.m0 * 6.0, j.globalMat.m13 + j.globalMat.m1 * 6.0, j.globalMat.m14 + j.globalMat.m2 * 6.0);
+    var ay = iqmTransformPoint(modelMat, j.globalMat.m12 + j.globalMat.m4 * 6.0, j.globalMat.m13 + j.globalMat.m5 * 6.0, j.globalMat.m14 + j.globalMat.m6 * 6.0);
+    var az = iqmTransformPoint(modelMat, j.globalMat.m12 + j.globalMat.m8 * 6.0, j.globalMat.m13 + j.globalMat.m9 * 6.0, j.globalMat.m14 + j.globalMat.m10 * 6.0);
+
+    DrawSphere(o[0], o[1], o[2], 0.07, Color(255, 240, 80, 255));
+    DrawLine3D(o[0], o[1], o[2], ax[0], ax[1], ax[2], Color(255, 80, 80, 255));
+    DrawLine3D(o[0], o[1], o[2], ay[0], ay[1], ay[2], Color(80, 255, 80, 255));
+    DrawLine3D(o[0], o[1], o[2], az[0], az[1], az[2], Color(80, 160, 255, 255));
+}
+
+
+class IQMShaderSurface
+{
+    var name;
+    var texId;
+    var vao;
+    var vbo;
+    var ebo;
+    var indexCount;
+
+    def init()
+    {
+        self.name = "";
+        self.texId = 0;
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.indexCount = 0;
+    }
+
+    def buildFromSurface(surf)
+    {
+        self.name = surf.name;
+        self.texId = surf.texId;
+
+        var verts = Float32Array(0);
+        var indices = Uint32Array(0);
+
+        for (var i = 0; i < len(surf.vertices); i += 1)
+        {
+            var v = surf.vertices[i];
+            verts.add(
+                v.x, v.y, v.z,
+                v.nx, v.ny, v.nz,
+                v.u, v.v,
+                v.b0 + 0.0, v.b1 + 0.0, v.b2 + 0.0, v.b3 + 0.0,
+                v.w0, v.w1, v.w2, v.w3
+            );
+        }
+
+        for (var ii = 0; ii < len(surf.indices); ii += 1)
+            indices.add(surf.indices[ii]);
+
+        self.indexCount = indices.length();
+
+        if (self.vao == 0) self.vao = glGenVertexArrays();
+        if (self.vbo == 0) self.vbo = glGenBuffers();
+        if (self.ebo == 0) self.ebo = glGenBuffers();
+
+        glBindVertexArray(self.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.byteLength(), indices, GL_STATIC_DRAW);
+
+        var stride = 16 * 4;
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, stride, 0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, false, stride, 3 * 4);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, false, stride, 6 * 4);
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 4, GL_FLOAT, false, stride, 8 * 4);
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 4, GL_FLOAT, false, stride, 12 * 4);
+        glBindVertexArray(0);
+    }
+
+    def draw()
+    {
+        if (self.indexCount <= 0) return;
+        glBindVertexArray(self.vao);
+        glDrawElements(GL_TRIANGLES, self.indexCount, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+    }
+
+    def destroy()
+    {
+        if (self.vbo > 0) glDeleteBuffers(self.vbo);
+        if (self.ebo > 0) glDeleteBuffers(self.ebo);
+        if (self.vao > 0) glDeleteVertexArrays(self.vao);
+        self.vbo = 0;
+        self.ebo = 0;
+        self.vao = 0;
+        self.indexCount = 0;
+    }
+}
+
+
+class IQMShaderRig
+{
+    var surfaces;
+    var program;
+    var uModel;
+    var uView;
+    var uProj;
+    var uBones;
+    var uTex;
+    var uHasTex;
+    var uLightDir;
+    var uAmbientSky;
+    var uAmbientGround;
+    var uSunColor;
+    var modelBuf;
+    var viewBuf;
+    var projBuf;
+    var paletteBuf;
+    var boneCount;
+
+    def init()
+    {
+        self.surfaces = [];
+        self.program = 0;
+        self.uModel = -1;
+        self.uView = -1;
+        self.uProj = -1;
+        self.uBones = -1;
+        self.uTex = -1;
+        self.uHasTex = -1;
+        self.uLightDir = -1;
+        self.uAmbientSky = -1;
+        self.uAmbientGround = -1;
+        self.uSunColor = -1;
+        self.modelBuf = @(16, TYPE_FLOAT);
+        self.viewBuf = @(16, TYPE_FLOAT);
+        self.projBuf = @(16, TYPE_FLOAT);
+        self.paletteBuf = @(IQM_GPU_MAX_BONES * 16, TYPE_FLOAT);
+        self.boneCount = 0;
+    }
+
+    def buildProgram()
+    {
+        var vsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(location = 3) in vec4 aBone;
+layout(location = 4) in vec4 aWeight;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform mat4 uBones[128];
+
+out vec2 vUV;
+out vec3 vNormal;
+
+void main()
+{
+    ivec4 bi = ivec4(
+        int(aBone.x + 0.5),
+        int(aBone.y + 0.5),
+        int(aBone.z + 0.5),
+        int(aBone.w + 0.5)
+    );
+
+    mat4 skin =
+        uBones[bi.x] * aWeight.x +
+        uBones[bi.y] * aWeight.y +
+        uBones[bi.z] * aWeight.z +
+        uBones[bi.w] * aWeight.w;
+
+    vec4 skinnedPos = skin * vec4(aPos, 1.0);
+    vec3 skinnedNormal = normalize((skin * vec4(aNormal, 0.0)).xyz);
+    vec4 worldPos = uModel * skinnedPos;
+
+    vUV = aUV;
+    vNormal = normalize(mat3(uModel) * skinnedNormal);
+    gl_Position = uProj * uView * worldPos;
+}
+";
+
+        var fsSrc = @"
+#version 330 core
+in vec2 vUV;
+in vec3 vNormal;
+out vec4 FragColor;
+
+uniform sampler2D uTex;
+uniform int uHasTex;
+uniform vec3 uLightDir;
+uniform vec3 uAmbientSky;
+uniform vec3 uAmbientGround;
+uniform vec3 uSunColor;
+
+void main()
+{
+    vec4 base = (uHasTex != 0) ? texture(uTex, vUV) : vec4(1.0, 1.0, 1.0, 1.0);
+    if (base.a < 0.05) discard;
+
+    vec3 n = normalize(vNormal);
+    vec3 l = normalize(-uLightDir);
+    float hemi = n.y * 0.5 + 0.5;
+    vec3 ambient = mix(uAmbientGround, uAmbientSky, hemi);
+    float wrap = clamp((dot(n, l) + 0.35) / 1.35, 0.0, 1.0);
+    float rim = pow(1.0 - max(n.z, 0.0), 2.0) * 0.08;
+    vec3 light = ambient + uSunColor * wrap + vec3(rim);
+    FragColor = vec4(base.rgb * light, base.a);
+}
+";
+
+        self.program = iqmShaderLink(vsSrc, fsSrc);
+        if (self.program <= 0) return false;
+
+        self.uModel = glGetUniformLocation(self.program, "uModel");
+        self.uView = glGetUniformLocation(self.program, "uView");
+        self.uProj = glGetUniformLocation(self.program, "uProj");
+        self.uBones = glGetUniformLocation(self.program, "uBones[0]");
+        self.uTex = glGetUniformLocation(self.program, "uTex");
+        self.uHasTex = glGetUniformLocation(self.program, "uHasTex");
+        self.uLightDir = glGetUniformLocation(self.program, "uLightDir");
+        self.uAmbientSky = glGetUniformLocation(self.program, "uAmbientSky");
+        self.uAmbientGround = glGetUniformLocation(self.program, "uAmbientGround");
+        self.uSunColor = glGetUniformLocation(self.program, "uSunColor");
+        return true;
+    }
+
+    def build(model)
+    {
+        if (model == nil || !model.ready) return false;
+        if (model.jointCount() > IQM_GPU_MAX_BONES)
+        {
+            print("IQM GPU rig: too many bones for shader: " + str(model.jointCount()));
+            return false;
+        }
+        if (!self.buildProgram()) return false;
+
+        self.surfaces = [];
+        for (var si = 0; si < model.surfaceCount(); si += 1)
+        {
+            var gpuSurf = IQMShaderSurface();
+            gpuSurf.buildFromSurface(model.surfaces[si]);
+            self.surfaces.push(gpuSurf);
+        }
+        return len(self.surfaces) > 0;
+    }
+
+    def updatePalette(model, animator)
+    {
+        // First make GPU skinning match the live joint matrices exactly.
+        // We can layer cross-clip blending back in after the shader path is verified.
+        model.applyFrames(animator.current, animator.next, animator.interp);
+        self.boneCount = model.fillSkinPaletteBuffer(self.paletteBuf);
+    }
+
+    def draw(model, showSkeleton)
+    {
+        if (self.program <= 0) return;
+        if (self.boneCount <= 0) return;
+
+        rlDrawRenderBatchActive();
+
+        var view = rlGetMatrixModelview();
+        var proj = rlGetMatrixProjection();
+
+        rlPushMatrix();
+        rlTranslatef(model.posX, model.posY, model.posZ);
+        rlRotatef(-90.0, 1.0, 0.0, 0.0);
+        rlRotatef(model.rotX, 1.0, 0.0, 0.0);
+        rlRotatef(model.rotY, 0.0, 1.0, 0.0);
+        rlRotatef(model.rotZ, 0.0, 0.0, 1.0);
+        rlScalef(model.scaleVal, model.scaleVal, model.scaleVal);
+        var modelMat = rlGetMatrixTransform();
+
+        MatrixWriteBuffer(modelMat, self.modelBuf);
+        MatrixWriteBuffer(view, self.viewBuf);
+        MatrixWriteBuffer(proj, self.projBuf);
+
+        glUseProgram(self.program);
+        if (self.uModel >= 0) glUniformMatrix4fv(self.uModel, 1, false, self.modelBuf);
+        if (self.uView >= 0) glUniformMatrix4fv(self.uView, 1, false, self.viewBuf);
+        if (self.uProj >= 0) glUniformMatrix4fv(self.uProj, 1, false, self.projBuf);
+        if (self.uBones >= 0)
+            glUniformMatrix4fv(self.uBones, self.boneCount, false, self.paletteBuf);
+        if (self.uTex >= 0) glUniform1i(self.uTex, 0);
+        if (self.uLightDir >= 0) glUniform3f(self.uLightDir, -0.35, -1.0, 0.25);
+        if (self.uAmbientSky >= 0) glUniform3f(self.uAmbientSky,  1.0,1.0,1.0);
+        if (self.uAmbientGround >= 0) glUniform3f(self.uAmbientGround,  1.0,1.0,1.0);
+        if (self.uSunColor >= 0) glUniform3f(self.uSunColor, 1.0,1.0,1.0);
+
+        glActiveTexture(GL_TEXTURE0);
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+
+        for (var si = 0; si < len(self.surfaces); si += 1)
+        {
+            var surf = self.surfaces[si];
+            glBindTexture(GL_TEXTURE_2D, surf.texId);
+            if (self.uHasTex >= 0) glUniform1i(self.uHasTex, surf.texId > 0);
+            surf.draw();
+        }
+
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        glUseProgram(0);
+
+        if (showSkeleton)
+            model.drawSkeleton();
+
+        rlPopMatrix();
+
+        rlDisableVertexArray();
+        rlDisableVertexBuffer();
+        rlDisableVertexBufferElement();
+        rlSetTexture(0);
+        glEnable(GL_BLEND);
+    }
+
+    def destroy()
+    {
+        for (var i = 0; i < len(self.surfaces); i += 1)
+            self.surfaces[i].destroy();
+        self.surfaces = [];
+        if (self.program > 0) glDeleteProgram(self.program);
+        self.program = 0;
+    }
+}
+
+
+var modelPath = resolveAssetPath(
+    "assets/iqm/erebus/erebus.iqm",
+    "../assets/iqm/erebus/erebus.iqm",
+    "../../assets/iqm/erebus/erebus.iqm"
+);
+var texDir = resolveAssetPath(
+    "assets/iqm/erebus/",
+    "../assets/iqm/erebus/",
+    "../../assets/iqm/erebus/"
+);
+var gunPath = resolveAssetPath(
+    "assets/md3/g_uzi.md3",
+    "../assets/md3/g_uzi.md3",
+    "../../assets/md3/g_uzi.md3"
+);
+var gunTex = resolveAssetPath(
+    "assets/md3/uzi.png",
+    "../assets/md3/uzi.png",
+    "../../assets/md3/uzi.png"
+);
+
+if (modelPath == nil || texDir == nil)
+{
+    print("IQM asset not found (erebus.iqm)");
+    return;
+}
+
+InitWindow(1280, 920, "BuGL Demo - IQM Shader Animator");
+SetTargetFPS(60);
+InitImGui();
+
+var cam = CreateCamera3D();
+SetCamera3DPosition(cam, 0.0, 3.2, 8.5);
+SetCamera3DTarget(cam, 0.0, 1.4, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 45.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+var deg2rad = 0.017453292519943295;
+var yaw = 0.0;
+var pitch = -8.0;
+var camX = 0.0;
+var camY = 3.2;
+var camZ = 8.5;
+var hudBg = Color(0, 0, 0, 150);
+var hudTitle = Color(240, 240, 240, 255);
+var hudInfo = Color(200, 220, 255, 255);
+var hudWarm = Color(255, 220, 180, 255);
+var hudGood = Color(200, 255, 200, 255);
+var hudLight = Color(220, 220, 220, 255);
+var showUi = true;
+
+var model = IQMModel();
+if (!model.load(modelPath, texDir))
+{
+    print("Failed to load IQM: " + modelPath);
+    DestroyCamera3D(cam);
+    CloseWindow();
+    return;
+}
+
+model.scaleVal = 0.05;
+
+var animator = Animator();
+animator.defaultBlendTime = 0.18;
+for (var ai = 0; ai < model.animCount(); ai += 1)
+{
+    var clip = model.anims[ai];
+    animator.addClip(clip.name, clip.firstFrame, clip.lastFrame(), clip.framerate, clip.aloop);
+}
+if (animator.clipCount() <= 0 && model.frameCount() > 0)
+    animator.addClip("default", 0, model.frameCount() - 1, 25.0, true);
+
+var startClip = animator.findClip("run");
+if (startClip < 0) startClip = animator.findClip("idle");
+if (startClip < 0) startClip = animator.findClip("walk");
+if (startClip < 0) startClip = 0;
+animator.applyClipIndex(startClip);
+
+var gpuRig = IQMShaderRig();
+if (!gpuRig.build(model))
+{
+    print("Failed to build IQM GPU rig");
+    DestroyCamera3D(cam);
+    CloseWindow();
+    return;
+}
+
+var weapon = MD3Model();
+var weaponJoint = -1;
+if (gunPath != nil && weapon.load(gunPath))
+{
+    if (gunTex != nil) md3ApplyTextureAll(weapon, gunTex);
+    weapon.scale = 1.0;
+    weapon.axisPitch = -90.0;
+    weapon.flipTexV = false;
+    // Local tweak inside the hand joint space.
+    weapon.positionX = -1.308;
+    weapon.positionY = 0.0;
+    weapon.positionZ = -0.341;
+    weapon.rotationX = 0.0;
+    weapon.rotationY = 0.0;
+    weapon.rotationZ = 180.0;
+    weaponJoint = iqmFindJointIndex(model, ["hand_R", "hand_r", "Hand_R", "bip01 r hand", "r hand", "bone_weapon"]);
+    print("IQM weapon joint = " + str(weaponJoint) + " name='" + iqmJointName(model, weaponJoint) + "'");
+}
+
+var paused = false;
+var showSkeleton = false;
+var useGpu = true;
+var showWeaponJoint = true;
+var clearColor = Color(0, 0, 80, 255);
+gpuRig.updatePalette(model, animator);
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    var move = 10.0 * dt;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) move = move * 3.0;
+
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        var (mdx, mdy) = GetMouseDelta();
+        yaw = yaw - -mdx * 0.16;
+        pitch = pitch - mdy * 0.16;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * deg2rad;
+    var pitchRad = pitch * deg2rad;
+    var cp = cos(pitchRad);
+    var fwdX = sin(yawRad) * cp;
+    var fwdY = sin(pitchRad);
+    var fwdZ = -cos(yawRad) * cp;
+
+    var flatLen = sqrt(fwdX * fwdX + fwdZ * fwdZ);
+    if (flatLen < 0.00001) flatLen = 1.0;
+    var pfX = fwdX / flatLen;
+    var pfZ = fwdZ / flatLen;
+    var rgtX = cos(yawRad);
+    var rgtZ = sin(yawRad);
+
+    if (IsKeyDown(KEY_W)) { camX = camX + pfX * move; camZ = camZ + pfZ * move; }
+    if (IsKeyDown(KEY_S)) { camX = camX - pfX * move; camZ = camZ - pfZ * move; }
+    if (IsKeyDown(KEY_A)) { camX = camX - rgtX * move; camZ = camZ - rgtZ * move; }
+    if (IsKeyDown(KEY_D)) { camX = camX + rgtX * move; camZ = camZ + rgtZ * move; }
+    if (IsKeyDown(KEY_SPACE)) camY = camY + move;
+    if (IsKeyDown(KEY_C)) camY = camY - move;
+
+    SetCamera3DPosition(cam, camX, camY, camZ);
+    SetCamera3DTarget(cam, camX + fwdX * 20.0, camY + fwdY * 20.0, camZ + fwdZ * 20.0);
+
+    if (IsKeyPressed(KEY_P)) paused = !paused;
+    if (IsKeyPressed(KEY_RIGHT)) animator.playClipByIndex(animator.clipIndex + 1, animator.defaultBlendTime);
+    if (IsKeyPressed(KEY_LEFT)) animator.playClipByIndex(animator.clipIndex - 1, animator.defaultBlendTime);
+    if (IsKeyPressed(KEY_K)) showSkeleton = !showSkeleton;
+    if (IsKeyPressed(KEY_G)) useGpu = !useGpu;
+    if (IsKeyPressed(KEY_J) && model.jointCount() > 0)
+    {
+        weaponJoint = weaponJoint - 1;
+        if (weaponJoint < 0) weaponJoint = model.jointCount() - 1;
+        print("IQM weapon joint = " + str(weaponJoint) + " name='" + iqmJointName(model, weaponJoint) + "'");
+    }
+    if (IsKeyPressed(KEY_L) && model.jointCount() > 0)
+    {
+        weaponJoint = weaponJoint + 1;
+        if (weaponJoint >= model.jointCount()) weaponJoint = 0;
+        print("IQM weapon joint = " + str(weaponJoint) + " name='" + iqmJointName(model, weaponJoint) + "'");
+    }
+    if (IsKeyPressed(KEY_H)) showWeaponJoint = !showWeaponJoint;
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+
+    if (!paused)
+        animator.update(dt);
+
+    if (useGpu)
+    {
+        gpuRig.updatePalette(model, animator);
+    }
+    else
+    {
+        model.animState.current = animator.current;
+        model.animState.next = animator.next;
+        model.animState.interp = animator.interp;
+        model.update(0.0);
+        model.showSkeleton = showSkeleton;
+    }
+
+    BeginDrawing();
+    ClearBackground(clearColor);
+
+    BeginMode3D(cam);
+    DrawGrid(30, 1.0);
+    if (useGpu)
+        gpuRig.draw(model, showSkeleton);
+    else
+        model.draw();
+    if (showWeaponJoint) drawIqmJointMarker(model, weaponJoint);
+    drawMd3OnIqmJoint(model, weapon, weaponJoint);
+    EndMode3D();
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = Begin("Weapon Attach");
+        if (panel)
+        {
+            Text("TAB hide/show UI");
+            Text("Joint: " + str(weaponJoint) + " " + iqmJointName(model, weaponJoint));
+            var (_, nextMarker) = Checkbox("Show joint marker", showWeaponJoint);
+            showWeaponJoint = nextMarker;
+            Separator();
+            var (_, nextScale) = SliderFloat("Scale", weapon.scale, 0.01, 4.0);
+            weapon.scale = nextScale;
+            var (_, nextPitch) = SliderFloat("Axis pitch", weapon.axisPitch, -180.0, 180.0);
+            weapon.axisPitch = nextPitch;
+            Separator();
+            var (_, nextPx) = SliderFloat("Pos X", weapon.positionX, -20.0, 20.0);
+            weapon.positionX = nextPx;
+            var (_, nextPy) = SliderFloat("Pos Y", weapon.positionY, -20.0, 20.0);
+            weapon.positionY = nextPy;
+            var (_, nextPz) = SliderFloat("Pos Z", weapon.positionZ, -20.0, 20.0);
+            weapon.positionZ = nextPz;
+            Separator();
+            var (_, nextRx) = SliderFloat("Rot X", weapon.rotationX, -180.0, 180.0);
+            weapon.rotationX = nextRx;
+            var (_, nextRy) = SliderFloat("Rot Y", weapon.rotationY, -180.0, 180.0);
+            weapon.rotationY = nextRy;
+            var (_, nextRz) = SliderFloat("Rot Z", weapon.rotationZ, -180.0, 180.0);
+            weapon.rotationZ = nextRz;
+        }
+        End();
+        EndImGui();
+    }
+
+    DrawRectangle(10, 10, 980, 156, hudBg);
+    DrawText("IQM Shader Skinning + Animator (RMB look, WASD move, SPACE/C up-down, P pause, arrows anim, K skeleton, G gpu/cpu, J/L joint, H marker, TAB UI)", 20, 20, 18, hudTitle);
+    DrawText("Mode: " + (useGpu ? "GPU" : "CPU") + "  Clip: " + animator.currentClipName() + "  Bones: " + str(model.jointCount()) + "  Frames: " + str(model.frameCount()), 20, 48, 16, hudInfo);
+    DrawText("Cur: " + str(animator.current) + "  Next: " + str(animator.next) + "  Interp: " + str(animator.interp) + "  Blend: " + str(animator.transitionBlend()), 20, 72, 16, hudWarm);
+    DrawText("Surfaces: " + str(model.surfaceCount()) + "  Tris: " + str(model.triangleCount()) + "  Transition: " + str(animator.transitionActive) + "  FPS: " + str(GetFPS()), 20, 96, 16, hudGood);
+    DrawText("WeaponJoint: " + str(weaponJoint) + " " + iqmJointName(model, weaponJoint), 20, 120, 16, hudLight);
+    DrawText("WeaponOffset: " + str(weapon.positionX) + ", " + str(weapon.positionY) + ", " + str(weapon.positionZ) + "  Rot: " + str(weapon.rotationX) + ", " + str(weapon.rotationY) + ", " + str(weapon.rotationZ), 20, 144, 16, hudLight);
+
+    EndDrawing();
+}
+
+gpuRig.destroy();
+weapon.destroy();
+DestroyCamera3D(cam);
+ShutdownImGui();
+CloseWindow();

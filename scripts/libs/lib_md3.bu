@@ -385,6 +385,8 @@ class MD3Model
     var ready;
     var sourcePath;
     var scale;
+    var axisPitch;
+    var flipTexV;
     var positionX, positionY, positionZ;
     var rotationX, rotationY, rotationZ;
 
@@ -400,6 +402,8 @@ class MD3Model
         self.ready      = false;
         self.sourcePath = "";
         self.scale      = 1.0;
+        self.axisPitch  = -90.0;
+        self.flipTexV   = false;
         self.positionX  = 0.0; self.positionY = 0.0; self.positionZ = 0.0;
         self.rotationX  = 0.0; self.rotationY = 0.0; self.rotationZ = 0.0;
     }
@@ -427,21 +431,43 @@ class MD3Model
     var oy = tag.origins.get(oa + 1) + (tag.origins.get(ob + 1) - tag.origins.get(oa + 1)) * t;
     var oz = tag.origins.get(oa + 2) + (tag.origins.get(ob + 2) - tag.origins.get(oa + 2)) * t;
  
+    // MD3 stores axis[3][3]; rlMultMatrixf expects OpenGL column-major.
+    // So we must transpose the 3x3 basis when building the 4x4 matrix.
     tag.mat.set(0,  tag.axes.get(a+0) + (tag.axes.get(b+0) - tag.axes.get(a+0)) * t);
-    tag.mat.set(1,  tag.axes.get(a+1) + (tag.axes.get(b+1) - tag.axes.get(a+1)) * t);
-    tag.mat.set(2,  tag.axes.get(a+2) + (tag.axes.get(b+2) - tag.axes.get(a+2)) * t);
+    tag.mat.set(1,  tag.axes.get(a+3) + (tag.axes.get(b+3) - tag.axes.get(a+3)) * t);
+    tag.mat.set(2,  tag.axes.get(a+6) + (tag.axes.get(b+6) - tag.axes.get(a+6)) * t);
     tag.mat.set(3,  0.0);
-    tag.mat.set(4,  tag.axes.get(a+3) + (tag.axes.get(b+3) - tag.axes.get(a+3)) * t);
+    tag.mat.set(4,  tag.axes.get(a+1) + (tag.axes.get(b+1) - tag.axes.get(a+1)) * t);
     tag.mat.set(5,  tag.axes.get(a+4) + (tag.axes.get(b+4) - tag.axes.get(a+4)) * t);
-    tag.mat.set(6,  tag.axes.get(a+5) + (tag.axes.get(b+5) - tag.axes.get(a+5)) * t);
+    tag.mat.set(6,  tag.axes.get(a+7) + (tag.axes.get(b+7) - tag.axes.get(a+7)) * t);
     tag.mat.set(7,  0.0);
-    tag.mat.set(8,  tag.axes.get(a+6) + (tag.axes.get(b+6) - tag.axes.get(a+6)) * t);
-    tag.mat.set(9,  tag.axes.get(a+7) + (tag.axes.get(b+7) - tag.axes.get(a+7)) * t);
+    tag.mat.set(8,  tag.axes.get(a+2) + (tag.axes.get(b+2) - tag.axes.get(a+2)) * t);
+    tag.mat.set(9,  tag.axes.get(a+5) + (tag.axes.get(b+5) - tag.axes.get(a+5)) * t);
     tag.mat.set(10, tag.axes.get(a+8) + (tag.axes.get(b+8) - tag.axes.get(a+8)) * t);
     tag.mat.set(11, 0.0);
     tag.mat.set(12, ox);
     tag.mat.set(13, oy);
     tag.mat.set(14, oz);
+    tag.mat.set(15, 1.0);
+    return tag.mat;
+}
+
+def buildTagInverseMatrix(tag_index, frameA, frameB, t)
+{
+    var mat = self.buildTagMatrix(tag_index, frameA, frameB, t);
+    var tag = self.tags[tag_index];
+
+    var r00 = mat.get(0);  var r01 = mat.get(4);  var r02 = mat.get(8);
+    var r10 = mat.get(1);  var r11 = mat.get(5);  var r12 = mat.get(9);
+    var r20 = mat.get(2);  var r21 = mat.get(6);  var r22 = mat.get(10);
+    var tx  = mat.get(12); var ty  = mat.get(13); var tz  = mat.get(14);
+
+    tag.mat.set(0,  r00); tag.mat.set(1,  r01); tag.mat.set(2,  r02); tag.mat.set(3,  0.0);
+    tag.mat.set(4,  r10); tag.mat.set(5,  r11); tag.mat.set(6,  r12); tag.mat.set(7,  0.0);
+    tag.mat.set(8,  r20); tag.mat.set(9,  r21); tag.mat.set(10, r22); tag.mat.set(11, 0.0);
+    tag.mat.set(12, -(r00 * tx + r10 * ty + r20 * tz));
+    tag.mat.set(13, -(r01 * tx + r11 * ty + r21 * tz));
+    tag.mat.set(14, -(r02 * tx + r12 * ty + r22 * tz));
     tag.mat.set(15, 1.0);
     return tag.mat;
 }
@@ -764,7 +790,7 @@ class MD3Model
 
         rlPushMatrix();
         rlTranslatef(self.positionX, self.positionY, self.positionZ);
-        rlRotatef(-90.0, 1.0, 0.0, 0.0);  
+        rlRotatef(self.axisPitch, 1.0, 0.0, 0.0);  
         rlRotatef(self.rotationX, 1.0, 0.0, 0.0);
         rlRotatef(self.rotationY, 0.0, 1.0, 0.0);
         rlRotatef(self.rotationZ, 0.0, 0.0, 1.0);
@@ -778,8 +804,57 @@ class MD3Model
 
     def drawSurfaces()
     {
-        for (var s = 0; s < len(self.surfaces); s = s + 1)
-            self.drawSurface(self.surfaces[s]);
+       // for (var s = 0; s < len(self.surfaces); s = s + 1)
+       //     self.drawSurface(self.surfaces[s]);
+
+       
+
+        var vi = 0; var pa = 0;
+        var x = 0.0; var y = 0.0; var z = 0.0;
+        var nx = 0.0; var ny = 0.0; var nz = 0.0;
+        var u = 0.0; var v = 0.0;
+
+         for (var s = 1; s < len(self.surfaces); s = s + 1)
+         {   
+            
+            var surf = self.surfaces[s];
+            if (!surf.ready) continue;
+             
+        rlColor4f(1.0, 1.0, 1.0, 1.0);
+
+        rlBegin(RL_TRIANGLES);
+        if (surf.texture > 0) rlSetTexture(surf.texture);
+        else rlSetTexture(0);
+        for (var tri = 0; tri < surf.numTris; tri = tri + 1)
+        {
+            var triBase = tri * 3;
+            for (var k = 0; k < 3; k = k + 1)
+            {
+                vi = surf.indices.get(triBase + k);
+                pa = vi * 3;
+
+                x  = surf.framePositions.get(pa + 2);
+                y  = surf.framePositions.get(pa + 1);
+                z  = surf.framePositions.get(pa + 0);
+                nx = surf.normals.get(pa + 2);
+                ny = surf.normals.get(pa + 1);
+                nz = surf.normals.get(pa + 0);
+
+                var uvBase = vi * 2;
+                u = surf.texcoords.get(uvBase + 0);
+                v = surf.texcoords.get(uvBase + 1);
+                if (self.flipTexV) v = 1.0 - v;
+
+                rlNormal3f(nx, ny, nz);
+                rlTexCoord2f(u, v);
+                rlVertex3f(x, y, z);
+            }
+        }
+        rlEnd();
+    }
+
+        rlSetTexture(0);
+        
     }
 
 def drawTagsLocal()
@@ -839,7 +914,7 @@ def drawTags()
 {
     rlPushMatrix();
     rlTranslatef(self.positionX, self.positionY, self.positionZ);
-    rlRotatef(-90.0, 1.0, 0.0, 0.0);
+    rlRotatef(self.axisPitch, 1.0, 0.0, 0.0);
     rlRotatef(self.rotationX, 1.0, 0.0, 0.0);
     rlRotatef(self.rotationY, 0.0, 1.0, 0.0);
     rlRotatef(self.rotationZ, 0.0, 0.0, 1.0);
@@ -862,7 +937,7 @@ def drawChild(tagIndex, child, showTags)
 
     rlPushMatrix();
     rlTranslatef(self.positionX, self.positionY, self.positionZ);
-    rlRotatef(-90.0, 1.0, 0.0, 0.0);
+    rlRotatef(self.axisPitch, 1.0, 0.0, 0.0);
     rlRotatef(self.rotationX, 1.0, 0.0, 0.0);
     rlRotatef(self.rotationY, 0.0, 1.0, 0.0);
     rlRotatef(self.rotationZ, 0.0, 0.0, 1.0);
@@ -886,7 +961,7 @@ def pushTagSpace(tagIndex)
 
     rlPushMatrix();
     rlTranslatef(self.positionX, self.positionY, self.positionZ);
-    rlRotatef(-90.0, 1.0, 0.0, 0.0);
+    rlRotatef(self.axisPitch, 1.0, 0.0, 0.0);
     rlRotatef(self.rotationX, 1.0, 0.0, 0.0);
     rlRotatef(self.rotationY, 0.0, 1.0, 0.0);
     rlRotatef(self.rotationZ, 0.0, 0.0, 1.0);
@@ -909,16 +984,79 @@ def pushTagSpaceLocal(tagIndex)
     rlMultMatrixf(self.buildTagMatrix(tagIndex, frameA, frameB, self.anim.interp));
 }
 
+def pushTagSpaceInverseLocal(tagIndex)
+{
+    var fc = self.header.numFrames;
+    var frameA = self.anim.current;
+    var frameB = self.anim.next;
+    if (frameA < 0) frameA = 0;
+    if (frameA >= fc) frameA = fc - 1;
+    if (frameB < 0) frameB = frameA;
+    if (frameB >= fc) frameB = frameA;
+
+    rlPushMatrix();
+    rlMultMatrixf(self.buildTagInverseMatrix(tagIndex, frameA, frameB, self.anim.interp));
+}
+
  
 
-def popTagSpace()
-{
-    rlPopMatrix();
-}
+    def popTagSpace()
+    {
+        rlPopMatrix();
+    }
+
+    def drawSurfaceStatic(surf)
+    {
+        if (!surf.ready) return;
+
+        var vi = 0; var pa = 0;
+        var x = 0.0; var y = 0.0; var z = 0.0;
+        var nx = 0.0; var ny = 0.0; var nz = 0.0;
+        var u = 0.0; var v = 0.0;
+
+        rlColor4f(1.0, 1.0, 1.0, 1.0);
+
+        rlBegin(RL_TRIANGLES);
+        if (surf.texture > 0) rlSetTexture(surf.texture);
+        else rlSetTexture(0);
+        for (var tri = 0; tri < surf.numTris; tri = tri + 1)
+        {
+            var triBase = tri * 3;
+            for (var k = 0; k < 3; k = k + 1)
+            {
+                vi = surf.indices.get(triBase + k);
+                pa = vi * 3;
+
+                x  = surf.framePositions.get(pa + 2);
+                y  = surf.framePositions.get(pa + 1);
+                z  = surf.framePositions.get(pa + 0);
+                nx = surf.normals.get(pa + 2);
+                ny = surf.normals.get(pa + 1);
+                nz = surf.normals.get(pa + 0);
+
+                var uvBase = vi * 2;
+                u = surf.texcoords.get(uvBase + 0);
+                v = surf.texcoords.get(uvBase + 1);
+                if (self.flipTexV) v = 1.0 - v;
+
+                rlNormal3f(nx, ny, nz);
+                rlTexCoord2f(u, v);
+                rlVertex3f(x, y, z);
+            }
+        }
+        rlEnd();
+
+        rlSetTexture(0);
+    }
 
     def drawSurface(surf)
     {
         if (!surf.ready) return;
+        if (surf.numFrames <= 1)
+        {
+            self.drawSurfaceStatic(surf);
+            return;
+        }
 
         var fc    = surf.numFrames;
         var frameA = self.anim.current;
@@ -940,11 +1078,11 @@ def popTagSpace()
         var nx1 = 0.0; var ny1 = 0.0; var nz1 = 0.0;
         var u = 0.0; var v = 0.0;
 
-        if (surf.texture > 0) rlEnableTexture(surf.texture);
-        else rlDisableTexture();
         rlColor4f(1.0, 1.0, 1.0, 1.0);
 
         rlBegin(RL_TRIANGLES);
+        if (surf.texture > 0) rlSetTexture(surf.texture);
+        else rlSetTexture(0);
         for (var tri = 0; tri < surf.numTris; tri = tri + 1)
         {
             var triBase = tri * 3;
@@ -954,22 +1092,23 @@ def popTagSpace()
                 pa  = baseA + vi * 3;
                 pb  = baseB + vi * 3;
 
-                x0  = surf.framePositions.get(pa + 0);
+                x0  = surf.framePositions.get(pa + 2);
                 y0  = surf.framePositions.get(pa + 1);
-                z0  = surf.framePositions.get(pa + 2);
-                x1  = surf.framePositions.get(pb + 0);
+                z0  = surf.framePositions.get(pa + 0);
+                x1  = surf.framePositions.get(pb + 2);
                 y1  = surf.framePositions.get(pb + 1);
-                z1  = surf.framePositions.get(pb + 2);
-                nx0 = surf.normals.get(pa + 0);
+                z1  = surf.framePositions.get(pb + 0);
+                nx0 = surf.normals.get(pa + 2);
                 ny0 = surf.normals.get(pa + 1);
-                nz0 = surf.normals.get(pa + 2);
-                nx1 = surf.normals.get(pb + 0);
+                nz0 = surf.normals.get(pa + 0);
+                nx1 = surf.normals.get(pb + 2);
                 ny1 = surf.normals.get(pb + 1);
-                nz1 = surf.normals.get(pb + 2);
+                nz1 = surf.normals.get(pb + 0);
 
                 var uvBase = vi * 2;
                 u = surf.texcoords.get(uvBase + 0);
                 v = surf.texcoords.get(uvBase + 1);
+                if (self.flipTexV) v = 1.0 - v;
 
                 rlNormal3f(nx0 + (nx1 - nx0) * t,
                            ny0 + (ny1 - ny0) * t,
@@ -982,6 +1121,6 @@ def popTagSpace()
         }
         rlEnd();
 
-        rlDisableTexture();
+        rlSetTexture(0);
     }
 }

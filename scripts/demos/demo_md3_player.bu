@@ -1,0 +1,427 @@
+import path;
+using path;
+import math;
+using math;
+import RLGL;
+using RLGL;
+
+include "../libs/lib_md3.bu";
+
+var DEG2RAD = 0.017453292519943295;
+var RAD2DEG = 57.29577951308232;
+
+def resolveAsset3(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+def md3TagIndex(model, name)
+{
+    for (var i = 0; i < len(model.tags); i = i + 1)
+        if (model.tags[i].name == name) return i;
+    return -1;
+}
+
+def md3ApplyTextureAll(model, texPath)
+{
+    if (texPath == nil)
+    {
+        print("MD3 player: missing texture path");
+        return false;
+    }
+
+    var ok = false;
+    for (var i = 0; i < model.surfaceCount(); i = i + 1)
+    {
+        if (model.setSurfaceTexture(i, texPath)) ok = true;
+    }
+    return ok;
+}
+
+def md3SetupLowerAnims(model)
+{
+    model.animations = [];
+    model.addAnimation("LEGS_DEATH1", 0,   30, false, 20.0);
+    model.addAnimation("LEGS_DEAD1",  29,  1,  false, 20.0);
+    model.addAnimation("LEGS_DEATH2", 30,  30, false, 20.0);
+    model.addAnimation("LEGS_DEAD2",  59,  1,  false, 20.0);
+    model.addAnimation("LEGS_DEATH3", 60,  30, false, 20.0);
+    model.addAnimation("LEGS_DEAD3",  89,  1,  false, 20.0);
+    model.addAnimation("LEGS_WALK",   90,  8,  true,  20.0);
+    model.addAnimation("LEGS_RUN",    98,  12, true,  15.0);
+    model.addAnimation("LEGS_BACK",   110, 11, true,  21.0);
+    model.addAnimation("LEGS_SWIM",   121, 10, true,  20.0);
+    model.addAnimation("LEGS_JUMP",   131, 10, false, 15.0);
+    model.addAnimation("LEGS_LAND",   141, 10, false, 18.0);
+    model.addAnimation("LEGS_JUMPB",  151, 6,  false, 20.0);
+    model.addAnimation("LEGS_LANDB",  157, 8,  false, 15.0);
+    model.addAnimation("LEGS_IDLE",   165, 1,  true,  15.0);
+    model.addAnimation("LEGS_IDLECR", 166, 10, true,  15.0);
+    model.addAnimation("LEGS_TURN",   177, 7,  true,  15.0);
+    model.setAnimationByName("LEGS_IDLE");
+}
+
+def md3SetupUpperAnims(model)
+{
+    model.animations = [];
+    model.addAnimation("TORSO_DEATH1",  0,   30, false, 20.0);
+    model.addAnimation("TORSO_DEAD1",   29,  1,  false, 20.0);
+    model.addAnimation("TORSO_DEATH2",  30,  30, false, 20.0);
+    model.addAnimation("TORSO_DEAD2",   59,  1,  false, 20.0);
+    model.addAnimation("TORSO_DEATH3",  60,  30, false, 20.0);
+    model.addAnimation("TORSO_DEAD3",   89,  1,  false, 20.0);
+    model.addAnimation("TORSO_GESTURE", 90,  40, true,  18.0);
+    model.addAnimation("TORSO_ATTACK",  130, 6,  false, 15.0);
+    model.addAnimation("TORSO_ATTACK2", 136, 6,  false, 15.0);
+    model.addAnimation("TORSO_DROP",    142, 5,  false, 20.0);
+    model.addAnimation("TORSO_RAISE",   147, 4,  false, 20.0);
+    model.addAnimation("TORSO_STAND",   151, 1,  true,  15.0);
+    model.addAnimation("TORSO_STAND2",  152, 1,  true,  15.0);
+    model.setAnimationByName("TORSO_STAND");
+}
+
+def md3SetAnimIfNeeded(model, name)
+{
+    if (model.animationName() == name) return;
+    model.setAnimationByName(name);
+}
+
+def drawMd3Player(legs, upper, head, weapon, showTags)
+{
+    legs.draw();
+    if (showTags) legs.drawTags();
+
+    if (legs.tagCount() <= 0) return;
+
+    // Same composition order as the legacy MD3 demo:
+    // lower(tag_torso=0) -> upper(tag_head=0, tag_weapon=1)
+    legs.pushTagSpace(0);
+        if (upper.tagCount() > 2) upper.pushTagSpaceInverseLocal(2);
+        upper.drawSurfaces();
+        if (showTags) upper.drawTagsLocal();
+
+        if (upper.tagCount() > 0)
+        {
+            upper.pushTagSpaceLocal(0);
+            head.drawSurfaces();
+            upper.popTagSpace();
+        }
+
+        if (upper.tagCount() > 1)
+        {
+            upper.pushTagSpaceLocal(1);
+            if (weapon.tagCount() > 2) weapon.pushTagSpaceInverseLocal(2);
+            weapon.drawSurfaces();
+            if (weapon.tagCount() > 2) weapon.popTagSpace();
+            upper.popTagSpace();
+        }
+        if (upper.tagCount() > 2) upper.popTagSpace();
+    legs.popTagSpace();
+}
+
+var lowerPath = resolveAsset3(
+    "assets/md3/lower.md3",
+    "../assets/md3/lower.md3",
+    "../../assets/md3/lower.md3"
+);
+var upperPath = resolveAsset3(
+    "assets/md3/upper.md3",
+    "../assets/md3/upper.md3",
+    "../../assets/md3/upper.md3"
+);
+var headPath = resolveAsset3(
+    "assets/md3/head.md3",
+    "../assets/md3/head.md3",
+    "../../assets/md3/head.md3"
+);
+var gunPath = resolveAsset3(
+    "assets/md3/gun.md3",
+    "../assets/md3/gun.md3",
+    "../../assets/md3/gun.md3"
+);
+
+if (lowerPath == nil || upperPath == nil || headPath == nil || gunPath == nil)
+{
+    print("MD3 player assets not found");
+    return;
+}
+
+var bodyTex = resolveAsset3(
+    "assets/md3/body.jpg",
+    "../assets/md3/body.jpg",
+    "../../assets/md3/body.jpg"
+);
+var headTex = resolveAsset3(
+    "assets/md3/head.jpg",
+    "../assets/md3/head.jpg",
+    "../../assets/md3/head.jpg"
+);
+var gunTex = resolveAsset3(
+    "assets/md3/gun.jpg",
+    "../assets/md3/gun.jpg",
+    "../../assets/md3/gun.jpg"
+);
+
+InitWindow(1280, 720, "BuGL Demo - MD3 Player");
+SetTargetFPS(60);
+
+var cam = CreateCamera3D();
+SetCamera3DPosition(cam, 0.0, 2.0, 8.0);
+SetCamera3DTarget(cam, 0.0, 1.8, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 70.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var legs = MD3Model();
+var upper = MD3Model();
+var head = MD3Model();
+var weapon = MD3Model();
+
+if (!legs.load(lowerPath) || !upper.load(upperPath) || !head.load(headPath) || !weapon.load(gunPath))
+{
+    print("Failed to load MD3 player rig");
+    CloseWindow();
+    return;
+}
+
+if (!md3ApplyTextureAll(legs, bodyTex)) print("MD3 player: failed to apply lower texture");
+if (!md3ApplyTextureAll(upper, bodyTex)) print("MD3 player: failed to apply upper texture");
+if (!md3ApplyTextureAll(head, headTex)) print("MD3 player: failed to apply head texture");
+if (!md3ApplyTextureAll(weapon, gunTex)) print("MD3 player: failed to apply weapon texture");
+
+md3SetupLowerAnims(legs);
+md3SetupUpperAnims(upper);
+
+legs.scale = 0.055;
+upper.scale = legs.scale;
+head.scale = legs.scale;
+weapon.scale = legs.scale;
+legs.axisPitch = -90.0;
+upper.axisPitch = -90.0;
+head.axisPitch = -90.0;
+weapon.axisPitch = -90.0;
+legs.flipTexV = false;
+upper.flipTexV = false;
+head.flipTexV = false;
+weapon.flipTexV = false;
+
+var playerX = 0.0;
+var playerY = 0.0;
+var playerZ = 0.0;
+var playerYaw = 180.0;
+var velY = 0.0;
+var onGround = true;
+var landingTimer = 0.0;
+
+var camYaw = 180.0;
+var camPitch = -12.0;
+var camDist = 5.2;
+var camFocusY = 2.6;
+var mouseSensitivity = 0.18;
+var axisPitchMode = 0;
+
+var showTags = false;
+var paused = false;
+var attackCooldown = 0.0;
+var attackRequested = false;
+var wasMoving = false;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    if (IsKeyPressed(KEY_T)) showTags = !showTags;
+    if (IsKeyPressed(KEY_P)) paused = !paused;
+    if (IsKeyPressed(KEY_F1))
+    {
+        legs.flipTexV = !legs.flipTexV;
+        upper.flipTexV = legs.flipTexV;
+        head.flipTexV = legs.flipTexV;
+        weapon.flipTexV = legs.flipTexV;
+    }
+    if (IsKeyPressed(KEY_F2))
+    {
+        axisPitchMode = axisPitchMode + 1;
+        if (axisPitchMode > 3) axisPitchMode = 0;
+
+        if (axisPitchMode == 0) legs.axisPitch = -90.0;
+        elif (axisPitchMode == 1) legs.axisPitch = 90.0;
+        elif (axisPitchMode == 2) legs.axisPitch = 0.0;
+        else legs.axisPitch = 180.0;
+
+        upper.axisPitch = legs.axisPitch;
+        head.axisPitch = legs.axisPitch;
+        weapon.axisPitch = legs.axisPitch;
+    }
+
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        var (mdx, mdy) = GetMouseDelta();
+        camYaw = camYaw - mdx * mouseSensitivity;
+        camPitch = camPitch - mdy * mouseSensitivity;
+        if (camPitch < -45.0) camPitch = -45.0;
+        if (camPitch > 60.0) camPitch = 60.0;
+    }
+
+    if (IsKeyPressed(KEY_SPACE) && onGround)
+    {
+        velY = 5.5;
+        onGround = false;
+        landingTimer = 0.0;
+        md3SetAnimIfNeeded(legs, "LEGS_JUMP");
+    }
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && attackCooldown <= 0.0)
+    {
+        attackRequested = true;
+        attackCooldown = 0.45;
+        upper.setAnimationByName("TORSO_ATTACK");
+    }
+
+    var moveX = 0.0;
+    var moveZ = 0.0;
+    if (IsKeyDown(KEY_A)) moveX = moveX - 1.0;
+    if (IsKeyDown(KEY_D)) moveX = moveX + 1.0;
+    if (IsKeyDown(KEY_W)) moveZ = moveZ + 1.0;
+    if (IsKeyDown(KEY_S)) moveZ = moveZ - 1.0;
+
+    var camYawRad = camYaw * DEG2RAD;
+    var fwdX = sin(camYawRad);
+    var fwdZ = cos(camYawRad);
+    var rightX = fwdZ;
+    var rightZ = -fwdX;
+
+    var wishX = rightX * moveX + fwdX * moveZ;
+    var wishZ = rightZ * moveX + fwdZ * moveZ;
+    var wishLen = sqrt(wishX * wishX + wishZ * wishZ);
+    var moving = wishLen > 0.0001;
+    if (moving)
+    {
+        wishX = wishX / wishLen;
+        wishZ = wishZ / wishLen;
+    }
+
+    var run = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    var moveSpeed = 0.0;
+    if (moving)
+    {
+        moveSpeed = 2.6;
+        if (run) moveSpeed = 5.2;
+    }
+
+    if (!paused)
+    {
+        if (attackCooldown > 0.0) attackCooldown = attackCooldown - dt;
+        if (attackCooldown < 0.0) attackCooldown = 0.0;
+
+        if (moving)
+        {
+            playerX = playerX + wishX * moveSpeed * dt;
+            playerZ = playerZ + wishZ * moveSpeed * dt;
+            playerYaw = atan2(wishX, wishZ) * RAD2DEG;
+        }
+
+        velY = velY - 16.0 * dt;
+        playerY = playerY + velY * dt;
+        if (playerY <= 0.0)
+        {
+            if (!onGround && velY < -0.5) landingTimer = 0.18;
+            playerY = 0.0;
+            velY = 0.0;
+            onGround = true;
+        }
+        else
+        {
+            onGround = false;
+        }
+
+        if (landingTimer > 0.0)
+        {
+            landingTimer = landingTimer - dt;
+            md3SetAnimIfNeeded(legs, "LEGS_LAND");
+        }
+        elif (!onGround)
+        {
+            md3SetAnimIfNeeded(legs, "LEGS_JUMP");
+        }
+        elif (moving)
+        {
+            if (run) md3SetAnimIfNeeded(legs, "LEGS_RUN");
+            else md3SetAnimIfNeeded(legs, "LEGS_WALK");
+        }
+        else
+        {
+            md3SetAnimIfNeeded(legs, "LEGS_IDLE");
+        }
+
+        if (upper.animationName() == "TORSO_ATTACK")
+        {
+            if (!upper.anim.playing) md3SetAnimIfNeeded(upper, "TORSO_STAND");
+        }
+        else
+        {
+            md3SetAnimIfNeeded(upper, "TORSO_STAND");
+        }
+
+        legs.update(dt);
+        upper.update(dt);
+    }
+
+    // legs.positionX = playerX;
+    // legs.positionY = playerY;
+    // legs.positionZ = playerZ;
+    // legs.rotationX = 0.0;
+    // legs.rotationY = playerYaw;
+    // legs.rotationZ = 0.0;
+
+    var pitchRad = camPitch * DEG2RAD;
+    var camDirX = sin(camYawRad) * cos(pitchRad);
+    var camDirY = sin(pitchRad);
+    var camDirZ = cos(camYawRad) * cos(pitchRad);
+
+    var targetX = playerX;
+    var targetY = playerY + camFocusY;
+    var targetZ = playerZ;
+
+    var camX = targetX - camDirX * camDist;
+    var camY = targetY - camDirY * camDist;
+    var camZ = targetZ - camDirZ * camDist;
+
+    if (camY < 0.6) camY = 0.6;
+
+    SetCamera3DPosition(cam, camX, camY, camZ);
+    SetCamera3DTarget(cam, targetX, targetY, targetZ);
+
+    BeginDrawing();
+    ClearBackground(Color(18, 22, 30, 255));
+
+    BeginMode3D(cam);
+    DrawGrid(40, 1.0);
+    drawMd3Player(legs, upper, head, weapon, showTags);
+    DrawCube(targetX, 0.05, targetZ, 0.25, 0.1, 0.25, Color(60, 90, 150, 255));
+    EndMode3D();
+
+    DrawRectangle(10, 10, 580, 144, Color(0, 0, 0, 150));
+    DrawText("MD3 Player Demo | RMB look | WASD move | SHIFT run | SPACE jump | LMB attack | T tags | P pause", 20, 18, 18, Color(240, 240, 240, 255));
+    DrawText("Legs: " + legs.animationName() + " | Upper: " + upper.animationName(), 20, 48, 18, Color(200, 220, 255, 255));
+    DrawText("Player: " + str(int(playerX * 10.0) / 10.0) + ", " + str(int(playerY * 10.0) / 10.0) + ", " + str(int(playerZ * 10.0) / 10.0) + " | Yaw: " + str(int(playerYaw + 0.5)), 20, 76, 18, Color(180, 255, 180, 255));
+    DrawText("FPS: " + str(GetFPS()) + " | Moving: " + str(moving) + " | Ground: " + str(onGround), 20, 102, 18, Color(255, 220, 180, 255));
+    DrawText("F1 flipTexV=" + str(legs.flipTexV) + " | F2 axisPitch=" + str(legs.axisPitch), 20, 126, 18, Color(255, 200, 120, 255));
+
+    EndDrawing();
+
+    wasMoving = moving;
+    if (attackRequested) attackRequested = false;
+}
+
+weapon.destroy();
+head.destroy();
+upper.destroy();
+legs.destroy();
+DestroyCamera3D(cam);
+CloseWindow();

@@ -1,0 +1,461 @@
+import path;
+using path;
+import math;
+using math;
+import ImGui;
+using ImGui;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+
+include "../libs/lib_meshanim.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("MeshBin shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("MeshBin shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def meshAnimMaxKeys(anim)
+{
+    var maxKeys = 0;
+    for (var i = 0; i < len(anim.channels); i += 1)
+    {
+        var kc = len(anim.channels[i].keyframes);
+        if (kc > maxKeys) maxKeys = kc;
+    }
+    if (maxKeys < 2) maxKeys = 2;
+    return maxKeys;
+}
+
+
+def meshbinTransformPoint(m, x, y, z)
+{
+    return (
+        m.m0 * x + m.m4 * y + m.m8  * z + m.m12,
+        m.m1 * x + m.m5 * y + m.m9  * z + m.m13,
+        m.m2 * x + m.m6 * y + m.m10 * z + m.m14
+    );
+}
+
+
+def drawMeshBinSkeleton(mesh, skinner, modelMat, boneCol, linkCol)
+{
+    if (skinner == nil || !skinner.ready) return;
+
+    for (var i = 0; i < len(mesh.bones); i += 1)
+    {
+        var pose = skinner.poses[i];
+        var (wx, wy, wz) = meshbinTransformPoint(modelMat, pose.globalMat.m12, pose.globalMat.m13, pose.globalMat.m14);
+        DrawSphere(wx, wy, wz, 0.025, boneCol);
+
+        var parent = mesh.bones[i].parentIndex;
+        if (parent >= 0 && parent < len(skinner.poses))
+        {
+            var p = skinner.poses[parent];
+            var (px, py, pz) = meshbinTransformPoint(modelMat, p.globalMat.m12, p.globalMat.m13, p.globalMat.m14);
+            DrawLine3D(px, py, pz, wx, wy, wz, linkCol);
+        }
+    }
+}
+
+
+var meshPath = resolveAssetPath(
+    "assets/sinbad/sinbad.h3d",
+    "../assets/sinbad/sinbad.h3d",
+    "../../assets/sinbad/sinbad.h3d"
+);
+var animPath = resolveAssetPath(
+    "assets/sinbad/sinbad_Dance.anim",
+    "../assets/sinbad/sinbad_Dance.anim",
+    "../../assets/sinbad/sinbad_Dance.anim"
+);
+
+if (meshPath == nil || animPath == nil)
+{
+    print("sinbad assets not found");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1600, 900, "BuGL - MeshBin Sinbad Animation");
+SetTargetFPS(60);
+InitImGui();
+
+var cam = Camera3D();
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 60.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var eyeX = 0.0;
+var eyeY = 1.5;
+var eyeZ = 5.0;
+var yaw = -90.0;
+var pitch = -12.0;
+var paused = false;
+var showUi = true;
+var showSkeleton = true;
+var useFrameSlider = false;
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load meshbin: " + meshPath);
+    CloseWindow();
+    return;
+}
+
+var anim = MeshBinAnimation();
+if (!anim.load(animPath))
+{
+    print("Failed to load meshanim: " + animPath);
+    mesh.destroy();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 100.0;
+var targetRadius = 2.4;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 1.0) sceneRadius = 1.0;
+eyeX = sceneRadius * 0.55;
+eyeY = sceneRadius * 0.30;
+eyeZ = sceneRadius * 1.35;
+SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+SetCamera3DTarget(cam, 0.0, sceneRadius * 0.25, 0.0);
+
+var skinner = MeshBinSkinAnimator();
+if (!skinner.bind(mesh, anim))
+{
+    print("Failed to bind skinner");
+    mesh.destroy();
+    CloseWindow();
+    return;
+}
+skinner.looping = true;
+skinner.speed = 1.0;
+var scrubFrameCount = meshAnimMaxKeys(anim);
+var scrubFrame = 0;
+
+var vsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(location = 3) in vec4 aBoneIds;
+layout(location = 4) in vec4 aBoneWeights;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform mat4 uBones[128];
+
+out vec3 vNormal;
+out vec3 vWorldPos;
+out vec2 vUV;
+
+void main()
+{
+    float totalW = aBoneWeights.x + aBoneWeights.y + aBoneWeights.z + aBoneWeights.w;
+    mat4 skin = mat4(1.0);
+    vec3 localNormal = aNormal;
+    vec4 localPos = vec4(aPos, 1.0);
+
+    if (totalW > 0.0001)
+    {
+        skin = uBones[int(aBoneIds.x)] * aBoneWeights.x +
+               uBones[int(aBoneIds.y)] * aBoneWeights.y +
+               uBones[int(aBoneIds.z)] * aBoneWeights.z +
+               uBones[int(aBoneIds.w)] * aBoneWeights.w;
+        localPos = skin * vec4(aPos, 1.0);
+        localNormal = mat3(skin) * aNormal;
+    }
+
+    vec4 world = uModel * localPos;
+    vWorldPos = world.xyz;
+    vNormal = mat3(uModel) * localNormal;
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var fsSrc = @"
+#version 330 core
+in vec3 vNormal;
+in vec3 vWorldPos;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uTex;
+uniform vec3 uLightDir;
+uniform vec3 uAmbient;
+uniform int uHasTex;
+
+void main()
+{
+    vec3 albedo = uHasTex != 0 ? texture(uTex, vUV).rgb : vec3(0.72, 0.72, 0.72);
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-uLightDir);
+    float ndl = max(dot(N, L), 0.0);
+    float wrap = clamp((dot(N, L) + 0.35) / 1.35, 0.0, 1.0);
+    vec3 color = albedo * (uAmbient + vec3(max(ndl, wrap * 0.6)));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var prog = linkProgram(vsSrc, fsSrc);
+if (prog <= 0)
+{
+    mesh.destroy();
+    CloseWindow();
+    return;
+}
+
+var uModel = glGetUniformLocation(prog, "uModel");
+var uView = glGetUniformLocation(prog, "uView");
+var uProj = glGetUniformLocation(prog, "uProj");
+var uBones = glGetUniformLocation(prog, "uBones[0]");
+var uTex = glGetUniformLocation(prog, "uTex");
+var uLightDir = glGetUniformLocation(prog, "uLightDir");
+var uAmbient = glGetUniformLocation(prog, "uAmbient");
+var uHasTex = glGetUniformLocation(prog, "uHasTex");
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var paletteBuf = @(128 * 16, TYPE_FLOAT);
+var boneCount = skinner.fillSkinPaletteBuffer(paletteBuf);
+var uiBg = Color(0, 0, 0, 160);
+var uiFg = Color(240, 240, 240, 255);
+var uiOk = Color(180, 255, 180, 255);
+var uiWarm = Color(255, 220, 170, 255);
+var boneCol = Color(255, 220, 90, 255);
+var linkCol = Color(90, 220, 255, 255);
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (IsKeyPressed(KEY_P)) paused = !paused;
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001) { fx = fx / fl; fy = fy / fl; fz = fz / fl; }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001) { rx = rx / rl; rz = rz / rl; }
+
+    var moveSpeed = sceneRadius * 1.4;
+    if (moveSpeed < 2.0) moveSpeed = 2.0;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) moveSpeed = moveSpeed * 3.0;
+    var step = moveSpeed * dt;
+
+    if (IsKeyDown(KEY_W)) { eyeX += fx * step; eyeY += fy * step; eyeZ += fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * step; eyeY -= fy * step; eyeZ -= fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * step; eyeZ -= rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * step; eyeZ += rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += step;
+    if (IsKeyDown(KEY_C)) eyeY -= step;
+
+    SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+    SetCamera3DTarget(cam, eyeX + fx, eyeY + fy, eyeZ + fz);
+
+    if (useFrameSlider)
+    {
+        var denom = scrubFrameCount - 1;
+        if (denom < 1) denom = 1;
+        skinner.time = anim.duration * scrubFrame / denom;
+        skinner.updatePose(skinner.time);
+    }
+    elif (!paused)
+    {
+        skinner.time = skinner.time + dt * skinner.speed;
+        if (anim.duration > 0.000001)
+        {
+            if (skinner.looping)
+            {
+                while (skinner.time > anim.duration) skinner.time = skinner.time - anim.duration;
+            }
+            else if (skinner.time > anim.duration)
+                skinner.time = anim.duration;
+        }
+        skinner.updatePose(skinner.time);
+        if (anim.duration > 0.000001)
+        {
+            var liveFrame = int((skinner.time / anim.duration) * (scrubFrameCount - 1));
+            if (liveFrame < 0) liveFrame = 0;
+            if (liveFrame >= scrubFrameCount) liveFrame = scrubFrameCount - 1;
+            scrubFrame = liveFrame;
+        }
+    }
+    boneCount = skinner.fillSkinPaletteBuffer(paletteBuf);
+
+    BeginDrawing();
+    ClearBackground(Color(28, 34, 42, 255));
+    BeginMode3D(cam);
+
+    var modelMat = mesh.makeModelMatrix();
+    var view = rlGetMatrixModelview();
+    var proj = rlGetMatrixProjection();
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    rlDrawRenderBatchActive();
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+    glUseProgram(prog);
+    if (uModel >= 0) glUniformMatrix4fv(uModel, 1, false, modelBuf);
+    if (uView >= 0) glUniformMatrix4fv(uView, 1, false, viewBuf);
+    if (uProj >= 0) glUniformMatrix4fv(uProj, 1, false, projBuf);
+    if (uBones >= 0) glUniformMatrix4fv(uBones, boneCount, false, paletteBuf);
+    if (uTex >= 0) glUniform1i(uTex, 0);
+    if (uLightDir >= 0) glUniform3f(uLightDir, -0.45, -1.0, -0.20);
+    if (uAmbient >= 0) glUniform3f(uAmbient, 0.28, 0.30, 0.33);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+    {
+        var b = mesh.buffers[i];
+        var texId = 0;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            if (len(mat.textureIds) > 0) texId = mat.textureIds[0];
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        if (uHasTex >= 0) glUniform1i(uHasTex, texId > 0);
+        b.draw();
+    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glUseProgram(0);
+
+    DrawGrid(20, 0.5);
+    if (showSkeleton) drawMeshBinSkeleton(mesh, skinner, modelMat, boneCol, linkCol);
+    EndMode3D();
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = Begin("Sinbad Inspect");
+        if (panel)
+        {
+            Text("TAB hide/show UI");
+            var (_, nextSkeleton) = Checkbox("Show skeleton", showSkeleton);
+            showSkeleton = nextSkeleton;
+            var (_, nextScrub) = Checkbox("Use frame slider", useFrameSlider);
+            useFrameSlider = nextScrub;
+            Text(useFrameSlider ? "Scrub mode: timer stopped" : "Live mode: timer running");
+            var (_, nextPaused) = Checkbox("Paused", paused);
+            paused = nextPaused;
+            Separator();
+            Text("Animation: " + anim.name);
+            Text("Duration: " + str(anim.duration) + "  Max keys: " + str(scrubFrameCount));
+            var (_, nextFrame) = SliderInt("Frame", scrubFrame, 0, scrubFrameCount - 1);
+            scrubFrame = nextFrame;
+            var (_, nextTime) = SliderFloat("Time", skinner.time, 0.0, anim.duration);
+            if (useFrameSlider)
+            {
+                var denom2 = scrubFrameCount - 1;
+                if (denom2 < 1) denom2 = 1;
+                scrubFrame = int((nextTime / anim.duration) * denom2);
+                if (scrubFrame < 0) scrubFrame = 0;
+                if (scrubFrame >= scrubFrameCount) scrubFrame = scrubFrameCount - 1;
+                skinner.time = nextTime;
+            }
+            else
+                skinner.time = nextTime;
+            var (_, nextSpeed) = SliderFloat("Speed", skinner.speed, 0.0, 2.5);
+            skinner.speed = nextSpeed;
+        }
+        End();
+        EndImGui();
+    }
+
+    DrawRectangle(18, 18, 1040, 144, uiBg);
+    DrawText("MeshBin Sinbad  RMB look | WASD move | SPACE/C up-down | SHIFT faster | P pause | TAB UI", 32, 32, 22, uiFg);
+    DrawText("Anim: " + anim.name + "  Time: " + str(skinner.time) + " / " + str(anim.duration) + "  Bones: " + str(len(mesh.bones)) + "  ShowSkeleton: " + str(showSkeleton), 32, 60, 20, uiOk);
+    DrawText("Buffers: " + str(len(mesh.buffers)) + "  Materials: " + str(len(mesh.materials)) + "  Scale: " + str(mesh.scale) + "  SliderMode: " + str(useFrameSlider), 32, 88, 18, uiWarm);
+    DrawText("Frame: " + str(scrubFrame) + " / " + str(scrubFrameCount - 1) + "  FPS: " + str(GetFPS()), 32, 112, 18, uiWarm);
+    DrawFPS(GetScreenWidth() - 100, 16);
+    EndDrawing();
+}
+
+glDeleteProgram(prog);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();

@@ -1,86 +1,735 @@
 // ================================================================
-// Demo: Assimp animation/bones inspection + transform sampling
+// Demo: Assimp skinned animation (B3D + IQM) using script CPU skinning
+//
+// Keys:
+//   SPACE -> pause/resume animation
+//   K     -> toggle skeleton debug
 // ================================================================
+ 
+import Assimp;
+using Assimp;
+import path;
+using path;
+import math;
+using math;
+import GLM;
+using GLM;
+import RLGL;
+using RLGL;
 
-require "Assimp";
-import Assimp; using Assimp;
 
-var scene = AssimpScene();
-var importFlags = Triangulate | GenSmoothNormals | JoinIdenticalVertices | FlipUVs;
-
-var candidatePaths = [
-    "vendor/assimp/test/models-nonbsd/B3D/dwarf2.b3d",
-    "../vendor/assimp/test/models-nonbsd/B3D/dwarf2.b3d",
-    "vendor/assimp/test/models-nonbsd/B3D/turtle1.b3d",
-    "../vendor/assimp/test/models-nonbsd/B3D/turtle1.b3d",
-    "assets/WusonBlitz.b3d",
-    "../assets/WusonBlitz.b3d"
-];
-
-var modelPath = "";
-for (var i = 0; i < candidatePaths.length(); i = i + 1)
+def resolveAssetPath(a, b, c, d, e)
 {
-    if (scene.load(candidatePaths[i], importFlags))
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    if (path.exists(d)) return d;
+    if (path.exists(e)) return e;
+    return nil;
+}
+
+
+class AssimpSkinVertex
+{
+    var x, y, z;
+    var nx, ny, nz;
+    var u, v;
+    var b0, b1, b2, b3;
+    var w0, w1, w2, w3;
+
+    def init()
     {
-        modelPath = candidatePaths[i];
-        break;
+        self.x = 0.0; self.y = 0.0; self.z = 0.0;
+        self.nx = 0.0; self.ny = 1.0; self.nz = 0.0;
+        self.u = 0.0; self.v = 0.0;
+        self.b0 = -1; self.b1 = -1; self.b2 = -1; self.b3 = -1;
+        self.w0 = 0.0; self.w1 = 0.0; self.w2 = 0.0; self.w3 = 0.0;
     }
 }
 
-if (modelPath == "")
+
+class AssimpSkinSurface
 {
-    print("load failed: " + scene.getError());
+    var name;
+    var vertices;
+    var skinned;
+    var indices;
+    var cr, cg, cb;
+
+    def init()
+    {
+        self.name = "";
+        self.vertices = [];
+        self.skinned = [];
+        self.indices = [];
+        self.cr = 0.85;
+        self.cg = 0.85;
+        self.cb = 0.90;
+    }
+}
+
+
+class AssimpSkinnedModel
+{
+    var scene;
+    var anim;
+    var timeSec;
+    var durationSec;
+
+    var nodeNames;
+    var nodeParents;
+    var nodeLocals;
+    var nodeGlobals;
+    var nodeIndexByName;
+
+    var boneNames;
+    var boneOffsets;
+    var boneNodeIndex;
+    var boneSkins;
+    var boneParents;
+    var boneIndexByName;
+    var nodeToBone;
+
+    var surfaces;
+
+    var label;
+    var ready;
+    var showSkeleton;
+
+    var posX, posY, posZ;
+    var rotX, rotY, rotZ;
+    var preRotX;
+    var scaleVal;
+
+    def init()
+    {
+        self.scene = nil;
+        self.anim = nil;
+        self.timeSec = 0.0;
+        self.durationSec = 0.0;
+
+        self.nodeNames = [];
+        self.nodeParents = [];
+        self.nodeLocals = [];
+        self.nodeGlobals = [];
+        self.nodeIndexByName = {};
+
+        self.boneNames = [];
+        self.boneOffsets = [];
+        self.boneNodeIndex = [];
+        self.boneSkins = [];
+        self.boneParents = [];
+        self.boneIndexByName = {};
+        self.nodeToBone = {};
+
+        self.surfaces = [];
+
+        self.label = "";
+        self.ready = false;
+        self.showSkeleton = false;
+
+        self.posX = 0.0; self.posY = 0.0; self.posZ = 0.0;
+        self.rotX = 0.0; self.rotY = 0.0; self.rotZ = 0.0;
+        self.preRotX = 0.0;
+        self.scaleVal = 1.0;
+    }
+
+    def copyBaseVertex(src, dst)
+    {
+        dst.x = src.x; dst.y = src.y; dst.z = src.z;
+        dst.nx = src.nx; dst.ny = src.ny; dst.nz = src.nz;
+        dst.u = src.u; dst.v = src.v;
+    }
+
+    def insertWeight(v, boneIdx, w)
+    {
+        if (w <= 0.0) return;
+
+        if (w > v.w0)
+        {
+            v.b3 = v.b2; v.w3 = v.w2;
+            v.b2 = v.b1; v.w2 = v.w1;
+            v.b1 = v.b0; v.w1 = v.w0;
+            v.b0 = boneIdx; v.w0 = w;
+        }
+        elif (w > v.w1)
+        {
+            v.b3 = v.b2; v.w3 = v.w2;
+            v.b2 = v.b1; v.w2 = v.w1;
+            v.b1 = boneIdx; v.w1 = w;
+        }
+        elif (w > v.w2)
+        {
+            v.b3 = v.b2; v.w3 = v.w2;
+            v.b2 = boneIdx; v.w2 = w;
+        }
+        elif (w > v.w3)
+        {
+            v.b3 = boneIdx; v.w3 = w;
+        }
+    }
+
+    def normalizeWeights(v)
+    {
+        var ws = v.w0 + v.w1 + v.w2 + v.w3;
+        if (ws > 0.000001)
+        {
+            v.w0 = v.w0 / ws;
+            v.w1 = v.w1 / ws;
+            v.w2 = v.w2 / ws;
+            v.w3 = v.w3 / ws;
+        }
+    }
+
+    def collectNodesRecursive(node, parentIdx, meshToNode)
+    {
+        var myIdx = len(self.nodeNames);
+        self.nodeNames.push(node.getName());
+        self.nodeParents.push(parentIdx);
+        self.nodeLocals.push(node.getTransform());
+        self.nodeGlobals.push(MatrixIdentity());
+
+        var mc = node.getMeshCount();
+        for (var i = 0; i < mc; i = i + 1)
+        {
+            var meshIdx = node.getMeshIndex(i);
+            meshToNode["" + meshIdx] = myIdx;
+        }
+
+        var cc = node.getChildCount();
+        for (var c = 0; c < cc; c = c + 1)
+            self.collectNodesRecursive(node.getChild(c), myIdx, meshToNode);
+    }
+
+    def buildBoneParents()
+    {
+        for (var i = 0; i < len(self.boneNames); i = i + 1)
+        {
+            var nidx = self.boneNodeIndex[i];
+            var pbone = -1;
+
+            if (nidx >= 0)
+            {
+                var pnode = self.nodeParents[nidx];
+                while (pnode >= 0)
+                {
+                    var k = "" + pnode;
+                    if (self.nodeToBone[k] != nil)
+                    {
+                        pbone = self.nodeToBone[k];
+                        break;
+                    }
+                    pnode = self.nodeParents[pnode];
+                }
+            }
+
+            self.boneParents[i] = pbone;
+        }
+    }
+
+    def load(filePath, importFlags)
+    {
+        self.scene = AssimpScene();
+        if (!self.scene.load(filePath, importFlags))
+        {
+            print("Assimp load failed: " + self.scene.getError());
+            return false;
+        }
+
+        self.label = path.filename(filePath) + path.extension(filePath);
+        self.preRotX = 0.0;
+        if (path.extension(filePath) == ".iqm") self.preRotX = -90.0;
+
+        var meshToNode = {};
+        var root = self.scene.getRootNode();
+        if (root != nil)
+            self.collectNodesRecursive(root, -1, meshToNode);
+
+        for (var i = 0; i < len(self.nodeNames); i = i + 1)
+            self.nodeIndexByName[self.nodeNames[i]] = i;
+
+        var meshCount = self.scene.getMeshCount();
+
+        // Build global bone registry from all meshes
+        for (var mi = 0; mi < meshCount; mi = mi + 1)
+        {
+            var mesh = self.scene.getMesh(mi);
+            var bc = mesh.getBoneCount();
+
+            for (var bi = 0; bi < bc; bi = bi + 1)
+            {
+                var bname = mesh.getBoneName(bi);
+                if (self.boneIndexByName[bname] != nil) continue;
+
+                var gidx = len(self.boneNames);
+                self.boneIndexByName[bname] = gidx;
+                self.boneNames.push(bname);
+                self.boneOffsets.push(mesh.getBoneOffsetMatrix(bi));
+                self.boneSkins.push(MatrixIdentity());
+                self.boneParents.push(-1);
+
+                var nidx = -1;
+                if (self.nodeIndexByName[bname] != nil)
+                    nidx = self.nodeIndexByName[bname];
+                self.boneNodeIndex.push(nidx);
+            }
+        }
+
+        var palette = [
+            [0.90, 0.45, 0.45],
+            [0.45, 0.80, 0.55],
+            [0.45, 0.65, 0.95],
+            [0.90, 0.80, 0.45],
+            [0.75, 0.45, 0.90],
+            [0.45, 0.85, 0.85]
+        ];
+
+        // Build drawable surfaces with per-vertex bone weights
+        for (var mi = 0; mi < meshCount; mi = mi + 1)
+        {
+            var mesh = self.scene.getMesh(mi);
+            var surf = AssimpSkinSurface();
+            surf.name = mesh.getName();
+
+            var vc = mesh.getVertexCount();
+            var hasN = mesh.hasNormals();
+            var hasUV = mesh.hasUVs();
+
+            var vv = mesh.getVertices();
+            var nn = nil;
+            var uu = nil;
+            if (hasN) nn = mesh.getNormals();
+            if (hasUV) uu = mesh.getUVs();
+
+            for (var vi = 0; vi < vc; vi = vi + 1)
+            {
+                var src = AssimpSkinVertex();
+                var b3 = vi * 3;
+                src.x = vv[b3 + 0];
+                src.y = vv[b3 + 1];
+                src.z = vv[b3 + 2];
+
+                if (hasN)
+                {
+                    src.nx = nn[b3 + 0];
+                    src.ny = nn[b3 + 1];
+                    src.nz = nn[b3 + 2];
+                }
+
+                if (hasUV)
+                {
+                    var b2 = vi * 2;
+                    src.u = uu[b2 + 0];
+                    src.v = uu[b2 + 1];
+                }
+
+                var dst = AssimpSkinVertex();
+                self.copyBaseVertex(src, dst);
+
+                surf.vertices.push(src);
+                surf.skinned.push(dst);
+            }
+
+            var bc = mesh.getBoneCount();
+            for (var bi = 0; bi < bc; bi = bi + 1)
+            {
+                var bname = mesh.getBoneName(bi);
+                var gidx = self.boneIndexByName[bname];
+                if (gidx == nil) continue;
+
+                var pairs = mesh.getBoneVertexWeights(bi);
+                for (var wi = 0; wi < len(pairs) - 1; wi = wi + 2)
+                {
+                    var vid = int(pairs[wi]);
+                    var w = pairs[wi + 1];
+                    if (vid >= 0 && vid < len(surf.vertices))
+                        self.insertWeight(surf.vertices[vid], gidx, w);
+                }
+            }
+
+            for (var vi = 0; vi < len(surf.vertices); vi = vi + 1)
+            {
+                self.normalizeWeights(surf.vertices[vi]);
+                self.copyBaseVertex(surf.vertices[vi], surf.skinned[vi]);
+            }
+
+            var idx = mesh.getIndices();
+            for (var ii = 0; ii < len(idx); ii = ii + 1)
+                surf.indices.push(idx[ii]);
+
+            var ci = mi % len(palette);
+            surf.cr = palette[ci][0];
+            surf.cg = palette[ci][1];
+            surf.cb = palette[ci][2];
+
+            self.surfaces.push(surf);
+        }
+
+        self.nodeToBone = {};
+        for (var i = 0; i < len(self.boneNames); i = i + 1)
+        {
+            var nidx = self.boneNodeIndex[i];
+            if (nidx >= 0) self.nodeToBone["" + nidx] = i;
+        }
+        self.buildBoneParents();
+
+        if (self.scene.getAnimationCount() > 0)
+        {
+            self.anim = self.scene.getAnimation(0);
+            self.durationSec = self.anim.getDurationSeconds();
+            if (self.durationSec <= 0.0) self.durationSec = 1.0;
+        }
+
+        self.ready = len(self.surfaces) > 0;
+        return self.ready;
+    }
+
+    def updateNodeGlobals()
+    {
+        for (var i = 0; i < len(self.nodeNames); i = i + 1)
+        {
+            var local = self.nodeLocals[i];
+
+            if (self.anim != nil)
+            {
+                var sampled = self.anim.sampleNodeTransform(self.nodeNames[i], self.timeSec, true);
+                if (sampled != nil) local = sampled;
+            }
+
+            var pidx = self.nodeParents[i];
+            if (pidx < 0)
+                self.nodeGlobals[i] = local;
+            else
+                self.nodeGlobals[i] = MatrixMultiply(local, self.nodeGlobals[pidx]);
+        }
+    }
+
+    def updateBoneSkins()
+    {
+        for (var i = 0; i < len(self.boneNames); i = i + 1)
+        {
+            var nidx = self.boneNodeIndex[i];
+            if (nidx >= 0)
+                self.boneSkins[i] = MatrixMultiply(self.boneOffsets[i], self.nodeGlobals[nidx]);
+            else
+                self.boneSkins[i] = self.boneOffsets[i];
+        }
+    }
+
+    def skinSurfaces()
+    {
+        for (var si = 0; si < len(self.surfaces); si = si + 1)
+        {
+            var surf = self.surfaces[si];
+            for (var vi = 0; vi < len(surf.vertices); vi = vi + 1)
+            {
+                var src = surf.vertices[vi];
+                var dst = surf.skinned[vi];
+
+                if (src.b0 < 0)
+                {
+                    self.copyBaseVertex(src, dst);
+                    continue;
+                }
+
+                var ox = 0.0; var oy = 0.0; var oz = 0.0;
+                var onx = 0.0; var ony = 0.0; var onz = 0.0;
+                var sm;
+
+                if (src.b0 >= 0 && src.w0 > 0.0)
+                {
+                    sm = self.boneSkins[src.b0];
+                    ox  = ox  + (sm.m0*src.x + sm.m4*src.y + sm.m8 *src.z + sm.m12) * src.w0;
+                    oy  = oy  + (sm.m1*src.x + sm.m5*src.y + sm.m9 *src.z + sm.m13) * src.w0;
+                    oz  = oz  + (sm.m2*src.x + sm.m6*src.y + sm.m10*src.z + sm.m14) * src.w0;
+                    onx = onx + (sm.m0*src.nx + sm.m4*src.ny + sm.m8 *src.nz) * src.w0;
+                    ony = ony + (sm.m1*src.nx + sm.m5*src.ny + sm.m9 *src.nz) * src.w0;
+                    onz = onz + (sm.m2*src.nx + sm.m6*src.ny + sm.m10*src.nz) * src.w0;
+                }
+                if (src.b1 >= 0 && src.w1 > 0.0)
+                {
+                    sm = self.boneSkins[src.b1];
+                    ox  = ox  + (sm.m0*src.x + sm.m4*src.y + sm.m8 *src.z + sm.m12) * src.w1;
+                    oy  = oy  + (sm.m1*src.x + sm.m5*src.y + sm.m9 *src.z + sm.m13) * src.w1;
+                    oz  = oz  + (sm.m2*src.x + sm.m6*src.y + sm.m10*src.z + sm.m14) * src.w1;
+                    onx = onx + (sm.m0*src.nx + sm.m4*src.ny + sm.m8 *src.nz) * src.w1;
+                    ony = ony + (sm.m1*src.nx + sm.m5*src.ny + sm.m9 *src.nz) * src.w1;
+                    onz = onz + (sm.m2*src.nx + sm.m6*src.ny + sm.m10*src.nz) * src.w1;
+                }
+                if (src.b2 >= 0 && src.w2 > 0.0)
+                {
+                    sm = self.boneSkins[src.b2];
+                    ox  = ox  + (sm.m0*src.x + sm.m4*src.y + sm.m8 *src.z + sm.m12) * src.w2;
+                    oy  = oy  + (sm.m1*src.x + sm.m5*src.y + sm.m9 *src.z + sm.m13) * src.w2;
+                    oz  = oz  + (sm.m2*src.x + sm.m6*src.y + sm.m10*src.z + sm.m14) * src.w2;
+                    onx = onx + (sm.m0*src.nx + sm.m4*src.ny + sm.m8 *src.nz) * src.w2;
+                    ony = ony + (sm.m1*src.nx + sm.m5*src.ny + sm.m9 *src.nz) * src.w2;
+                    onz = onz + (sm.m2*src.nx + sm.m6*src.ny + sm.m10*src.nz) * src.w2;
+                }
+                if (src.b3 >= 0 && src.w3 > 0.0)
+                {
+                    sm = self.boneSkins[src.b3];
+                    ox  = ox  + (sm.m0*src.x + sm.m4*src.y + sm.m8 *src.z + sm.m12) * src.w3;
+                    oy  = oy  + (sm.m1*src.x + sm.m5*src.y + sm.m9 *src.z + sm.m13) * src.w3;
+                    oz  = oz  + (sm.m2*src.x + sm.m6*src.y + sm.m10*src.z + sm.m14) * src.w3;
+                    onx = onx + (sm.m0*src.nx + sm.m4*src.ny + sm.m8 *src.nz) * src.w3;
+                    ony = ony + (sm.m1*src.nx + sm.m5*src.ny + sm.m9 *src.nz) * src.w3;
+                    onz = onz + (sm.m2*src.nx + sm.m6*src.ny + sm.m10*src.nz) * src.w3;
+                }
+
+                dst.x = ox; dst.y = oy; dst.z = oz;
+                dst.nx = onx; dst.ny = ony; dst.nz = onz;
+                dst.u = src.u; dst.v = src.v;
+            }
+        }
+    }
+
+    def update(dt)
+    {
+        if (!self.ready) return;
+
+        if (self.anim != nil)
+        {
+            self.timeSec = self.timeSec + dt;
+            if (self.durationSec > 0.0)
+            {
+                while (self.timeSec >= self.durationSec)
+                    self.timeSec = self.timeSec - self.durationSec;
+            }
+        }
+
+        self.updateNodeGlobals();
+        if (len(self.boneNames) > 0)
+        {
+            self.updateBoneSkins();
+            self.skinSurfaces();
+        }
+    }
+
+    def drawSurface(s)
+    {
+        rlDisableTexture();
+        rlColor4f(s.cr, s.cg, s.cb, 1.0);
+
+        rlBegin(RL_TRIANGLES);
+        for (var i = 0; i < len(s.indices); i = i + 1)
+        {
+            var idx = s.indices[i];
+            var v = s.skinned[idx];
+            rlNormal3f(v.nx, v.ny, v.nz);
+            rlVertex3f(v.x, v.y, v.z);
+        }
+        rlEnd();
+
+        rlColor4f(1.0, 1.0, 1.0, 1.0);
+    }
+
+    def drawSkeletonImpl()
+    {
+        rlDisableTexture();
+        rlSetLineWidth(2.0);
+
+        for (var i = 0; i < len(self.boneNames); i = i + 1)
+        {
+            var nidx = self.boneNodeIndex[i];
+            if (nidx < 0) continue;
+
+            var gm = self.nodeGlobals[nidx];
+            var jx = gm.m12;
+            var jy = gm.m13;
+            var jz = gm.m14;
+
+            var p = self.boneParents[i];
+            if (p >= 0)
+            {
+                var pn = self.boneNodeIndex[p];
+                if (pn >= 0)
+                {
+                    var pg = self.nodeGlobals[pn];
+                    rlBegin(RL_LINES);
+                    rlColor3f(1.0, 1.0, 0.0);
+                    rlVertex3f(pg.m12, pg.m13, pg.m14);
+                    rlVertex3f(jx, jy, jz);
+                    rlEnd();
+                }
+            }
+
+            var s = 0.25;
+            rlBegin(RL_LINES);
+            rlColor3f(1.0, 0.3, 0.3);
+            rlVertex3f(jx, jy, jz);
+            rlVertex3f(jx + gm.m0*s, jy + gm.m1*s, jz + gm.m2*s);
+            rlColor3f(0.3, 1.0, 0.3);
+            rlVertex3f(jx, jy, jz);
+            rlVertex3f(jx + gm.m4*s, jy + gm.m5*s, jz + gm.m6*s);
+            rlColor3f(0.3, 0.6, 1.0);
+            rlVertex3f(jx, jy, jz);
+            rlVertex3f(jx + gm.m8*s, jy + gm.m9*s, jz + gm.m10*s);
+            rlEnd();
+        }
+
+        rlSetLineWidth(1.0);
+    }
+
+    def draw()
+    {
+        if (!self.ready) return;
+
+        rlPushMatrix();
+        rlTranslatef(self.posX, self.posY, self.posZ);
+        if (abs(self.preRotX) > 0.00001) rlRotatef(self.preRotX, 1.0, 0.0, 0.0);
+        rlRotatef(self.rotX, 1.0, 0.0, 0.0);
+        rlRotatef(self.rotY, 0.0, 1.0, 0.0);
+        rlRotatef(self.rotZ, 0.0, 0.0, 1.0);
+        rlScalef(self.scaleVal, self.scaleVal, self.scaleVal);
+
+        for (var si = 0; si < len(self.surfaces); si = si + 1)
+            self.drawSurface(self.surfaces[si]);
+
+        if (self.showSkeleton) self.drawSkeletonImpl();
+
+        rlPopMatrix();
+    }
+
+    def boneCount() { return len(self.boneNames); }
+    def surfaceCount() { return len(self.surfaces); }
+    def triangleCount()
+    {
+        var t = 0;
+        for (var i = 0; i < len(self.surfaces); i = i + 1)
+            t = t + (len(self.surfaces[i].indices) / 3);
+        return t;
+    }
+
+    def unload()
+    {
+        if (self.scene != nil)
+            self.scene.free();
+    }
+}
+
+
+var b3dPath = resolveAssetPath(
+    "assets/b3d/ninja.b3d",
+    "../assets/b3d/ninja.b3d",
+    "../../assets/b3d/ninja.b3d",
+    "vendor/assimp/test/models-nonbsd/B3D/dwarf2.b3d",
+    "../vendor/assimp/test/models-nonbsd/B3D/dwarf2.b3d"
+);
+
+var iqmPath = resolveAssetPath(
+    "assets/iqm/erebus/erebus.iqm",
+    "../assets/iqm/erebus/erebus.iqm",
+    "../../assets/iqm/erebus/erebus.iqm",
+    "assets/iqm/guard/guard.iqm",
+    "../assets/iqm/guard/guard.iqm"
+);
+
+if (b3dPath == nil && iqmPath == nil)
+{
+    print("No B3D/IQM assets found for Assimp demo");
     return;
 }
 
-print("Assimp animation demo");
-print("path=" + modelPath);
-print("meshes=" + scene.getMeshCount() + " mats=" + scene.getMaterialCount());
+InitWindow(1280, 720, "BuGL Demo - Assimp B3D/IQM Animation");
+SetTargetFPS(60);
 
-// Bones per mesh
-for (var i = 0; i < scene.getMeshCount(); i = i + 1)
+var cam = CreateCamera3D();
+SetCamera3DPosition(cam, 0.0, 2.5, 8.5);
+SetCamera3DTarget(cam, 0.0, 1.2, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 45.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var importFlags = Triangulate | GenSmoothNormals | JoinIdenticalVertices | FlipUVs | LimitBoneWeights;
+
+var models = [];
+
+if (b3dPath != nil)
 {
-    var m = scene.getMesh(i);
-    var bc = m.getBoneCount();
-    print("mesh[" + i + "] name=" + m.getName() + " bones=" + bc);
-    if (bc > 0)
+    var mb = AssimpSkinnedModel();
+    if (mb.load(b3dPath, importFlags))
     {
-        var bn = m.getBoneName(0);
-        var bwc = m.getBoneWeightCount(0);
-        print("  bone0=" + bn + " weights=" + bwc);
-        if (bwc > 0)
-        {
-            var (vid, w) = m.getBoneWeight(0, 0);
-            print("  bone0 weight0 -> vertex=" + vid + " weight=" + w);
-        }
+        mb.scaleVal = 0.05;
+        mb.posX = -2.0;
+        models.push(mb);
+        print("Loaded B3D via Assimp: " + b3dPath);
     }
 }
 
-var animCount = scene.getAnimationCount();
-print("animations=" + animCount);
-
-if (animCount > 0)
+if (iqmPath != nil)
 {
-    var anim = scene.getAnimation(0);
-    print("anim0 name=" + anim.getName());
-    print("  durationTicks=" + anim.getDurationTicks());
-    print("  ticksPerSecond=" + anim.getTicksPerSecond());
-    print("  durationSeconds=" + anim.getDurationSeconds());
-    print("  channels=" + anim.getChannelCount());
-
-    if (anim.getChannelCount() > 0)
+    var mi = AssimpSkinnedModel();
+    if (mi.load(iqmPath, importFlags))
     {
-        var ch = anim.getChannel(0);
-        var nodeName = ch.getNodeName();
-        print("  ch0 node=" + nodeName);
-        print("    posKeys=" + ch.getPositionKeyCount() + " rotKeys=" + ch.getRotationKeyCount() + " sclKeys=" + ch.getScalingKeyCount());
-
-        var m0 = anim.sampleNodeTransform(nodeName, 0.0, true);
-        var m1 = anim.sampleNodeTransform(nodeName, 0.2, true);
-        print("    sample t0 valid=" + (m0 != nil));
-        print("    sample t1 valid=" + (m1 != nil));
+        mi.scaleVal = 0.05;
+        mi.posX = 2.0;
+        models.push(mi);
+        print("Loaded IQM via Assimp: " + iqmPath);
     }
 }
 
-scene.free();
-print("done");
+if (len(models) == 0)
+{
+    print("Assimp could not load any model");
+    CloseWindow();
+    return;
+}
+
+if (len(models) == 1)
+    models[0].posX = 0.0;
+
+var paused = false;
+var showSkel = false;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    UpdateCamera(cam, CAMERA_ORBITAL);
+
+    if (IsKeyPressed(KEY_SPACE)) paused = !paused;
+    if (IsKeyPressed(KEY_K))
+    {
+        showSkel = !showSkel;
+        for (var i = 0; i < len(models); i = i + 1)
+            models[i].showSkeleton = showSkel;
+    }
+
+    if (!paused)
+    {
+        for (var i = 0; i < len(models); i = i + 1)
+            models[i].update(dt);
+    }
+
+    BeginDrawing();
+    ClearBackground(Color(18, 22, 30, 255));
+
+    BeginMode3D(cam);
+    DrawGrid(30, 1.0);
+    for (var i = 0; i < len(models); i = i + 1)
+        models[i].draw();
+    EndMode3D();
+
+    DrawRectangle(10, 10, 700, 120, Color(0, 0, 0, 140));
+    DrawText("Assimp Animation Demo (SPACE pause, K skeleton)", 20, 20, 20, Color(240, 240, 240, 255));
+
+    var y = 48;
+    for (var i = 0; i < len(models); i = i + 1)
+    {
+        var m = models[i];
+        var line = m.label + "  bones=" + str(m.boneCount()) +
+                   "  surfaces=" + str(m.surfaceCount()) +
+                   "  tris=" + str(m.triangleCount());
+        DrawText(line, 20, y, 16, Color(180, 220, 255, 255));
+        y = y + 22;
+    }
+
+    DrawText("FPS: " + str(GetFPS()), 20, 96, 16, Color(180, 255, 180, 255));
+
+    EndDrawing();
+}
+
+for (var i = 0; i < len(models); i = i + 1)
+    models[i].unload();
+
+CloseWindow();
