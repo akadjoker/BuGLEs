@@ -5,3 +5,8 @@
 /cmake-build-*/
 /dist
 /main.dump
+/imgui.ini
+/terrain_edit_export.png
+/exporter/bin/
+/exporter/build-release/
+Thumbs.db
