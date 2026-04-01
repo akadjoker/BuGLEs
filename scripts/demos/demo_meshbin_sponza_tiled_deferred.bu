@@ -1,0 +1,971 @@
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import ImGui;
+using ImGui;
+
+include "../libs/lib_meshbin.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Tiled deferred shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Tiled deferred shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def wrapIndex(i, count)
+{
+    if (count <= 0) return 0;
+    while (i >= count) i -= count;
+    while (i < 0) i += count;
+    return i;
+}
+
+
+def drawDebugTextureQuad(texId, x, y, w, h)
+{
+    if (texId <= 0) return;
+    rlSetTexture(texId);
+    rlColor4ub(255, 255, 255, 255);
+    rlBegin(RL_QUADS);
+    rlTexCoord2f(0.0, 1.0); rlVertex2f(x, y);
+    rlTexCoord2f(1.0, 1.0); rlVertex2f(x + w, y);
+    rlTexCoord2f(1.0, 0.0); rlVertex2f(x + w, y + h);
+    rlTexCoord2f(0.0, 0.0); rlVertex2f(x, y + h);
+    rlEnd();
+    rlSetTexture(0);
+}
+
+
+def drawDebugPanel(texId, x, y, w, h, title)
+{
+    DrawRectangle(x - 10, y - 28, w + 20, h + 38, Color(0, 0, 0, 170));
+    DrawRectangleLines(x - 10, y - 28, w + 20, h + 38, Color(220, 230, 240, 220));
+    drawDebugTextureQuad(texId, x, y, w, h);
+    DrawText(title, x, y - 22, 18, Color(240, 240, 240, 255));
+}
+
+
+def drawCross3D(x, y, z, size, r, g, b, a)
+{
+    rlBegin(RL_LINES);
+    rlColor4ub(r, g, b, a);
+    rlVertex3f(x - size, y, z); rlVertex3f(x + size, y, z);
+    rlVertex3f(x, y - size, z); rlVertex3f(x, y + size, z);
+    rlVertex3f(x, y, z - size); rlVertex3f(x, y, z + size);
+    rlEnd();
+}
+
+
+class GBufferTarget
+{
+    var fbo;
+    var posTex;
+    var normalTex;
+    var albedoTex;
+    var depth;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.posTex = 0;
+        self.normalTex = 0;
+        self.albedoTex = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteRenderbuffers(self.depth);
+        if (self.posTex > 0) glDeleteTextures(self.posTex);
+        if (self.normalTex > 0) glDeleteTextures(self.normalTex);
+        if (self.albedoTex > 0) glDeleteTextures(self.albedoTex);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.posTex = 0;
+        self.normalTex = 0;
+        self.albedoTex = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+def makeGBuffer(width, height)
+{
+    var rt = GBufferTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.posTex = glGenTextures();
+    rt.normalTex = glGenTextures();
+    rt.albedoTex = glGenTextures();
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+
+    glBindTexture(GL_TEXTURE_2D, rt.posTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.posTex, 0);
+
+    glBindTexture(GL_TEXTURE_2D, rt.normalTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, rt.normalTex, 0);
+
+    glBindTexture(GL_TEXTURE_2D, rt.albedoTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, rt.albedoTex, 0);
+
+    rt.depth = glGenRenderbuffers();
+    glBindRenderbuffer(GL_RENDERBUFFER, rt.depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt.depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    glDrawBuffers(3, [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("Tiled deferred GBuffer incomplete: " + status);
+        rt.destroy();
+        return nil;
+    }
+
+    return rt;
+}
+
+
+class TiledLightResources
+{
+    var posTex;
+    var colorTex;
+    var tileCountTex;
+    var tileIndexTex;
+    var tilesX;
+    var tilesY;
+    var tileCount;
+    var tileSize;
+    var maxLights;
+    var maxLightsPerTile;
+
+    def init()
+    {
+        self.posTex = 0;
+        self.colorTex = 0;
+        self.tileCountTex = 0;
+        self.tileIndexTex = 0;
+        self.tilesX = 0;
+        self.tilesY = 0;
+        self.tileCount = 0;
+        self.tileSize = 0;
+        self.maxLights = 0;
+        self.maxLightsPerTile = 0;
+    }
+
+    def destroy()
+    {
+        if (self.posTex > 0) glDeleteTextures(self.posTex);
+        if (self.colorTex > 0) glDeleteTextures(self.colorTex);
+        if (self.tileCountTex > 0) glDeleteTextures(self.tileCountTex);
+        if (self.tileIndexTex > 0) glDeleteTextures(self.tileIndexTex);
+        self.posTex = 0;
+        self.colorTex = 0;
+        self.tileCountTex = 0;
+        self.tileIndexTex = 0;
+        self.tilesX = 0;
+        self.tilesY = 0;
+        self.tileCount = 0;
+        self.tileSize = 0;
+        self.maxLights = 0;
+        self.maxLightsPerTile = 0;
+    }
+}
+
+
+def makeFloatTexture(width, height, internalFormat, format)
+{
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def makeTiledLightResources(screenW, screenH, tileSize, maxLights, maxLightsPerTile)
+{
+    var rt = TiledLightResources();
+    rt.tileSize = tileSize;
+    rt.tilesX = int((screenW + tileSize - 1) / tileSize);
+    rt.tilesY = int((screenH + tileSize - 1) / tileSize);
+    rt.tileCount = rt.tilesX * rt.tilesY;
+    rt.maxLights = maxLights;
+    rt.maxLightsPerTile = maxLightsPerTile;
+    rt.posTex = makeFloatTexture(maxLights, 1, GL_RGBA32F, GL_RGBA);
+    rt.colorTex = makeFloatTexture(maxLights, 1, GL_RGBA32F, GL_RGBA);
+    rt.tileCountTex = makeFloatTexture(rt.tilesX, rt.tilesY, GL_R32F, GL_RED);
+    rt.tileIndexTex = makeFloatTexture(maxLightsPerTile, rt.tileCount, GL_R32F, GL_RED);
+    if (rt.posTex <= 0 || rt.colorTex <= 0 || rt.tileCountTex <= 0 || rt.tileIndexTex <= 0)
+    {
+        rt.destroy();
+        return nil;
+    }
+    return rt;
+}
+
+
+def makeZeroArray(count)
+{
+    var out = [];
+    for (var i = 0; i < count; i += 1) out.push(0.0);
+    return out;
+}
+
+
+def drawFullscreenQuad(vao)
+{
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+
+var meshPath = resolveAssetPath(
+    "assets/sponza/sponza.h3d",
+    "../assets/sponza/sponza.h3d",
+    "../../assets/sponza/sponza.h3d"
+);
+
+if (meshPath == nil)
+{
+    print("sponza.h3d not found");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1600, 900, "BuGL - Sponza Tiled Deferred");
+SetTargetFPS(60);
+InitImGui();
+
+var cam = Camera3D();
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 60.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var eyeX = 0.0;
+var eyeY = 120.0;
+var eyeZ = 260.0;
+var yaw = -90.0;
+var pitch = -18.0;
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load meshbin: " + meshPath);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 300.0;
+var targetRadius = 420.0;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 40.0) sceneRadius = 40.0;
+eyeX = focusX + sceneRadius * 0.8;
+eyeY = focusY + sceneRadius * 0.35;
+eyeZ = focusZ + sceneRadius * 0.8;
+SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+SetCamera3DTarget(cam, focusX, focusY, focusZ);
+
+var maxLights = 256;
+var maxLightsPerTile = 64;
+
+var gVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = mat3(transpose(inverse(uModel))) * aNormal;
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var gFsSrc = @"
+#version 330 core
+layout(location = 0) out vec4 gPosition;
+layout(location = 1) out vec4 gNormal;
+layout(location = 2) out vec4 gAlbedo;
+
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+
+uniform sampler2D uTex;
+uniform int uHasTex;
+
+void main()
+{
+    vec3 albedo = uHasTex != 0 ? texture(uTex, vUV).rgb : vec3(0.74, 0.74, 0.74);
+    gPosition = vec4(vWorldPos, 1.0);
+    gNormal = vec4(normalize(vNormal) * 0.5 + 0.5, 1.0);
+    gAlbedo = vec4(albedo, 1.0);
+}
+";
+
+var lightVsSrc = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+out vec2 vUV;
+
+void main()
+{
+    vUV = aUV;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+";
+
+var lightFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D gPositionTex;
+uniform sampler2D gNormalTex;
+uniform sampler2D gAlbedoTex;
+uniform sampler2D uLightPosTex;
+uniform sampler2D uLightColorTex;
+uniform sampler2D uTileCountTex;
+uniform sampler2D uTileIndexTex;
+uniform vec3 uViewPos;
+uniform vec3 uAmbient;
+uniform float uSpecularStrength;
+uniform float uExposure;
+uniform int uTileSize;
+uniform int uTilesX;
+
+const int MAX_LIGHTS_PER_TILE = 64;
+
+void main()
+{
+    vec3 worldPos = texture(gPositionTex, vUV).xyz;
+    vec3 normal = texture(gNormalTex, vUV).xyz * 2.0 - 1.0;
+    vec3 albedo = texture(gAlbedoTex, vUV).rgb;
+
+    if (length(normal) < 0.001)
+    {
+        discard;
+    }
+
+    normal = normalize(normal);
+    vec3 viewDir = normalize(uViewPos - worldPos);
+    vec3 color = albedo * uAmbient;
+
+    ivec2 pixelCoord = ivec2(gl_FragCoord.xy);
+    int tileX = pixelCoord.x / uTileSize;
+    int tileY = pixelCoord.y / uTileSize;
+    int tileIndex = tileY * uTilesX + tileX;
+    int lightCount = int(texelFetch(uTileCountTex, ivec2(tileX, tileY), 0).r + 0.5);
+
+    for (int i = 0; i < MAX_LIGHTS_PER_TILE; ++i)
+    {
+        if (i >= lightCount) break;
+
+        int lightIndex = int(texelFetch(uTileIndexTex, ivec2(i, tileIndex), 0).r + 0.5);
+        vec4 lightPos = texelFetch(uLightPosTex, ivec2(lightIndex, 0), 0);
+        vec4 lightColor = texelFetch(uLightColorTex, ivec2(lightIndex, 0), 0);
+
+        vec3 toLight = lightPos.xyz - worldPos;
+        float dist = length(toLight);
+        if (dist >= lightPos.w) continue;
+
+        vec3 L = toLight / max(dist, 0.0001);
+        float atten = 1.0 - clamp(dist / lightPos.w, 0.0, 1.0);
+        atten = atten * atten;
+
+        float diff = max(dot(normal, L), 0.0);
+        vec3 H = normalize(L + viewDir);
+        float spec = pow(max(dot(normal, H), 0.0), 48.0) * uSpecularStrength;
+
+        vec3 radiance = lightColor.rgb * lightColor.a * atten;
+        color += albedo * radiance * diff;
+        color += radiance * spec;
+    }
+
+    color = vec3(1.0) - exp(-color * uExposure);
+    color = pow(color, vec3(1.0 / 2.2));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var progGeom = linkProgram(gVsSrc, gFsSrc);
+var progLight = linkProgram(lightVsSrc, lightFsSrc);
+if (progGeom <= 0 || progLight <= 0)
+{
+    if (progGeom > 0) glDeleteProgram(progGeom);
+    if (progLight > 0) glDeleteProgram(progLight);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var gModel = glGetUniformLocation(progGeom, "uModel");
+var gView = glGetUniformLocation(progGeom, "uView");
+var gProj = glGetUniformLocation(progGeom, "uProj");
+var gTex = glGetUniformLocation(progGeom, "uTex");
+var gHasTex = glGetUniformLocation(progGeom, "uHasTex");
+
+var lPosTex = glGetUniformLocation(progLight, "gPositionTex");
+var lNormalTex = glGetUniformLocation(progLight, "gNormalTex");
+var lAlbedoTex = glGetUniformLocation(progLight, "gAlbedoTex");
+var lLightPosTex = glGetUniformLocation(progLight, "uLightPosTex");
+var lLightColorTex = glGetUniformLocation(progLight, "uLightColorTex");
+var lTileCountTex = glGetUniformLocation(progLight, "uTileCountTex");
+var lTileIndexTex = glGetUniformLocation(progLight, "uTileIndexTex");
+var lViewPos = glGetUniformLocation(progLight, "uViewPos");
+var lAmbient = glGetUniformLocation(progLight, "uAmbient");
+var lSpecularStrength = glGetUniformLocation(progLight, "uSpecularStrength");
+var lExposure = glGetUniformLocation(progLight, "uExposure");
+var lTileSize = glGetUniformLocation(progLight, "uTileSize");
+var lTilesX = glGetUniformLocation(progLight, "uTilesX");
+
+var quadVerts = Float32Array(0);
+quadVerts.add(
+    -1.0,  1.0,  0.0, 1.0,
+     1.0,  1.0,  1.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0,  1.0,  0.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0, -1.0,  0.0, 0.0
+);
+var quadVAO = glGenVertexArrays();
+var quadVBO = glGenBuffers();
+glBindVertexArray(quadVAO);
+glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+glBufferData(GL_ARRAY_BUFFER, quadVerts.byteLength(), quadVerts, GL_STATIC_DRAW);
+glEnableVertexAttribArray(0);
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 16, 0);
+glEnableVertexAttribArray(1);
+glVertexAttribPointer(1, 2, GL_FLOAT, false, 16, 8);
+glBindVertexArray(0);
+glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+var screenW = GetScreenWidth();
+var screenH = GetScreenHeight();
+var tileSize = 32;
+var gbuffer = makeGBuffer(screenW, screenH);
+var tiledLights = makeTiledLightResources(screenW, screenH, tileSize, maxLights, maxLightsPerTile);
+if (gbuffer == nil || tiledLights == nil)
+{
+    if (gbuffer != nil) gbuffer.destroy();
+    if (tiledLights != nil) tiledLights.destroy();
+    glDeleteBuffers(quadVBO);
+    glDeleteVertexArrays(quadVAO);
+    glDeleteProgram(progGeom);
+    glDeleteProgram(progLight);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var lightPosData = makeZeroArray(maxLights * 4);
+var lightColorData = makeZeroArray(maxLights * 4);
+var tileCountData = makeZeroArray(tiledLights.tilesX * tiledLights.tilesY);
+var tileIndexData = makeZeroArray(tiledLights.maxLightsPerTile * tiledLights.tileCount);
+
+var lightPaletteR = [1.00, 1.00, 0.35, 0.20, 0.25, 0.35, 1.00, 0.95];
+var lightPaletteG = [0.38, 0.70, 0.85, 0.95, 0.55, 0.55, 0.85, 0.20];
+var lightPaletteB = [0.20, 0.25, 1.00, 0.45, 1.00, 1.00, 0.35, 0.08];
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var uiBg = Color(0, 0, 0, 168);
+var uiFg = Color(240, 240, 240, 255);
+var uiOk = Color(180, 255, 180, 255);
+var uiWarm = Color(255, 220, 170, 255);
+
+var showUi = true;
+var showDebugTargets = true;
+var showMarkers = false;
+var lightCount = 160;
+var ambientStrength = 0.02;
+var lightRadius = 85.0;
+var lightHeight = 36.0;
+var orbitRadius = 132.0;
+var orbitSpeed = 0.55;
+var specularStrength = 0.18;
+var exposure = 1.0;
+var maxTileOccupancy = 0;
+var activeLightCount = 0;
+var timeSec = 0.0;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+    timeSec += dt;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_F1)) showDebugTargets = !showDebugTargets;
+    if (IsKeyPressed(KEY_L)) showMarkers = !showMarkers;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx = fx / fl;
+        fy = fy / fl;
+        fz = fz / fl;
+    }
+
+    var rx = -fz;
+    var ry = 0.0;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001)
+    {
+        rx = rx / rl;
+        rz = rz / rl;
+    }
+
+    var upX = ry * fz - rz * fy;
+    var upY = rz * fx - rx * fz;
+    var upZ = rx * fy - ry * fx;
+    var upl = sqrt(upX * upX + upY * upY + upZ * upZ);
+    if (upl > 0.0001)
+    {
+        upX = upX / upl;
+        upY = upY / upl;
+        upZ = upZ / upl;
+    }
+
+    var moveSpeed = sceneRadius * 0.35;
+    if (moveSpeed < 10.0) moveSpeed = 10.0;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) moveSpeed = moveSpeed * 3.0;
+    var step = moveSpeed * dt;
+
+    if (IsKeyDown(KEY_W)) { eyeX += fx * step; eyeY += fy * step; eyeZ += fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * step; eyeY -= fy * step; eyeZ -= fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * step; eyeZ -= rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * step; eyeZ += rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += step;
+    if (IsKeyDown(KEY_C)) eyeY -= step;
+
+    var nextScreenW = GetScreenWidth();
+    var nextScreenH = GetScreenHeight();
+    if (nextScreenW != screenW || nextScreenH != screenH || tiledLights.tileSize != tileSize)
+    {
+        var nextGBuffer = makeGBuffer(nextScreenW, nextScreenH);
+        var nextTiledLights = makeTiledLightResources(nextScreenW, nextScreenH, tileSize, maxLights, maxLightsPerTile);
+        if (nextGBuffer != nil && nextTiledLights != nil)
+        {
+            gbuffer.destroy();
+            tiledLights.destroy();
+            gbuffer = nextGBuffer;
+            tiledLights = nextTiledLights;
+            screenW = nextScreenW;
+            screenH = nextScreenH;
+            tileCountData = makeZeroArray(tiledLights.tilesX * tiledLights.tilesY);
+            tileIndexData = makeZeroArray(tiledLights.maxLightsPerTile * tiledLights.tileCount);
+        }
+        else
+        {
+            if (nextGBuffer != nil) nextGBuffer.destroy();
+            if (nextTiledLights != nil) nextTiledLights.destroy();
+        }
+    }
+
+    SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+    SetCamera3DTarget(cam, eyeX + fx, eyeY + fy, eyeZ + fz);
+
+    var modelMat = mesh.makeModelMatrix();
+
+    rlDrawRenderBatchActive();
+    BeginMode3D(cam);
+    var view = rlGetMatrixModelview();
+    var proj = rlGetMatrixProjection();
+    EndMode3D();
+
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    for (var i = 0; i < len(lightPosData); i += 1) lightPosData[i] = 0.0;
+    for (var i = 0; i < len(lightColorData); i += 1) lightColorData[i] = 0.0;
+    for (var i = 0; i < len(tileCountData); i += 1) tileCountData[i] = 0.0;
+    for (var i = 0; i < len(tileIndexData); i += 1) tileIndexData[i] = 0.0;
+
+    activeLightCount = lightCount;
+    if (activeLightCount > maxLights) activeLightCount = maxLights;
+    maxTileOccupancy = 0;
+
+    var aspect = screenW / max(screenH, 1);
+    var tanHalfFov = tan(60.0 * PI / 360.0);
+
+    for (var i = 0; i < activeLightCount; i += 1)
+    {
+        var ring = 1.0 + floor(i / 16.0);
+        var theta = timeSec * orbitSpeed * (0.8 + ring * 0.17) + i * 0.37;
+        var radius = orbitRadius * (0.35 + ring * 0.22);
+        var lx = focusX + cos(theta) * radius;
+        var ly = focusY + lightHeight + sin(theta * 1.7 + ring) * (8.0 + ring * 4.0);
+        var lz = focusZ + sin(theta) * radius;
+
+        var palette = wrapIndex(i, len(lightPaletteR));
+        var pulse = 0.65 + 0.35 * (0.5 + 0.5 * sin(timeSec * 2.1 + i * 0.81));
+        var lr = lightPaletteR[palette] * pulse * 1.7;
+        var lg = lightPaletteG[palette] * pulse * 1.7;
+        var lb = lightPaletteB[palette] * pulse * 1.7;
+
+        var base = i * 4;
+        lightPosData[base + 0] = lx;
+        lightPosData[base + 1] = ly;
+        lightPosData[base + 2] = lz;
+        lightPosData[base + 3] = lightRadius;
+        lightColorData[base + 0] = lr;
+        lightColorData[base + 1] = lg;
+        lightColorData[base + 2] = lb;
+        lightColorData[base + 3] = 1.0;
+
+        var dx = lx - eyeX;
+        var dy = ly - eyeY;
+        var dz = lz - eyeZ;
+        var viewX = dx * rx + dy * ry + dz * rz;
+        var viewY = dx * upX + dy * upY + dz * upZ;
+        var depth = dx * fx + dy * fy + dz * fz;
+        if (depth <= 0.1) continue;
+
+        var screenRadius = (lightRadius / depth) * (screenH * 0.5 / tanHalfFov);
+        var ndcX = viewX / (depth * tanHalfFov * aspect);
+        var ndcY = viewY / (depth * tanHalfFov);
+        var screenX = (ndcX * 0.5 + 0.5) * screenW;
+        var screenY = (0.5 - ndcY * 0.5) * screenH;
+
+        var tileMinX = int(floor((screenX - screenRadius) / tileSize));
+        var tileMaxX = int(floor((screenX + screenRadius) / tileSize));
+        var tileMinY = int(floor((screenY - screenRadius) / tileSize));
+        var tileMaxY = int(floor((screenY + screenRadius) / tileSize));
+
+        if (tileMaxX < 0 || tileMaxY < 0 || tileMinX >= tiledLights.tilesX || tileMinY >= tiledLights.tilesY) continue;
+        if (tileMinX < 0) tileMinX = 0;
+        if (tileMinY < 0) tileMinY = 0;
+        if (tileMaxX >= tiledLights.tilesX) tileMaxX = tiledLights.tilesX - 1;
+        if (tileMaxY >= tiledLights.tilesY) tileMaxY = tiledLights.tilesY - 1;
+
+        for (var ty = tileMinY; ty <= tileMaxY; ty += 1)
+        {
+            for (var tx = tileMinX; tx <= tileMaxX; tx += 1)
+            {
+                var tileIndex = ty * tiledLights.tilesX + tx;
+                var count = int(tileCountData[tileIndex]);
+                if (count >= tiledLights.maxLightsPerTile) continue;
+                tileIndexData[tileIndex * tiledLights.maxLightsPerTile + count] = i + 0.0;
+                tileCountData[tileIndex] = count + 1.0;
+                if ((count + 1) > maxTileOccupancy) maxTileOccupancy = count + 1;
+            }
+        }
+    }
+
+    glBindTexture(GL_TEXTURE_2D, tiledLights.posTex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tiledLights.maxLights, 1, GL_RGBA, GL_FLOAT, lightPosData);
+    glBindTexture(GL_TEXTURE_2D, tiledLights.colorTex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tiledLights.maxLights, 1, GL_RGBA, GL_FLOAT, lightColorData);
+    glBindTexture(GL_TEXTURE_2D, tiledLights.tileCountTex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tiledLights.tilesX, tiledLights.tilesY, GL_RED, GL_FLOAT, tileCountData);
+    glBindTexture(GL_TEXTURE_2D, tiledLights.tileIndexTex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tiledLights.maxLightsPerTile, tiledLights.tileCount, GL_RED, GL_FLOAT, tileIndexData);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.fbo);
+    glViewport(0, 0, gbuffer.width, gbuffer.height);
+    glClearColor(0.0, 0.0, 0.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+    glUseProgram(progGeom);
+    if (gModel >= 0) glUniformMatrix4fv(gModel, 1, false, modelBuf);
+    if (gView >= 0) glUniformMatrix4fv(gView, 1, false, viewBuf);
+    if (gProj >= 0) glUniformMatrix4fv(gProj, 1, false, projBuf);
+    if (gTex >= 0) glUniform1i(gTex, 0);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+    {
+        var b = mesh.buffers[i];
+        var texId = 0;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            if (len(mat.textureIds) > 0) texId = mat.textureIds[0];
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        if (gHasTex >= 0) glUniform1i(gHasTex, texId > 0 ? 1 : 0);
+        b.draw();
+    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    BeginDrawing();
+    ClearBackground(Color(16, 18, 24, 255));
+    rlDrawRenderBatchActive();
+
+    glViewport(0, 0, screenW, screenH);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(progLight);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.posTex);
+    if (lPosTex >= 0) glUniform1i(lPosTex, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.normalTex);
+    if (lNormalTex >= 0) glUniform1i(lNormalTex, 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.albedoTex);
+    if (lAlbedoTex >= 0) glUniform1i(lAlbedoTex, 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, tiledLights.posTex);
+    if (lLightPosTex >= 0) glUniform1i(lLightPosTex, 3);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, tiledLights.colorTex);
+    if (lLightColorTex >= 0) glUniform1i(lLightColorTex, 4);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D, tiledLights.tileCountTex);
+    if (lTileCountTex >= 0) glUniform1i(lTileCountTex, 5);
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D, tiledLights.tileIndexTex);
+    if (lTileIndexTex >= 0) glUniform1i(lTileIndexTex, 6);
+    if (lViewPos >= 0) glUniform3f(lViewPos, eyeX, eyeY, eyeZ);
+    if (lAmbient >= 0) glUniform3f(lAmbient, ambientStrength, ambientStrength, ambientStrength);
+    if (lSpecularStrength >= 0) glUniform1f(lSpecularStrength, specularStrength);
+    if (lExposure >= 0) glUniform1f(lExposure, exposure);
+    if (lTileSize >= 0) glUniform1i(lTileSize, tileSize);
+    if (lTilesX >= 0) glUniform1i(lTilesX, tiledLights.tilesX);
+    drawFullscreenQuad(quadVAO);
+    glUseProgram(0);
+    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (showMarkers)
+    {
+        BeginMode3D(cam);
+        for (var i = 0; i < activeLightCount; i += 1)
+        {
+            var base = i * 4;
+            drawCross3D(
+                lightPosData[base + 0],
+                lightPosData[base + 1],
+                lightPosData[base + 2],
+                1.8,
+                min(255, int(lightColorData[base + 0] * 120.0)),
+                min(255, int(lightColorData[base + 1] * 120.0)),
+                min(255, int(lightColorData[base + 2] * 120.0)),
+                255
+            );
+        }
+        EndMode3D();
+    }
+
+    rlDisableVertexArray();
+    rlDisableVertexBuffer();
+    rlDisableVertexBufferElement();
+    rlSetTexture(0);
+    rlViewport(0, 0, screenW, screenH);
+    rlMatrixMode(RL_PROJECTION);
+    rlLoadIdentity();
+    rlOrtho(0, screenW, screenH, 0, 0.0, 1.0);
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+
+    DrawRectangle(18, 18, 1180, 116, uiBg);
+    DrawText("Sponza Tiled Deferred  RMB look | WASD move | SPACE/C up-down | SHIFT faster | L markers | F1 debug | TAB UI", 32, 32, 22, uiFg);
+    DrawText("Real GBuffer + tiled light lists packed in textures", 32, 60, 20, uiOk);
+    DrawText("Lights: " + activeLightCount + "  Tile size: " + tileSize + "  Max tile load: " + maxTileOccupancy + "  FPS: " + GetFPS(), 32, 88, 18, uiWarm);
+
+    if (showDebugTargets)
+    {
+        var dbgW = 210;
+        var dbgH = 118;
+        var dbgY = 18;
+        var dbgX0 = screenW - dbgW * 4 - 69;
+        var dbgX1 = screenW - dbgW * 3 - 52;
+        var dbgX2 = screenW - dbgW * 2 - 35;
+        var dbgX3 = screenW - dbgW - 18;
+        drawDebugPanel(gbuffer.albedoTex, dbgX0, dbgY, dbgW, dbgH, "Albedo");
+        drawDebugPanel(gbuffer.normalTex, dbgX1, dbgY, dbgW, dbgH, "Normal");
+        drawDebugPanel(gbuffer.posTex, dbgX2, dbgY, dbgW, dbgH, "Position");
+        drawDebugPanel(tiledLights.tileCountTex, dbgX3, dbgY, dbgW, dbgH, "Tile Count");
+    }
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = Begin("Tiled Deferred");
+        if (panel)
+        {
+            Text("Sponza + tiled deferred lighting");
+            var (_, nextDebug) = Checkbox("Show debug targets (F1)", showDebugTargets);
+            showDebugTargets = nextDebug;
+            var (_, nextMarkers) = Checkbox("Show markers (L)", showMarkers);
+            showMarkers = nextMarkers;
+            var (_, nextCount) = SliderInt("Light count", lightCount, 16, maxLights);
+            lightCount = nextCount;
+            var (_, nextTileSize) = SliderInt("Tile size", tileSize, 8, 64);
+            tileSize = nextTileSize;
+            var (_, nextRadius) = SliderFloat("Light radius", lightRadius, 20.0, 160.0);
+            lightRadius = nextRadius;
+            var (_, nextOrbitRadius) = SliderFloat("Orbit radius", orbitRadius, 30.0, 240.0);
+            orbitRadius = nextOrbitRadius;
+            var (_, nextHeight) = SliderFloat("Light height", lightHeight, 4.0, 80.0);
+            lightHeight = nextHeight;
+            var (_, nextSpeed) = SliderFloat("Orbit speed", orbitSpeed, 0.0, 2.4);
+            orbitSpeed = nextSpeed;
+            var (_, nextAmbient) = SliderFloat("Ambient", ambientStrength, 0.0, 0.2);
+            ambientStrength = nextAmbient;
+            var (_, nextSpec) = SliderFloat("Specular", specularStrength, 0.0, 0.8);
+            specularStrength = nextSpec;
+            var (_, nextExposure) = SliderFloat("Exposure", exposure, 0.2, 3.0);
+            exposure = nextExposure;
+            Text("Tiled lists live in textures, not fixed light uniform arrays.");
+        }
+        End();
+        EndImGui();
+    }
+
+    DrawFPS(GetScreenWidth() - 100, 16);
+    EndDrawing();
+}
+
+gbuffer.destroy();
+tiledLights.destroy();
+glDeleteBuffers(quadVBO);
+glDeleteVertexArrays(quadVAO);
+glDeleteProgram(progGeom);
+glDeleteProgram(progLight);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();
