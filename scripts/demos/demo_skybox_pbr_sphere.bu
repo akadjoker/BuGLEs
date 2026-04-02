@@ -1,0 +1,750 @@
+// ================================================================
+// Demo: Skybox + PBR Metallic Sphere
+//
+// • Skybox rendered from 6 BMP faces (assets/Sky Box/)
+//   using a GL_TEXTURE_CUBE_MAP – drawn without depth writes.
+// • A unit sphere drawn with a Cook-Torrance GGX PBR shader
+//   that samples the same cubemap for environment reflections.
+//
+// Controls:
+//   RMB drag         – look around
+//   WASD / Space / C – fly camera
+//   Left Shift       – move faster
+//   TAB              – toggle ImGui panel
+// ================================================================
+
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import ImGui;
+using ImGui;
+import STB;
+using STB;
+import GLM;
+using GLM;
+
+// ================================================================
+// HELPERS
+// ================================================================
+
+def resolveAssetPath(a, b)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    return nil;
+}
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+// ================================================================
+// CUBEMAP LOADER
+// ================================================================
+
+def loadCubemapFace(facePath, faceTarget)
+{
+    stbi_set_flip_vertically_on_load(0);
+    var (w, h, ch, pixels) = stbi_load(facePath, 3);
+    if (pixels == nil || w == nil || h == nil)
+    {
+        print("Failed to load cubemap face: " + facePath);
+        return false;
+    }
+    glTexImage2D(faceTarget, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    return true;
+}
+
+def loadSkyboxCubemap()
+{
+    var rightPath  = resolveAssetPath("assets/Sky Box/Right.bmp",  "../assets/Sky Box/Right.bmp");
+    var leftPath   = resolveAssetPath("assets/Sky Box/Left.bmp",   "../assets/Sky Box/Left.bmp");
+    var topPath    = resolveAssetPath("assets/Sky Box/Top.bmp",    "../assets/Sky Box/Top.bmp");
+    var bottomPath = resolveAssetPath("assets/Sky Box/Bottom.bmp", "../assets/Sky Box/Bottom.bmp");
+    var frontPath  = resolveAssetPath("assets/Sky Box/Front.bmp",  "../assets/Sky Box/Front.bmp");
+    var backPath   = resolveAssetPath("assets/Sky Box/Back.bmp",   "../assets/Sky Box/Back.bmp");
+
+    if (rightPath == nil || leftPath == nil || topPath == nil ||
+        bottomPath == nil || frontPath == nil || backPath == nil)
+    {
+        print("Skybox: could not find all 6 faces in assets/Sky Box/");
+        return 0;
+    }
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+
+    var ok = true;
+    ok = ok && loadCubemapFace(rightPath,  GL_TEXTURE_CUBE_MAP_POSITIVE_X);
+    ok = ok && loadCubemapFace(leftPath,   GL_TEXTURE_CUBE_MAP_NEGATIVE_X);
+    ok = ok && loadCubemapFace(topPath,    GL_TEXTURE_CUBE_MAP_POSITIVE_Y);
+    ok = ok && loadCubemapFace(bottomPath, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y);
+    ok = ok && loadCubemapFace(frontPath,  GL_TEXTURE_CUBE_MAP_POSITIVE_Z);
+    ok = ok && loadCubemapFace(backPath,   GL_TEXTURE_CUBE_MAP_NEGATIVE_Z);
+
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+
+    if (!ok)
+    {
+        glDeleteTextures(tex);
+        return 0;
+    }
+    return tex;
+}
+
+// ================================================================
+// SKYBOX VAO  (unit cube, 36 positions, no normals / UVs needed)
+// ================================================================
+
+var g_skyboxVbo = 0;
+
+def makeSkyboxVAO()
+{
+    var v = Float32Array(0);
+
+    // -Z face (back wall, winding = CCW from inside)
+    v.add(-1.0,  1.0, -1.0,  -1.0, -1.0, -1.0,   1.0, -1.0, -1.0);
+    v.add( 1.0, -1.0, -1.0,   1.0,  1.0, -1.0,  -1.0,  1.0, -1.0);
+
+    // -X face (left wall)
+    v.add(-1.0, -1.0,  1.0,  -1.0, -1.0, -1.0,  -1.0,  1.0, -1.0);
+    v.add(-1.0,  1.0, -1.0,  -1.0,  1.0,  1.0,  -1.0, -1.0,  1.0);
+
+    // +X face (right wall)
+    v.add( 1.0, -1.0, -1.0,   1.0, -1.0,  1.0,   1.0,  1.0,  1.0);
+    v.add( 1.0,  1.0,  1.0,   1.0,  1.0, -1.0,   1.0, -1.0, -1.0);
+
+    // +Z face (front wall)
+    v.add(-1.0, -1.0,  1.0,  -1.0,  1.0,  1.0,   1.0,  1.0,  1.0);
+    v.add( 1.0,  1.0,  1.0,   1.0, -1.0,  1.0,  -1.0, -1.0,  1.0);
+
+    // +Y face (ceiling)
+    v.add(-1.0,  1.0, -1.0,   1.0,  1.0, -1.0,   1.0,  1.0,  1.0);
+    v.add( 1.0,  1.0,  1.0,  -1.0,  1.0,  1.0,  -1.0,  1.0, -1.0);
+
+    // -Y face (floor)
+    v.add(-1.0, -1.0, -1.0,  -1.0, -1.0,  1.0,   1.0, -1.0, -1.0);
+    v.add( 1.0, -1.0, -1.0,  -1.0, -1.0,  1.0,   1.0, -1.0,  1.0);
+
+    var vao = glGenVertexArrays();
+    g_skyboxVbo = glGenBuffers();
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_skyboxVbo);
+    glBufferData(GL_ARRAY_BUFFER, v.byteLength(), v, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, 12, 0);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    return vao;
+}
+
+// ================================================================
+// SPHERE VAO  (UV sphere, interleaved pos+nrm+uv)
+// ================================================================
+
+var g_sphereVbo = 0;
+var g_sphereEbo = 0;
+
+def makeSphereVAO(rings, slices)
+{
+    var verts   = Float32Array(0);
+    var indices = Uint32Array(0);
+
+    // Generate vertices: for each ring and slice, compute pos/nrm/uv
+    for (var r = 0; r <= rings; r = r + 1)
+    {
+        var phi = PI * r / rings;   // 0 .. PI
+        var sp  = sin(phi);
+        var cp  = cos(phi);
+        for (var s = 0; s <= slices; s = s + 1)
+        {
+            var theta = 2.0 * PI * s / slices;   // 0 .. 2PI
+            var st = sin(theta);
+            var ct = cos(theta);
+            // Unit-sphere position == outward normal
+            var nx = sp * ct;
+            var ny = cp;
+            var nz = sp * st;
+            var u  = s / slices;
+            var vt = r / rings;
+            verts.add(nx, ny, nz,   // position
+                      nx, ny, nz,   // normal
+                      u,  vt);      // uv
+        }
+    }
+
+    // Generate indices (two triangles per quad)
+    for (var r = 0; r < rings; r = r + 1)
+    {
+        for (var s = 0; s < slices; s = s + 1)
+        {
+            var i0 = r       * (slices + 1) + s;
+            var i1 = r       * (slices + 1) + s + 1;
+            var i2 = (r + 1) * (slices + 1) + s;
+            var i3 = (r + 1) * (slices + 1) + s + 1;
+            indices.add(i0, i2, i1);
+            indices.add(i1, i2, i3);
+        }
+    }
+
+    var vao = glGenVertexArrays();
+    g_sphereVbo = glGenBuffers();
+    g_sphereEbo = glGenBuffers();
+
+    var stride = 8 * 4;  // 8 floats * 4 bytes each
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_sphereVbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_sphereEbo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.byteLength(), indices, GL_STATIC_DRAW);
+
+    // location 0: position
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, stride, 0);
+    // location 1: normal
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, false, stride, 3 * 4);
+    // location 2: uv
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, false, stride, 6 * 4);
+
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+    return vao;
+}
+
+// ================================================================
+// SHADERS
+// ================================================================
+
+var skyboxVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vTexCoord;
+
+void main()
+{
+    vTexCoord = aPos;
+    // mat3(uView) drops the translation column; cast back to mat4 so GLSL accepts it.
+    // xyww sets depth = 1.0 (always at far plane).
+    vec4 pos = uProj * mat4(mat3(uView)) * vec4(aPos, 1.0);
+    gl_Position = pos.xyww;
+}
+";
+
+var skyboxFsSrc = @"
+#version 330 core
+in vec3 vTexCoord;
+out vec4 FragColor;
+uniform samplerCube uSkybox;
+
+void main()
+{
+    // Sample the cubemap. The BMP faces are sRGB, but we display them without
+    // extra gamma since the framebuffer write path (raylib) is already sRGB-aware.
+    FragColor = texture(uSkybox, vTexCoord);
+}
+";
+
+var pbrVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    // Correct normal transform for non-uniform scale
+    vNormal = normalize(mat3(transpose(inverse(uModel))) * aNormal);
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var pbrFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform vec3        uViewPos;
+uniform vec3        uLightDir;     // normalised direction pointing TOWARD the light
+uniform vec3        uLightColor;   // linear light colour * intensity
+uniform vec3        uAlbedo;       // base colour (linear)
+uniform float       uMetallic;
+uniform float       uRoughness;
+uniform samplerCube uEnvMap;
+
+const float PI = 3.14159265359;
+
+// --------------- Cook-Torrance BRDF helpers ---------------
+
+float distributionGGX(float ndh, float rough)
+{
+    float a   = rough * rough;
+    float a2  = a * a;
+    float d   = ndh * ndh * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+float geometrySchlickGGX(float ndv, float rough)
+{
+    float k = (rough + 1.0);
+    k = (k * k) / 8.0;
+    return ndv / (ndv * (1.0 - k) + k);
+}
+
+float geometrySmith(float ndv, float ndl, float rough)
+{
+    return geometrySchlickGGX(ndv, rough) * geometrySchlickGGX(ndl, rough);
+}
+
+vec3 fresnelSchlick(float cosTheta, vec3 F0)
+{
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float rough)
+{
+    return F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+void main()
+{
+    vec3 N  = normalize(vNormal);
+    vec3 V  = normalize(uViewPos - vWorldPos);
+    vec3 R  = reflect(-V, N);
+
+    // F0: base reflectance – 0.04 for dielectrics, albedo for metals
+    vec3 F0 = mix(vec3(0.04), uAlbedo, uMetallic);
+
+    float ndv = max(dot(N, V), 0.0);
+
+    // ---- Direct lighting (single directional light) ----
+    vec3 L   = normalize(uLightDir);
+    vec3 H   = normalize(V + L);
+    float ndl = max(dot(N, L), 0.0);
+    float ndh = max(dot(N, H), 0.0);
+
+    float NDF = distributionGGX(ndh, uRoughness);
+    float G   = geometrySmith(ndv, ndl, uRoughness);
+    vec3  F   = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+    vec3 kS = F;
+    vec3 kD = (1.0 - kS) * (1.0 - uMetallic);
+
+    vec3 specDirect = (NDF * G * F) / max(4.0 * ndv * ndl, 0.001);
+    vec3 direct     = (kD * uAlbedo / PI + specDirect) * uLightColor * ndl;
+
+    // ---- Environment / IBL reflection (specular) ----
+    vec3  Fibl    = fresnelSchlickRoughness(ndv, F0, uRoughness);
+    vec3  kS_ibl  = Fibl;
+    vec3  kD_ibl  = (1.0 - kS_ibl) * (1.0 - uMetallic);
+
+    // Rough surfaces get blurrier reflections through mip levels
+    float mipLevel = uRoughness * 7.0;
+    vec3  envRaw   = textureLod(uEnvMap, R, mipLevel).rgb;
+
+    // Decode sRGB BMP gamma so we work in linear space
+    vec3  envLinear = pow(envRaw, vec3(2.2));
+
+    vec3 iblDiffuse  = uAlbedo * 0.20;           // simplified irradiance
+    vec3 iblSpecular = envLinear * Fibl;
+
+    vec3 ambient = kD_ibl * iblDiffuse + iblSpecular;
+
+    // ---- Combine ----
+    vec3 color = direct + ambient;
+
+    // Reinhard tone mapping
+    color = color / (color + vec3(1.0));
+    // Gamma encode for display
+    color = pow(color, vec3(1.0 / 2.2));
+
+    FragColor = vec4(color, 1.0);
+}
+";
+
+// ================================================================
+// WINDOW + CAMERA SETUP
+// ================================================================
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1600, 900, "BuGL - Skybox + PBR Sphere");
+SetTargetFPS(60);
+var imguiOk = InitImGui();
+
+var eyeX = 0.0;
+var eyeY = 0.0;
+var eyeZ = 5.0;
+var yaw   = -90.0;
+var pitch =   0.0;
+
+// ================================================================
+// COMPILE SHADERS
+// ================================================================
+var skyProg = linkProgram(skyboxVsSrc, skyboxFsSrc);
+if (skyProg <= 0)
+{
+    print("Failed to build skybox shaders");
+    if (imguiOk) ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var pbrProg = linkProgram(pbrVsSrc, pbrFsSrc);
+if (pbrProg <= 0)
+{
+    print("Failed to build PBR shaders");
+    glDeleteProgram(skyProg);
+    if (imguiOk) ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+// ================================================================
+// LOAD / BUILD ASSETS
+// ================================================================
+
+var cubemapTex = loadSkyboxCubemap();
+if (cubemapTex <= 0)
+{
+    print("Failed to load skybox cubemap");
+    glDeleteProgram(pbrProg);
+    glDeleteProgram(skyProg);
+    if (imguiOk) ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var skyboxVao = makeSkyboxVAO();
+
+var sphereRings  = 48;
+var sphereSlices = 48;
+var sphereVao = makeSphereVAO(sphereRings, sphereSlices);
+var sphereIndexCount = sphereRings * sphereSlices * 6;
+
+// ================================================================
+// UNIFORM LOCATIONS – SKYBOX
+// ================================================================
+
+var uSkyView   = glGetUniformLocation(skyProg, "uView");
+var uSkyProj   = glGetUniformLocation(skyProg, "uProj");
+var uSkybox    = glGetUniformLocation(skyProg, "uSkybox");
+
+// ================================================================
+// UNIFORM LOCATIONS – PBR
+// ================================================================
+
+var uPbrModel      = glGetUniformLocation(pbrProg, "uModel");
+var uPbrView       = glGetUniformLocation(pbrProg, "uView");
+var uPbrProj       = glGetUniformLocation(pbrProg, "uProj");
+var uPbrViewPos    = glGetUniformLocation(pbrProg, "uViewPos");
+var uPbrLightDir   = glGetUniformLocation(pbrProg, "uLightDir");
+var uPbrLightColor = glGetUniformLocation(pbrProg, "uLightColor");
+var uPbrAlbedo     = glGetUniformLocation(pbrProg, "uAlbedo");
+var uPbrMetallic   = glGetUniformLocation(pbrProg, "uMetallic");
+var uPbrRoughness  = glGetUniformLocation(pbrProg, "uRoughness");
+var uPbrEnvMap     = glGetUniformLocation(pbrProg, "uEnvMap");
+
+// ================================================================
+// MATRIX BUFFERS  (pre-allocated outside the loop)
+// ================================================================
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf  = @(16, TYPE_FLOAT);
+var projBuf  = @(16, TYPE_FLOAT);
+
+// ================================================================
+// PBR MATERIAL PARAMS  (tweakable via ImGui)
+// ================================================================
+
+var pbrAlbedoR  = 1.0;
+var pbrAlbedoG  = 0.86;
+var pbrAlbedoB  = 0.57;    // gold-ish default
+var pbrMetallic  = 0.95;
+var pbrRoughness = 0.15;
+
+// Light
+var lightDirX = 0.6;
+var lightDirY = 0.8;
+var lightDirZ = 0.2;
+var lightIntensity = 3.0;
+
+// Sphere scale
+var sphereScale = 1.5;
+
+// ================================================================
+// MISC RUNTIME STATE
+// ================================================================
+
+var timeSec = 0.0;
+var showUi  = true;
+var bgColor = Color(18, 20, 25, 255);
+var uiFg    = Color(240, 240, 240, 255);
+var uiOk    = Color(180, 255, 180, 255);
+var worldUp = Vector3(0.0, 1.0, 0.0);
+var camEye = Vector3(0.0, 0.0, 0.0);
+var camTarget = Vector3(0.0, 0.0, -1.0);
+
+// Enable seamless cubemap filtering (requires desktop GL 3.2+)
+glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+
+// ================================================================
+// MAIN LOOP
+// ================================================================
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt > 0.05) dt = 0.05;
+    timeSec = timeSec + dt;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+
+    // --- Camera look ---
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw   = yaw   + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch >  89.0) pitch =  89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad   = yaw   * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001) { fx = fx / fl; fy = fy / fl; fz = fz / fl; }
+
+    // Right vector (horizontal only)
+    var rx = -fz;
+    var rz =  fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001) { rx = rx / rl; rz = rz / rl; }
+
+    // --- Camera move ---
+    var speed = 4.0;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) speed = speed * 4.0;
+    var step = speed * dt;
+
+    if (IsKeyDown(KEY_W)) { eyeX = eyeX + fx * step; eyeY = eyeY + fy * step; eyeZ = eyeZ + fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX = eyeX - fx * step; eyeY = eyeY - fy * step; eyeZ = eyeZ - fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX = eyeX - rx * step; eyeZ = eyeZ - rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX = eyeX + rx * step; eyeZ = eyeZ + rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY = eyeY + step;
+    if (IsKeyDown(KEY_C))     eyeY = eyeY - step;
+
+    // ---- Build matrices using GLM helpers (same pattern as working tutorials) ----
+    var modelMat = MatrixScale(sphereScale, sphereScale, sphereScale);
+    var aspect = GetScreenWidth() * 1.0 / GetScreenHeight();
+    var projMat = MatrixPerspective(60.0 * PI / 180.0, aspect, 0.1, 2000.0);
+    camEye.x = eyeX; camEye.y = eyeY; camEye.z = eyeZ;
+    camTarget.x = eyeX + fx; camTarget.y = eyeY + fy; camTarget.z = eyeZ + fz;
+    var viewMat = MatrixLookAt(camEye, camTarget, worldUp);
+
+    // ---- Normalise light direction ----
+    var llen = sqrt(lightDirX * lightDirX + lightDirY * lightDirY + lightDirZ * lightDirZ);
+    if (llen < 0.0001) llen = 1.0;
+    var lnx = lightDirX / llen;
+    var lny = lightDirY / llen;
+    var lnz = lightDirZ / llen;
+
+    // ==============================================================
+    BeginDrawing();
+    ClearBackground(bgColor);
+
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(viewMat, viewBuf);
+    MatrixWriteBuffer(projMat, projBuf);
+
+    rlDrawRenderBatchActive();
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+
+    // ---- PASS 1: Skybox ----
+    // Draw before the sphere with depth writes OFF and LEQUAL so the box
+    // fills anywhere not yet drawn (or equality with the sphere at far plane).
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(false);
+
+    glUseProgram(skyProg);
+    if (uSkyView  >= 0) glUniformMatrix4fv(uSkyView,  1, false, viewBuf);
+    if (uSkyProj  >= 0) glUniformMatrix4fv(uSkyProj,  1, false, projBuf);
+    if (uSkybox   >= 0) glUniform1i(uSkybox, 0);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cubemapTex);
+
+    glBindVertexArray(skyboxVao);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glBindVertexArray(0);
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glDepthMask(true);
+    glDepthFunc(GL_LESS);
+
+    // ---- PASS 2: PBR Sphere ----
+    glUseProgram(pbrProg);
+
+    if (uPbrModel      >= 0) glUniformMatrix4fv(uPbrModel,      1, false, modelBuf);
+    if (uPbrView       >= 0) glUniformMatrix4fv(uPbrView,       1, false, viewBuf);
+    if (uPbrProj       >= 0) glUniformMatrix4fv(uPbrProj,       1, false, projBuf);
+    if (uPbrViewPos    >= 0) glUniform3f(uPbrViewPos,    eyeX, eyeY, eyeZ);
+    if (uPbrLightDir   >= 0) glUniform3f(uPbrLightDir,   lnx,  lny,  lnz);
+    if (uPbrLightColor >= 0) glUniform3f(uPbrLightColor, lightIntensity, lightIntensity, lightIntensity);
+    if (uPbrAlbedo     >= 0) glUniform3f(uPbrAlbedo,     pbrAlbedoR, pbrAlbedoG, pbrAlbedoB);
+    if (uPbrMetallic   >= 0) glUniform1f(uPbrMetallic,   pbrMetallic);
+    if (uPbrRoughness  >= 0) glUniform1f(uPbrRoughness,  pbrRoughness);
+    if (uPbrEnvMap     >= 0) glUniform1i(uPbrEnvMap, 1);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cubemapTex);
+
+    glBindVertexArray(sphereVao);
+    glDrawElements(GL_TRIANGLES, sphereIndexCount, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glUseProgram(0);
+
+    // ---- HUD ----
+    DrawText("RMB look  WASD/Space/C fly  Shift faster  TAB UI", 14, 14, 20, uiFg);
+    DrawText("FPS: " + GetFPS(), 14, 40, 18, uiOk);
+
+    // ---- ImGui panel ----
+    if (showUi && imguiOk)
+    {
+        BeginImGui();
+        var panel = Begin("PBR Material");
+        if (panel)
+        {
+            Text("Metallic sphere with skybox IBL reflections");
+
+            Separator();
+            Text("  Albedo");
+            var (_, nextR) = SliderFloat("R##albR", pbrAlbedoR, 0.0, 1.0, "%.3f");
+            pbrAlbedoR = nextR;
+            var (_, nextG) = SliderFloat("G##albG", pbrAlbedoG, 0.0, 1.0, "%.3f");
+            pbrAlbedoG = nextG;
+            var (_, nextB) = SliderFloat("B##albB", pbrAlbedoB, 0.0, 1.0, "%.3f");
+            pbrAlbedoB = nextB;
+
+            Separator();
+            var (_, nextMet) = SliderFloat("Metallic",  pbrMetallic,  0.0, 1.0, "%.3f");
+            pbrMetallic = nextMet;
+            var (_, nextRou) = SliderFloat("Roughness", pbrRoughness, 0.02, 1.0, "%.3f");
+            pbrRoughness = nextRou;
+
+            Separator();
+            Text("  Light");
+            var (_, nextLi) = SliderFloat("Intensity", lightIntensity, 0.0, 10.0, "%.2f");
+            lightIntensity = nextLi;
+            var (_, nextLx) = SliderFloat("Dir X", lightDirX, -1.0, 1.0, "%.2f");
+            lightDirX = nextLx;
+            var (_, nextLy) = SliderFloat("Dir Y", lightDirY, -1.0, 1.0, "%.2f");
+            lightDirY = nextLy;
+            var (_, nextLz) = SliderFloat("Dir Z", lightDirZ, -1.0, 1.0, "%.2f");
+            lightDirZ = nextLz;
+
+            Separator();
+            var (_, nextSc) = SliderFloat("Sphere scale", sphereScale, 0.1, 4.0, "%.2f");
+            sphereScale = nextSc;
+        }
+        End();
+        EndImGui();
+    }
+
+    DrawFPS(GetScreenWidth() - 90, 14);
+    EndDrawing();
+}
+
+// ================================================================
+// CLEANUP
+// ================================================================
+
+glDeleteTextures(cubemapTex);
+glDeleteVertexArrays(skyboxVao);
+glDeleteBuffers(g_skyboxVbo);
+glDeleteVertexArrays(sphereVao);
+glDeleteBuffers(g_sphereVbo);
+glDeleteBuffers(g_sphereEbo);
+glDeleteProgram(skyProg);
+glDeleteProgram(pbrProg);
+if (imguiOk) ShutdownImGui();
+CloseWindow();
