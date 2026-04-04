@@ -380,7 +380,7 @@ private:
   void emitVarOp(uint8 op, int arg);
   void handle_assignment(uint8 getOp, uint8 setOp, int arg, bool canAssign);
   bool checkGenericCallSyntax();
-  uint8 genericArgumentList();
+  uint16 genericArgumentList();
 
   void prefixIncrement(bool canAssign);
   void prefixDecrement(bool canAssign);
@@ -394,7 +394,7 @@ private:
   int resolveLocal(Token &name);
   void markInitialized();
 
-  uint8 argumentList();
+  uint16 argumentList();
 
   void compileFunction(Function *func, bool isProcess);
   void compileProcess(const std::string &name);

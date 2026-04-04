@@ -1,0 +1,1500 @@
+import math;
+using math;
+import path;
+using path;
+import OpenGl;
+using OpenGl;
+import GLM;
+using GLM;
+import ImGui;
+using ImGui;
+import STB;
+using STB;
+
+include "../libs/lib_3ds.bu";
+
+var LAB_SKY_SET = "morning";
+var LAB_SUBJECT = "car";   // "cube" or "car"
+var LAB_PROBE_SIZE = 256;
+var LAB_CAR_ROT_Y = 180.0;
+var LAB_CAR_SCALE_BIAS = 1.0;
+var LAB_CAMERA_FOV_RAD = 55.0 * PI / 180.0;
+var LAB_CAMERA_NEAR = 0.02;
+var LAB_CAMERA_FAR = 20000.0;
+var LAB_FLOOR_UV_SCALE = 0.18;
+
+var hudBg = Color(0, 0, 0, 152);
+var hudFg = Color(245, 245, 245, 255);
+var hudInfo = Color(190, 220, 255, 255);
+var hudOk = Color(180, 255, 200, 255);
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def cubemapFacePath(setName, suffix)
+{
+    var p = "assets/cubemaps/" + setName + "_" + suffix + ".jpg";
+    if (path.exists(p)) return p;
+    return nil;
+}
+
+
+def loadTexture2D(filePath, flipY, withMipmaps, repeatMode)
+{
+    if (filePath == nil || !path.exists(filePath)) return 0;
+
+    stbi_set_flip_vertically_on_load(flipY ? 1 : 0);
+    var (w, h, ch, pixels) = stbi_load(filePath, 4);
+    if (pixels == nil) return 0;
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (withMipmaps) glGenerateMipmap(GL_TEXTURE_2D);
+    if (withMipmaps) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    else glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def destroyTextureList(texPack)
+{
+    if (texPack == nil) return;
+    for (var i = 0; i < len(texPack); i += 1)
+    {
+        if (texPack[i] > 0) glDeleteTextures(texPack[i]);
+    }
+}
+
+
+def loadSkyboxDebugFaces(setName)
+{
+    var rt = loadTexture2D(cubemapFacePath(setName, "rt"), false, true, false);
+    var lf = loadTexture2D(cubemapFacePath(setName, "lf"), false, true, false);
+    var up = loadTexture2D(cubemapFacePath(setName, "up"), false, true, false);
+    var dn = loadTexture2D(cubemapFacePath(setName, "dn"), false, true, false);
+    var fr = loadTexture2D(cubemapFacePath(setName, "fr"), false, true, false);
+    var bk = loadTexture2D(cubemapFacePath(setName, "bk"), false, true, false);
+    if (rt <= 0 || lf <= 0 || up <= 0 || dn <= 0 || fr <= 0 || bk <= 0)
+    {
+        destroyTextureList([rt, lf, up, dn, fr, bk]);
+        return nil;
+    }
+    return [rt, lf, up, dn, fr, bk];
+}
+
+
+def loadSkyboxCubemap(setName)
+{
+    var facePaths = [
+        cubemapFacePath(setName, "rt"),
+        cubemapFacePath(setName, "lf"),
+        cubemapFacePath(setName, "up"),
+        cubemapFacePath(setName, "dn"),
+        cubemapFacePath(setName, "fr"),
+        cubemapFacePath(setName, "bk")
+    ];
+
+    for (var i = 0; i < 6; i += 1)
+        if (facePaths[i] == nil) return 0;
+
+    var faceTargets = [
+        GL_TEXTURE_CUBE_MAP_POSITIVE_X,
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+        GL_TEXTURE_CUBE_MAP_POSITIVE_Y,
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+        GL_TEXTURE_CUBE_MAP_POSITIVE_Z,
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_Z
+    ];
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    for (var i = 0; i < 6; i += 1)
+    {
+        stbi_set_flip_vertically_on_load(0);
+        var (w, h, ch, pixels) = stbi_load(facePaths[i], 4);
+        if (pixels == nil)
+        {
+            glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+            if (tex > 0) glDeleteTextures(tex);
+            return 0;
+        }
+        glTexImage2D(faceTargets[i], 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    }
+
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    return tex;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Reflection combo shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Reflection combo shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+class SceneTarget
+{
+    var fbo;
+    var color;
+    var depth;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteTextures(self.depth);
+        if (self.color > 0) glDeleteTextures(self.color);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+def makeSceneTarget(width, height)
+{
+    var rt = SceneTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.color = glGenTextures();
+    rt.depth = glGenTextures();
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindTexture(GL_TEXTURE_2D, rt.depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.color, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, rt.depth, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        rt.destroy();
+        return nil;
+    }
+    return rt;
+}
+
+
+def resizeSceneTarget(rt, width, height)
+{
+    if (rt == nil) return nil;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    if (rt.width == width && rt.height == height) return rt;
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glBindTexture(GL_TEXTURE_2D, rt.depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nil);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    rt.width = width;
+    rt.height = height;
+    return rt;
+}
+
+
+class ProbeTarget
+{
+    var fbo;
+    var cubemap;
+    var depthRbo;
+    var size;
+    var debugFaces;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.cubemap = 0;
+        self.depthRbo = 0;
+        self.size = 0;
+        self.debugFaces = [];
+    }
+
+    def destroy()
+    {
+        destroyTextureList(self.debugFaces);
+        if (self.depthRbo > 0) glDeleteRenderbuffers(self.depthRbo);
+        if (self.cubemap > 0) glDeleteTextures(self.cubemap);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.cubemap = 0;
+        self.depthRbo = 0;
+        self.size = 0;
+        self.debugFaces = [];
+    }
+}
+
+
+def makeProbeTarget(size)
+{
+    var probe = ProbeTarget();
+    probe.size = size;
+    probe.fbo = glGenFramebuffers();
+    probe.cubemap = glGenTextures();
+    probe.depthRbo = glGenRenderbuffers();
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP, probe.cubemap);
+    for (var i = 0; i < 6; i += 1)
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+
+    glBindRenderbuffer(GL_RENDERBUFFER, probe.depthRbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, size, size);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    probe.debugFaces = [];
+    for (var i = 0; i < 6; i += 1)
+    {
+        var tex = glGenTextures();
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        probe.debugFaces.push(tex);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, probe.fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, probe.depthRbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X, probe.cubemap, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        probe.destroy();
+        return nil;
+    }
+    return probe;
+}
+
+
+def makeCubeGeometry()
+{
+    var verts = Float32Array([
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,   0.0, 0.0,
+         1.0, -1.0,  1.0,   0.0,  0.0,  1.0,   1.0, 0.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,   1.0, 1.0,
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,   0.0, 0.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,   1.0, 1.0,
+        -1.0,  1.0,  1.0,   0.0,  0.0,  1.0,   0.0, 1.0,
+
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,   1.0, 0.0,
+        -1.0,  1.0, -1.0,   0.0,  0.0, -1.0,   1.0, 1.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,   0.0, 1.0,
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,   1.0, 0.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,   0.0, 1.0,
+         1.0, -1.0, -1.0,   0.0,  0.0, -1.0,   0.0, 0.0,
+
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,   0.0, 0.0,
+        -1.0, -1.0,  1.0,  -1.0,  0.0,  0.0,   1.0, 0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,   1.0, 1.0,
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,   0.0, 0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,   1.0, 1.0,
+        -1.0,  1.0, -1.0,  -1.0,  0.0,  0.0,   0.0, 1.0,
+
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,   1.0, 0.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,   0.0, 1.0,
+         1.0, -1.0,  1.0,   1.0,  0.0,  0.0,   0.0, 0.0,
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,   1.0, 0.0,
+         1.0,  1.0, -1.0,   1.0,  0.0,  0.0,   1.0, 1.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,   0.0, 1.0,
+
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,   0.0, 1.0,
+        -1.0,  1.0,  1.0,   0.0,  1.0,  0.0,   0.0, 0.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,   1.0, 0.0,
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,   0.0, 1.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,   1.0, 0.0,
+         1.0,  1.0, -1.0,   0.0,  1.0,  0.0,   1.0, 1.0,
+
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,   1.0, 1.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0,   0.0, 0.0,
+        -1.0, -1.0,  1.0,   0.0, -1.0,  0.0,   1.0, 0.0,
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,   1.0, 1.0,
+         1.0, -1.0, -1.0,   0.0, -1.0,  0.0,   0.0, 1.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0,   0.0, 0.0]
+    );
+
+    var vao = glGenVertexArrays();
+    var vbo = glGenBuffers();
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, 32, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, false, 32, 12);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, false, 32, 24);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return [vao, vbo];
+}
+
+
+def prepareOverlay2D(screenW, screenH)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glDepthMask(true);
+    glViewport(0, 0, screenW, max(screenH, 1));
+}
+
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1680, 960, "BuGL - Reflection Combo Lab");
+SetTargetFPS(60);
+
+if (!InitImGui())
+{
+    CloseWindow();
+    return;
+}
+
+var cubeGeom = makeCubeGeometry();
+var cubeVAO = cubeGeom[0];
+var cubeVBO = cubeGeom[1];
+
+var sceneVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform vec4 uClipPlane;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = normalize(mat3(uModel) * aNormal);
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+    gl_ClipDistance[0] = dot(world, uClipPlane);
+}
+";
+
+var sceneFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform vec3 uTint;
+uniform vec3 uLightDir;
+uniform vec3 uAmbient;
+uniform sampler2D uFloorTex;
+uniform sampler2D uAlbedoTex;
+uniform int uHasTex;
+uniform int uUseFloorTex;
+uniform float uOpacity;
+uniform float uFloorExtent;
+uniform vec2 uFloorCenter;
+
+void main()
+{
+    vec3 albedo = uTint;
+    if (uUseFloorTex != 0)
+    {
+        vec2 uv = ((vWorldPos.xz - uFloorCenter) / (uFloorExtent * 2.0)) + vec2(0.5);
+        albedo = texture(uFloorTex, uv).rgb;
+    }
+    else if (uHasTex != 0)
+    {
+        albedo = texture(uAlbedoTex, vUV).rgb;
+    }
+
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-uLightDir);
+    float ndl = max(dot(N, L), 0.0);
+    vec3 color = albedo * (uAmbient + vec3(ndl));
+    float alpha = uOpacity;
+    if (uHasTex != 0 && uUseFloorTex == 0)
+        alpha = alpha * texture(uAlbedoTex, vUV).a;
+    FragColor = vec4(color, alpha);
+}
+";
+
+var reflectVsSrc = sceneVsSrc;
+
+var reflectFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform vec3 uTint;
+uniform vec3 uLightDir;
+uniform vec3 uAmbient;
+uniform vec3 uCameraPos;
+uniform samplerCube uProbeCube;
+uniform sampler2D uAlbedoTex;
+uniform int uHasTex;
+uniform float uOpacity;
+uniform float uReflectivity;
+uniform float uFresnelStrength;
+uniform float uSpecularBoost;
+
+void main()
+{
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uCameraPos - vWorldPos);
+    vec3 L = normalize(-uLightDir);
+    vec3 H = normalize(L + V);
+
+    float ndl = max(dot(N, L), 0.0);
+    float spec = pow(max(dot(N, H), 0.0), 64.0) * uSpecularBoost;
+    vec3 albedo = uTint;
+    float alpha = uOpacity;
+    if (uHasTex != 0)
+    {
+        vec4 texel = texture(uAlbedoTex, vUV);
+        albedo = texel.rgb;
+        alpha = alpha * texel.a;
+    }
+    vec3 lit = albedo * (uAmbient + vec3(ndl)) + vec3(spec);
+    vec3 R = reflect(-V, N);
+    vec3 env = texture(uProbeCube, normalize(R)).rgb;
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 5.0) * uFresnelStrength;
+    vec3 color = mix(lit, env, clamp(uReflectivity + fres, 0.0, 1.0));
+    FragColor = vec4(color, alpha);
+}
+";
+
+var floorVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform mat4 uReflectView;
+uniform mat4 uReflectProj;
+
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec4 vReflectClip;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vWorldNormal = normalize(mat3(uModel) * aNormal);
+    vReflectClip = uReflectProj * uReflectView * world;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var floorFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vWorldNormal;
+in vec4 vReflectClip;
+out vec4 FragColor;
+
+uniform vec3 uCameraPos;
+uniform sampler2D uReflectionTex;
+uniform sampler2D uFloorTex;
+uniform vec2 uFloorCenter;
+uniform float uFloorUVScale;
+uniform float uReflectivity;
+uniform float uFresnelStrength;
+uniform float uFloorDarken;
+
+void main()
+{
+    vec3 N = normalize(vWorldNormal);
+    vec3 V = normalize(uCameraPos - vWorldPos);
+    vec2 floorUv = (vWorldPos.xz - uFloorCenter) * uFloorUVScale + vec2(0.5);
+    vec3 base = texture(uFloorTex, floorUv).rgb * uFloorDarken;
+
+    vec2 uv = vReflectClip.xy / max(vReflectClip.w, 0.00001);
+    uv = uv * 0.5 + 0.5;
+
+    vec3 reflection = vec3(0.0);
+    if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0)
+        reflection = texture(uReflectionTex, uv).rgb;
+
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 4.0) * uFresnelStrength;
+    float reflectMix = clamp(uReflectivity + fres, 0.0, 1.0);
+    vec3 color = mix(base, reflection, reflectMix);
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var skyVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var skyFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+out vec4 FragColor;
+
+uniform vec3 uCameraPos;
+uniform samplerCube uSkyCube;
+
+void main()
+{
+    vec3 dir = normalize(vWorldPos - uCameraPos);
+    FragColor = vec4(texture(uSkyCube, dir).rgb, 1.0);
+}
+";
+
+var sceneProg = linkProgram(sceneVsSrc, sceneFsSrc);
+var reflectProg = linkProgram(reflectVsSrc, reflectFsSrc);
+var floorProg = linkProgram(floorVsSrc, floorFsSrc);
+var skyProg = linkProgram(skyVsSrc, skyFsSrc);
+if (sceneProg <= 0 || reflectProg <= 0 || floorProg <= 0 || skyProg <= 0)
+{
+    if (sceneProg > 0) glDeleteProgram(sceneProg);
+    if (reflectProg > 0) glDeleteProgram(reflectProg);
+    if (floorProg > 0) glDeleteProgram(floorProg);
+    if (skyProg > 0) glDeleteProgram(skyProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var probe = makeProbeTarget(LAB_PROBE_SIZE);
+var reflectionRt = makeSceneTarget(1280, 720);
+var floorTex = loadTexture2D("assets/powerplant/textures/tank_top.png", true, true, true);
+var skyCubemap = loadSkyboxCubemap(LAB_SKY_SET);
+var skyDebugFaces = loadSkyboxDebugFaces(LAB_SKY_SET);
+if (probe == nil || reflectionRt == nil || floorTex <= 0 || skyCubemap <= 0 || skyDebugFaces == nil)
+{
+    if (probe != nil) probe.destroy();
+    if (reflectionRt != nil) reflectionRt.destroy();
+    if (floorTex > 0) glDeleteTextures(floorTex);
+    if (skyCubemap > 0) glDeleteTextures(skyCubemap);
+    destroyTextureList(skyDebugFaces);
+    glDeleteProgram(sceneProg);
+    glDeleteProgram(reflectProg);
+    glDeleteProgram(floorProg);
+    glDeleteProgram(skyProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+glEnable(GL_DEPTH_TEST);
+glEnable(GL_CULL_FACE);
+glCullFace(GL_BACK);
+glClearColor(0.10, 0.11, 0.14, 1.0);
+
+var sModel = glGetUniformLocation(sceneProg, "uModel");
+var sView = glGetUniformLocation(sceneProg, "uView");
+var sProj = glGetUniformLocation(sceneProg, "uProj");
+var sClipPlane = glGetUniformLocation(sceneProg, "uClipPlane");
+var sTint = glGetUniformLocation(sceneProg, "uTint");
+var sLightDir = glGetUniformLocation(sceneProg, "uLightDir");
+var sAmbient = glGetUniformLocation(sceneProg, "uAmbient");
+var sFloorTex = glGetUniformLocation(sceneProg, "uFloorTex");
+var sAlbedoTex = glGetUniformLocation(sceneProg, "uAlbedoTex");
+var sHasTex = glGetUniformLocation(sceneProg, "uHasTex");
+var sUseFloorTex = glGetUniformLocation(sceneProg, "uUseFloorTex");
+var sOpacity = glGetUniformLocation(sceneProg, "uOpacity");
+var sFloorExtent = glGetUniformLocation(sceneProg, "uFloorExtent");
+var sFloorCenter = glGetUniformLocation(sceneProg, "uFloorCenter");
+
+var rModel = glGetUniformLocation(reflectProg, "uModel");
+var rView = glGetUniformLocation(reflectProg, "uView");
+var rProj = glGetUniformLocation(reflectProg, "uProj");
+var rTint = glGetUniformLocation(reflectProg, "uTint");
+var rLightDir = glGetUniformLocation(reflectProg, "uLightDir");
+var rAmbient = glGetUniformLocation(reflectProg, "uAmbient");
+var rCameraPos = glGetUniformLocation(reflectProg, "uCameraPos");
+var rProbeCube = glGetUniformLocation(reflectProg, "uProbeCube");
+var rAlbedoTex = glGetUniformLocation(reflectProg, "uAlbedoTex");
+var rHasTex = glGetUniformLocation(reflectProg, "uHasTex");
+var rOpacity = glGetUniformLocation(reflectProg, "uOpacity");
+var rReflectivity = glGetUniformLocation(reflectProg, "uReflectivity");
+var rFresnel = glGetUniformLocation(reflectProg, "uFresnelStrength");
+var rSpecular = glGetUniformLocation(reflectProg, "uSpecularBoost");
+
+var fModel = glGetUniformLocation(floorProg, "uModel");
+var fView = glGetUniformLocation(floorProg, "uView");
+var fProj = glGetUniformLocation(floorProg, "uProj");
+var fReflectView = glGetUniformLocation(floorProg, "uReflectView");
+var fReflectProj = glGetUniformLocation(floorProg, "uReflectProj");
+var fCameraPos = glGetUniformLocation(floorProg, "uCameraPos");
+var fReflectionTex = glGetUniformLocation(floorProg, "uReflectionTex");
+var fFloorTex = glGetUniformLocation(floorProg, "uFloorTex");
+var fFloorCenter = glGetUniformLocation(floorProg, "uFloorCenter");
+var fFloorUVScale = glGetUniformLocation(floorProg, "uFloorUVScale");
+var fReflectivity = glGetUniformLocation(floorProg, "uReflectivity");
+var fFresnel = glGetUniformLocation(floorProg, "uFresnelStrength");
+var fFloorDarken = glGetUniformLocation(floorProg, "uFloorDarken");
+
+var kModel = glGetUniformLocation(skyProg, "uModel");
+var kView = glGetUniformLocation(skyProg, "uView");
+var kProj = glGetUniformLocation(skyProg, "uProj");
+var kCameraPos = glGetUniformLocation(skyProg, "uCameraPos");
+var kSkyCube = glGetUniformLocation(skyProg, "uSkyCube");
+
+glUseProgram(sceneProg);
+if (sFloorTex >= 0) glUniform1i(sFloorTex, 1);
+if (sAlbedoTex >= 0) glUniform1i(sAlbedoTex, 2);
+glUseProgram(reflectProg);
+if (rProbeCube >= 0) glUniform1i(rProbeCube, 0);
+if (rAlbedoTex >= 0) glUniform1i(rAlbedoTex, 2);
+glUseProgram(floorProg);
+if (fReflectionTex >= 0) glUniform1i(fReflectionTex, 0);
+if (fFloorTex >= 0) glUniform1i(fFloorTex, 1);
+glUseProgram(skyProg);
+if (kSkyCube >= 0) glUniform1i(kSkyCube, 0);
+glUseProgram(0);
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var reflectViewBuf = @(16, TYPE_FLOAT);
+var reflectProjBuf = @(16, TYPE_FLOAT);
+var probeProj = MatrixPerspective(90.0 * PI / 180.0, 1.0, 0.05, 120.0);
+var screenProj = MatrixIdentity();
+var planarProj = MatrixIdentity();
+var cachedScreenW = 0;
+var cachedScreenH = 0;
+var cachedPlanarW = 0;
+var cachedPlanarH = 0;
+
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+var focusLift = 1.1;
+var floorY = -1.25;
+var floorHalfExtent = 18.0;
+var subjectX = 0.0;
+var subjectY = 1.15;
+var subjectZ = 0.0;
+var subjectScale = 2.15;
+var subjectMode = LAB_SUBJECT;
+var carModel = nil;
+var carLoaded = false;
+var carScale = 1.0;
+var sceneRadius = 6.0;
+
+if (subjectMode == "car")
+{
+    var modelPath = resolveAssetPath(
+        "assets/3ds/bmw/model.3ds","",""
+    );
+
+    if (modelPath != nil)
+    {
+        carModel = ThreeDSModel();
+        if (carModel.load(modelPath))
+        {
+            carLoaded = true;
+            var carBounds = max(carModel.sizeX, max(carModel.sizeY, carModel.sizeZ));
+            if (carBounds > 0.0001) carScale = (subjectScale * 2.0 / carBounds) * LAB_CAR_SCALE_BIAS;
+            else carScale = LAB_CAR_SCALE_BIAS;
+            carModel.scale = carScale;
+            carModel.rotY = LAB_CAR_ROT_Y;
+        }
+        else
+        {
+            print("Reflection combo lab: failed to load car model, falling back to cube.");
+            subjectMode = "cube";
+        }
+    }
+    else
+    {
+        print("Reflection combo lab: car asset not found, falling back to cube.");
+        subjectMode = "cube";
+    }
+}
+
+var eyeX = 0.0;
+var eyeY = 5.5;
+var eyeZ = 11.0;
+var yaw = -120.0;
+var pitch = -14.0;
+var camDistance = 18.0;
+
+var showUi = true;
+var showOrbs = true;
+var freezeProbe = false;
+var freezePlanar = false;
+var planarDebugMode = 0;   // 0 normal, 1 main-view, 2 no-clip
+var orbitSpeed = 0.62;
+var reflectivity = 0.42;
+var fresnelStrength = 0.86;
+var specularBoost = 0.22;
+var ambientStrength = 0.24;
+var floorReflectivity = 0.62;
+var floorFresnel = 0.55;
+var floorDarken = 0.38;
+var lightDirX = -0.45;
+var lightDirY = -1.0;
+var lightDirZ = -0.15;
+
+var orbPhase = [0.0, 1.5, 3.1, 4.5];
+var orbRadius = [sceneRadius * 0.70, sceneRadius * 0.94, sceneRadius * 1.08, sceneRadius * 0.82];
+var orbHeight = [floorY + 2.0, floorY + 2.6, floorY + 2.2, floorY + 2.9];
+var orbSize = [0.55, 0.68, 0.60, 0.48];
+var orbColorR = [1.00, 0.35, 0.22, 0.60];
+var orbColorG = [0.55, 0.82, 0.66, 0.78];
+var orbColorB = [0.24, 1.00, 1.00, 0.96];
+var orbPosX = [0.0, 0.0, 0.0, 0.0];
+var orbPosY = [0.0, 0.0, 0.0, 0.0];
+var orbPosZ = [0.0, 0.0, 0.0, 0.0];
+
+var probeDirX = [ 1.0, -1.0,  0.0,  0.0,  0.0,  0.0];
+var probeDirY = [ 0.0,  0.0,  1.0, -1.0,  0.0,  0.0];
+var probeDirZ = [ 0.0,  0.0,  0.0,  0.0,  1.0, -1.0];
+var probeUpX  = [ 0.0,  0.0,  0.0,  0.0,  0.0,  0.0];
+var probeUpY  = [-1.0, -1.0,  0.0,  0.0, -1.0, -1.0];
+var probeUpZ  = [ 0.0,  0.0,  1.0, -1.0,  0.0,  0.0];
+
+
+def writeModelMatrix(tx, ty, tz, sx, sy, sz)
+{
+    var m = MatrixScale(sx, sy, sz);
+    m = MatrixMultiply(m, MatrixTranslate(tx, ty, tz));
+    MatrixWriteBuffer(m, modelBuf);
+}
+
+
+def renderSky(view, proj, camX, camY, camZ)
+{
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    glDepthMask(false);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(skyProg);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, skyCubemap);
+    writeModelMatrix(camX, camY, camZ, sceneRadius * 18.0, sceneRadius * 18.0, sceneRadius * 18.0);
+    glUniformMatrix4fv(kModel, 1, false, modelBuf);
+    glUniformMatrix4fv(kView, 1, false, viewBuf);
+    glUniformMatrix4fv(kProj, 1, false, projBuf);
+    glUniform3f(kCameraPos, camX, camY, camZ);
+    glBindVertexArray(cubeVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glUseProgram(0);
+    glDepthMask(true);
+}
+
+
+def setupSceneProgram(view, proj, clipNx, clipNy, clipNz, clipW)
+{
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    glUseProgram(sceneProg);
+    glUniformMatrix4fv(sView, 1, false, viewBuf);
+    glUniformMatrix4fv(sProj, 1, false, projBuf);
+    glUniform4f(sClipPlane, clipNx, clipNy, clipNz, clipW);
+    glUniform3f(sLightDir, lightDirX, lightDirY, lightDirZ);
+    glUniform3f(sAmbient, ambientStrength, ambientStrength, ambientStrength + 0.02);
+    glUniform1f(sFloorExtent, floorHalfExtent);
+    glUniform2f(sFloorCenter, focusX, focusZ);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, floorTex);
+    glActiveTexture(GL_TEXTURE0);
+    glBindVertexArray(cubeVAO);
+}
+
+
+def teardownSceneProgram()
+{
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glUseProgram(0);
+}
+
+
+def drawSceneCube(tx, ty, tz, sx, sy, sz, tintR, tintG, tintB, useFloorTex)
+{
+    writeModelMatrix(tx, ty, tz, sx, sy, sz);
+    glUniformMatrix4fv(sModel, 1, false, modelBuf);
+    glUniform3f(sTint, tintR, tintG, tintB);
+    glUniform1i(sHasTex, 0);
+    glUniform1i(sUseFloorTex, useFloorTex ? 1 : 0);
+    glUniform1f(sOpacity, 1.0);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+}
+
+
+def drawSceneCarAt(carPosX, carPosY, carPosZ)
+{
+    if (!carLoaded || carModel == nil) return;
+
+    carModel.scale = carScale;
+    carModel.rotY = LAB_CAR_ROT_Y;
+    carModel.posX = carPosX - carModel.centerX * carScale;
+    carModel.posY = carPosY - carModel.minY * carScale + 0.02;
+    carModel.posZ = carPosZ - carModel.centerZ * carScale;
+
+    var carMat = carModel.makeModelMatrix();
+    MatrixWriteBuffer(carMat, modelBuf);
+    glUniformMatrix4fv(sModel, 1, false, modelBuf);
+
+    for (var pass = 0; pass < 2; pass += 1)
+    {
+        if (pass == 1)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(false);
+        }
+
+        for (var i = 0; i < len(carModel.surfaces); i += 1)
+        {
+            var surface = carModel.surfaces[i];
+            var texId = 0;
+            var tintR = 0.82; var tintG = 0.84; var tintB = 0.88;
+            var opacity = 1.0;
+            if (surface.materialIndex >= 0 && surface.materialIndex < len(carModel.materials))
+            {
+                var mat = carModel.materials[surface.materialIndex];
+                texId = mat.texId;
+                tintR = mat.diffuseR;
+                tintG = mat.diffuseG;
+                tintB = mat.diffuseB;
+                opacity = mat.opacity;
+            }
+
+            var isTransparent = opacity < 0.999;
+            if (pass == 0 && isTransparent) continue;
+            if (pass == 1 && !isTransparent) continue;
+
+            glUniform3f(sTint, tintR, tintG, tintB);
+            glUniform1i(sHasTex, texId > 0 ? 1 : 0);
+            glUniform1i(sUseFloorTex, 0);
+            glUniform1f(sOpacity, opacity);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, texId);
+            glActiveTexture(GL_TEXTURE0);
+            surface.draw();
+        }
+
+        if (pass == 1)
+        {
+            glDepthMask(true);
+            glDisable(GL_BLEND);
+        }
+    }
+
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+
+def renderReflectiveCarAt(carPosX, carPosY, carPosZ, camX, camY, camZ)
+{
+    if (!carLoaded || carModel == nil) return;
+
+    carModel.scale = carScale;
+    carModel.rotY = LAB_CAR_ROT_Y;
+    carModel.posX = carPosX - carModel.centerX * carScale;
+    carModel.posY = carPosY - carModel.minY * carScale + 0.02;
+    carModel.posZ = carPosZ - carModel.centerZ * carScale;
+
+    var carMat = carModel.makeModelMatrix();
+    MatrixWriteBuffer(carMat, modelBuf);
+    glUniformMatrix4fv(rModel, 1, false, modelBuf);
+
+    for (var pass = 0; pass < 2; pass += 1)
+    {
+        if (pass == 1)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(false);
+        }
+
+        for (var i = 0; i < len(carModel.surfaces); i += 1)
+        {
+            var surface = carModel.surfaces[i];
+            var texId = 0;
+            var tintR = 0.82; var tintG = 0.84; var tintB = 0.88;
+            var opacity = 1.0;
+            if (surface.materialIndex >= 0 && surface.materialIndex < len(carModel.materials))
+            {
+                var mat = carModel.materials[surface.materialIndex];
+                texId = mat.texId;
+                tintR = mat.diffuseR;
+                tintG = mat.diffuseG;
+                tintB = mat.diffuseB;
+                opacity = mat.opacity;
+            }
+
+            var isTransparent = opacity < 0.999;
+            if (pass == 0 && isTransparent) continue;
+            if (pass == 1 && !isTransparent) continue;
+
+            glUniform3f(rTint, tintR, tintG, tintB);
+            glUniform1i(rHasTex, texId > 0 ? 1 : 0);
+            glUniform1f(rOpacity, opacity);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, texId);
+            glActiveTexture(GL_TEXTURE0);
+            surface.draw();
+        }
+
+        if (pass == 1)
+        {
+            glDepthMask(true);
+            glDisable(GL_BLEND);
+        }
+    }
+
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+
+def renderOpaqueProbeScene(view, proj)
+{
+    renderSky(view, proj, subjectX, subjectY, subjectZ);
+    setupSceneProgram(view, proj, 0.0, 0.0, 0.0, 100000.0);
+    drawSceneCube(focusX, floorY - 0.04, focusZ, floorHalfExtent, 0.08, floorHalfExtent, 1.0, 1.0, 1.0, true);
+
+    if (showOrbs)
+    {
+        for (var i = 0; i < 4; i += 1)
+        {
+            drawSceneCube(
+                orbPosX[i], orbPosY[i], orbPosZ[i],
+                orbSize[i], orbSize[i], orbSize[i],
+                orbColorR[i], orbColorG[i], orbColorB[i],
+                false
+            );
+        }
+    }
+    teardownSceneProgram();
+}
+
+
+def renderReflectiveSubject(view, proj, camX, camY, camZ)
+{
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    glUseProgram(reflectProg);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, probe.cubemap);
+    glUniformMatrix4fv(rView, 1, false, viewBuf);
+    glUniformMatrix4fv(rProj, 1, false, projBuf);
+    glUniform3f(rTint, 0.90, 0.92, 0.98);
+    glUniform3f(rLightDir, lightDirX, lightDirY, lightDirZ);
+    glUniform3f(rAmbient, ambientStrength, ambientStrength, ambientStrength + 0.02);
+    glUniform3f(rCameraPos, camX, camY, camZ);
+    glUniform1f(rReflectivity, reflectivity);
+    glUniform1f(rFresnel, fresnelStrength);
+    glUniform1f(rSpecular, specularBoost);
+    glUniform1i(rHasTex, 0);
+    glUniform1f(rOpacity, 1.0);
+
+    if (subjectMode == "car" && carLoaded)
+    {
+        renderReflectiveCarAt(subjectX, floorY, subjectZ, camX, camY, camZ);
+        glBindVertexArray(cubeVAO);
+    }
+    else
+    {
+        glBindVertexArray(cubeVAO);
+        writeModelMatrix(subjectX, subjectY, subjectZ, subjectScale, subjectScale, subjectScale);
+        glUniformMatrix4fv(rModel, 1, false, modelBuf);
+        glUniform3f(rTint, 0.90, 0.92, 0.98);
+        glDrawArrays(GL_TRIANGLES, 0, 36);
+        glBindVertexArray(0);
+    }
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glUseProgram(0);
+}
+
+
+def renderPlanarScene(view, proj, camX, camY, camZ, clipNx, clipNy, clipNz, clipW)
+{
+    renderSky(view, proj, camX, camY, camZ);
+    setupSceneProgram(view, proj, clipNx, clipNy, clipNz, clipW);
+    if (showOrbs)
+    {
+        for (var i = 0; i < 4; i += 1)
+        {
+            drawSceneCube(
+                orbPosX[i], orbPosY[i], orbPosZ[i],
+                orbSize[i], orbSize[i], orbSize[i],
+                orbColorR[i], orbColorG[i], orbColorB[i],
+                false
+            );
+        }
+    }
+    teardownSceneProgram();
+    renderReflectiveSubject(view, proj, camX, camY, camZ);
+}
+
+
+def renderFloor(view, proj, reflectView, reflectProjMat, camX, camY, camZ)
+{
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    MatrixWriteBuffer(reflectView, reflectViewBuf);
+    MatrixWriteBuffer(reflectProjMat, reflectProjBuf);
+
+    glUseProgram(floorProg);
+    glUniformMatrix4fv(fView, 1, false, viewBuf);
+    glUniformMatrix4fv(fProj, 1, false, projBuf);
+    glUniformMatrix4fv(fReflectView, 1, false, reflectViewBuf);
+    glUniformMatrix4fv(fReflectProj, 1, false, reflectProjBuf);
+    glUniform3f(fCameraPos, camX, camY, camZ);
+    glUniform2f(fFloorCenter, focusX, focusZ);
+    glUniform1f(fFloorUVScale, LAB_FLOOR_UV_SCALE);
+    glUniform1f(fReflectivity, floorReflectivity);
+    glUniform1f(fFresnel, floorFresnel);
+    glUniform1f(fFloorDarken, floorDarken);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, reflectionRt.color);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, floorTex);
+    glActiveTexture(GL_TEXTURE0);
+
+    writeModelMatrix(focusX, floorY - 0.04, focusZ, floorHalfExtent, 0.08, floorHalfExtent);
+    glUniformMatrix4fv(fModel, 1, false, modelBuf);
+    glBindVertexArray(cubeVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glBindVertexArray(0);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+}
+
+
+def captureProbe()
+{
+    if (freezeProbe) return;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, probe.fbo);
+    glViewport(0, 0, probe.size, probe.size);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, probe.depthRbo);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+
+    for (var i = 0; i < 6; i += 1)
+    {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, probe.cubemap, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        var view = MatrixLookAt(
+            Vector3(subjectX, subjectY, subjectZ),
+            Vector3(subjectX + probeDirX[i], subjectY + probeDirY[i], subjectZ + probeDirZ[i]),
+            Vector3(probeUpX[i], probeUpY[i], probeUpZ[i])
+        );
+        renderOpaqueProbeScene(view, probeProj);
+
+        glBindTexture(GL_TEXTURE_2D, probe.debugFaces[i]);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, probe.size, probe.size);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+
+def capturePlanarReflection(view, reflectView, reflectCamX, reflectCamY, reflectCamZ)
+{
+    if (freezePlanar) return;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, reflectionRt.fbo);
+    glViewport(0, 0, reflectionRt.width, reflectionRt.height);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    var clipNx = 0.0;
+    var clipNy = 1.0;
+    var clipNz = 0.0;
+    var clipW = -floorY + 0.05;
+    var renderView = reflectView;
+    var renderCamX = reflectCamX;
+    var renderCamY = reflectCamY;
+    var renderCamZ = reflectCamZ;
+
+    if (planarDebugMode == 1)
+    {
+        renderView = view;
+        renderCamX = eyeX;
+        renderCamY = eyeY;
+        renderCamZ = eyeZ;
+    }
+    elif (planarDebugMode == 2)
+    {
+        clipW = 100000.0;
+    }
+
+    renderPlanarScene(renderView, planarProj, renderCamX, renderCamY, renderCamZ, clipNx, clipNy, clipNz, clipW);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var dirX = cos(pitchRad) * cos(yawRad);
+    var dirY = sin(pitchRad);
+    var dirZ = cos(pitchRad) * sin(yawRad);
+    var dirLen = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+    if (dirLen > 0.0001)
+    {
+        dirX = dirX / dirLen;
+        dirY = dirY / dirLen;
+        dirZ = dirZ / dirLen;
+    }
+
+    var rightX = dirZ;
+    var rightZ = -dirX;
+    var rightLen = sqrt(rightX * rightX + rightZ * rightZ);
+    if (rightLen > 0.0001)
+    {
+        rightX = rightX / rightLen;
+        rightZ = rightZ / rightLen;
+    }
+
+    if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
+    {
+        var panScale = max(sceneRadius * 0.0028, 0.008) * camDistance;
+        focusX = focusX - rightX * mdx * panScale;
+        focusZ = focusZ - rightZ * mdx * panScale;
+        focusY = focusY + mdy * panScale;
+        subjectX = focusX;
+        subjectZ = focusZ;
+    }
+
+    camDistance = camDistance - GetMouseWheelMove() * max(sceneRadius * 0.12, 0.6);
+    if (camDistance < sceneRadius * 0.65) camDistance = sceneRadius * 0.65;
+    if (camDistance > sceneRadius * 5.2) camDistance = sceneRadius * 5.2;
+
+    if (IsKeyPressed(KEY_O)) showOrbs = !showOrbs;
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_P)) freezePlanar = !freezePlanar;
+    if (IsKeyPressed(KEY_F2)) freezeProbe = !freezeProbe;
+    if (IsKeyPressed(KEY_F1))
+    {
+        planarDebugMode += 1;
+        if (planarDebugMode > 2) planarDebugMode = 0;
+    }
+    if (IsKeyPressed(KEY_R))
+    {
+        focusX = 0.0;
+        focusY = 0.0;
+        focusZ = 0.0;
+        subjectX = 0.0;
+        subjectZ = 0.0;
+        yaw = -120.0;
+        pitch = -14.0;
+        camDistance = 18.0;
+    }
+
+    eyeX = focusX + dirX * camDistance;
+    eyeY = focusY + focusLift + dirY * camDistance;
+    eyeZ = focusZ + dirZ * camDistance;
+
+    var timeSec = GetTime();
+    for (var i = 0; i < 4; i += 1)
+    {
+        var ang = timeSec * orbitSpeed * (0.8 + i * 0.11) + orbPhase[i];
+        orbPosX[i] = focusX + cos(ang) * orbRadius[i];
+        orbPosY[i] = orbHeight[i] + sin(ang * 1.7 + i) * orbSize[i] * 0.18;
+        orbPosZ[i] = focusZ + sin(ang) * orbRadius[i];
+    }
+
+    var view = MatrixLookAt(Vector3(eyeX, eyeY, eyeZ), Vector3(focusX, focusY + focusLift, focusZ), Vector3(0.0, 1.0, 0.0));
+    var screenW = GetScreenWidth();
+    var screenH = max(GetScreenHeight(), 1);
+    if (cachedScreenW != screenW || cachedScreenH != screenH)
+    {
+        screenProj = MatrixPerspective(LAB_CAMERA_FOV_RAD, screenW / screenH, LAB_CAMERA_NEAR, LAB_CAMERA_FAR);
+        cachedScreenW = screenW;
+        cachedScreenH = screenH;
+    }
+
+    reflectionRt = resizeSceneTarget(reflectionRt, screenW, screenH);
+    if (cachedPlanarW != reflectionRt.width || cachedPlanarH != reflectionRt.height)
+    {
+        planarProj = MatrixPerspective(LAB_CAMERA_FOV_RAD, reflectionRt.width / max(reflectionRt.height, 1), LAB_CAMERA_NEAR, LAB_CAMERA_FAR);
+        cachedPlanarW = reflectionRt.width;
+        cachedPlanarH = reflectionRt.height;
+    }
+
+    var reflectedEyeY = floorY * 2.0 - eyeY;
+    var reflectedTargetY = floorY * 2.0 - (focusY + focusLift);
+    var reflectView = MatrixLookAt(
+        Vector3(eyeX, reflectedEyeY, eyeZ),
+        Vector3(focusX, reflectedTargetY, focusZ),
+        Vector3(0.0, 1.0, 0.0)
+    );
+    var reflectCamX = eyeX;
+    var reflectCamY = reflectedEyeY;
+    var reflectCamZ = eyeZ;
+
+
+    glEnable(GL_CULL_FACE);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glCullFace(GL_BACK);
+    
+
+    captureProbe();
+    capturePlanarReflection(view, reflectView, reflectCamX, reflectCamY, reflectCamZ);
+
+    BeginDrawing();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, screenW, screenH);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    renderSky(view, screenProj, eyeX, eyeY, eyeZ);
+    renderFloor(view, screenProj, planarDebugMode == 1 ? view : reflectView, planarProj, eyeX, eyeY, eyeZ);
+    setupSceneProgram(view, screenProj, 0.0, 0.0, 0.0, 100000.0);
+    if (showOrbs)
+    {
+        for (var i = 0; i < 4; i += 1)
+        {
+            drawSceneCube(
+                orbPosX[i], orbPosY[i], orbPosZ[i],
+                orbSize[i], orbSize[i], orbSize[i],
+                orbColorR[i], orbColorG[i], orbColorB[i],
+                false
+            );
+        }
+    }
+    teardownSceneProgram();
+    renderReflectiveSubject(view, screenProj, eyeX, eyeY, eyeZ);
+
+    prepareOverlay2D(screenW, screenH);
+    DrawRectangle(18, 18, 1180, 122, hudBg);
+    DrawText("Reflection Combo Lab  RMB orbit | MMB pan | Wheel zoom | O orbit cubes | P freeze planar | F2 freeze probe | F1 planar debug", 30, 30, 22, hudFg);
+    DrawText("Car/cube uses env probe cubemap while the floor uses a mirrored-camera planar render target.", 30, 62, 18, hudInfo);
+    var dbgLabel = "normal";
+    if (planarDebugMode == 1) dbgLabel = "main-view";
+    elif (planarDebugMode == 2) dbgLabel = "no-clip";
+    DrawText("Subject: " + subjectMode + "  Planar: " + dbgLabel + "  FPS: " + str(GetFPS()), 30, 92, 18, hudOk);
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = ImGui.Begin("Reflection Combo Lab");
+        if (panel != nil && panel)
+        {
+            ImGui.Text("This lab combines env probe reflections on the subject with planar reflections on the floor.");
+            ImGui.Separator();
+
+            var (changedReflect, nextReflect) = ImGui.SliderFloat("Car reflectivity", reflectivity, 0.0, 1.0, "%.2f");
+            if (changedReflect) reflectivity = nextReflect;
+
+            var (changedFresnel, nextFresnel) = ImGui.SliderFloat("Car fresnel", fresnelStrength, 0.0, 2.0, "%.2f");
+            if (changedFresnel) fresnelStrength = nextFresnel;
+
+            var (changedFloorReflect, nextFloorReflect) = ImGui.SliderFloat("Floor reflectivity", floorReflectivity, 0.0, 1.0, "%.2f");
+            if (changedFloorReflect) floorReflectivity = nextFloorReflect;
+
+            var (changedFloorFresnel, nextFloorFresnel) = ImGui.SliderFloat("Floor fresnel", floorFresnel, 0.0, 1.5, "%.2f");
+            if (changedFloorFresnel) floorFresnel = nextFloorFresnel;
+
+            var (changedFloorDarken, nextFloorDarken) = ImGui.SliderFloat("Floor darken", floorDarken, 0.08, 1.0, "%.2f");
+            if (changedFloorDarken) floorDarken = nextFloorDarken;
+
+            var (changedAmbient, nextAmbient) = ImGui.SliderFloat("Ambient", ambientStrength, 0.02, 0.65, "%.2f");
+            if (changedAmbient) ambientStrength = nextAmbient;
+
+            var (changedSpec, nextSpec) = ImGui.SliderFloat("Specular", specularBoost, 0.0, 1.0, "%.2f");
+            if (changedSpec) specularBoost = nextSpec;
+
+            var (changedOrbit, nextOrbit) = ImGui.SliderFloat("Orbit speed", orbitSpeed, 0.0, 2.4, "%.2f");
+            if (changedOrbit) orbitSpeed = nextOrbit;
+
+            var (changedFreezePlanar, nextFreezePlanar) = ImGui.Checkbox("Freeze planar RT", freezePlanar);
+            if (changedFreezePlanar) freezePlanar = nextFreezePlanar;
+
+            var (changedFreezeProbe, nextFreezeProbe) = ImGui.Checkbox("Freeze probe", freezeProbe);
+            if (changedFreezeProbe) freezeProbe = nextFreezeProbe;
+
+            var (changedOrbs, nextOrbs) = ImGui.Checkbox("Show orbit cubes", showOrbs);
+            if (changedOrbs) showOrbs = nextOrbs;
+
+            var (changedMode, nextMode) = ImGui.Combo("Planar debug", planarDebugMode, "normal", "main-view", "no-clip");
+            if (changedMode) planarDebugMode = nextMode;
+
+            ImGui.Separator();
+            ImGui.Text("Planar reflection RT");
+            ImGui.ImageButton("##planar_rt", reflectionRt.color, 320, 180, 0.0, 1.0, 1.0, 0.0);
+            ImGui.Text("Probe faces");
+            for (var i = 0; i < 6; i += 1)
+            {
+                if (i == 3) ImGui.NewLine();
+                ImGui.ImageButton("##probe_face_" + str(i), probe.debugFaces[i], 88, 88, 0.0, 1.0, 1.0, 0.0);
+                if (i != 2 && i != 5) ImGui.SameLine();
+            }
+        }
+        ImGui.End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+probe.destroy();
+reflectionRt.destroy();
+if (carModel != nil) carModel.destroy();
+if (floorTex > 0) glDeleteTextures(floorTex);
+if (skyCubemap > 0) glDeleteTextures(skyCubemap);
+destroyTextureList(skyDebugFaces);
+glDeleteProgram(sceneProg);
+glDeleteProgram(reflectProg);
+glDeleteProgram(floorProg);
+glDeleteProgram(skyProg);
+glDeleteBuffers(cubeVBO);
+glDeleteVertexArrays(cubeVAO);
+ShutdownImGui();
+CloseWindow();

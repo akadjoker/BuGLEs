@@ -420,7 +420,7 @@ Nested function names are internally mangled as `outer$inner`.
 myFunction(1, 2, 3);
 ```
 
-Maximum 255 arguments.
+Maximum 65535 arguments.
 
 ---
 
@@ -1460,6 +1460,5 @@ primary        → INT | FLOAT | STRING | FSTRING | "true" | "false" | "nil"
                | mathFunc | "clock()" | "len(" expr ")" | "free(" expr ")"
                | "type" IDENT | "proc(" expr ")" | "get_id(" expr ")"
 ```
-
 
 

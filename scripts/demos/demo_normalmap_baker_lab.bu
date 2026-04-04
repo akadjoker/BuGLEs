@@ -1,0 +1,396 @@
+import path;
+using path;
+import OpenGl;
+using OpenGl;
+import ImGui;
+using ImGui;
+import STB;
+using STB;
+
+include "../libs/lib_image_normalmap.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def loadTexture2D(filePath, flipY, withMipmaps, repeatMode)
+{
+    if (filePath == nil || !path.exists(filePath)) return (0, 0, 0);
+
+    stbi_set_flip_vertically_on_load(flipY ? 1 : 0);
+    var (w, h, ch, pixels) = stbi_load(filePath, 4);
+    if (pixels == nil) return (0, 0, 0);
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (withMipmaps) glGenerateMipmap(GL_TEXTURE_2D);
+    if (withMipmaps) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    else glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return (tex, w, h);
+}
+
+
+def uploadTexture2D(texId, width, height, pixels, withMipmaps)
+{
+    glBindTexture(GL_TEXTURE_2D, texId);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (withMipmaps) glGenerateMipmap(GL_TEXTURE_2D);
+    if (withMipmaps) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    else glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+
+def loadPixelsRGBA(filePath)
+{
+    if (filePath == nil || !path.exists(filePath)) return (0, 0, nil);
+    stbi_set_flip_vertically_on_load(0);
+    var (w, h, ch, pixels) = stbi_load(filePath, 4);
+    if (pixels == nil) return (0, 0, nil);
+    return (w, h, pixels);
+}
+
+
+var sampleNames = [
+    "Bricks A",
+    "Arch",
+    "Floor A",
+    "Column A",
+    "Ceiling A",
+    "Curtain"
+];
+
+var samplePaths = [
+    resolveAssetPath("assets/sponza/textures/spnza_bricks_a_diff.tga", "../assets/sponza/textures/spnza_bricks_a_diff.tga", "../../assets/sponza/textures/spnza_bricks_a_diff.tga"),
+    resolveAssetPath("assets/sponza/textures/sponza_arch_diff.tga", "../assets/sponza/textures/sponza_arch_diff.tga", "../../assets/sponza/textures/sponza_arch_diff.tga"),
+    resolveAssetPath("assets/sponza/textures/sponza_floor_a_diff.tga", "../assets/sponza/textures/sponza_floor_a_diff.tga", "../../assets/sponza/textures/sponza_floor_a_diff.tga"),
+    resolveAssetPath("assets/sponza/textures/sponza_column_a_diff.tga", "../assets/sponza/textures/sponza_column_a_diff.tga", "../../assets/sponza/textures/sponza_column_a_diff.tga"),
+    resolveAssetPath("assets/sponza/textures/sponza_ceiling_a_diff.tga", "../assets/sponza/textures/sponza_ceiling_a_diff.tga", "../../assets/sponza/textures/sponza_ceiling_a_diff.tga"),
+    resolveAssetPath("assets/sponza/textures/sponza_curtain_diff.tga", "../assets/sponza/textures/sponza_curtain_diff.tga", "../../assets/sponza/textures/sponza_curtain_diff.tga")
+];
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1440, 920, "BuGL - Normal Map Baker Lab");
+SetTargetFPS(60);
+
+if (!InitImGui())
+{
+    CloseWindow();
+    return;
+}
+
+var sourceIndex = 0;
+var sourceTex = 0;
+var genTex = 0;
+var srcW = 0;
+var srcH = 0;
+var strength = 4.0;
+var wrapEdges = false;
+var showUi = true;
+var bakeStage = 0;
+var bakeStatus = "Waiting";
+var bakeProgress = 0.0;
+var bakeRowsDone = 0;
+var bakeRowsPerStep = 24;
+var bakeFailed = false;
+var bakePixels = nil;
+var bakeOutPixels = nil;
+var dirty = false;
+
+def beginBake()
+{
+    dirty = false;
+    bakeFailed = false;
+    bakeStage = 1;
+    bakeStatus = "Loading source texture...";
+    bakeProgress = 0.0;
+    bakeRowsDone = 0;
+    bakePixels = nil;
+    bakeOutPixels = nil;
+
+    if (sourceTex > 0) glDeleteTextures(sourceTex);
+    if (genTex > 0) glDeleteTextures(genTex);
+    sourceTex = 0;
+    genTex = 0;
+    srcW = 0;
+    srcH = 0;
+}
+
+
+def processNormalRows(width, height, channels, pixels, outPixels, y0, y1, strengthValue, wrapValue)
+{
+    for (var y = y0; y < y1; y += 1)
+    {
+        var rowBase = y * width * 4;
+        for (var x = 0; x < width; x += 1)
+        {
+            var tl = imgNmSampleHeightBytes(pixels, width, height, channels, x - 1, y - 1, wrapValue);
+            var tc = imgNmSampleHeightBytes(pixels, width, height, channels, x + 0, y - 1, wrapValue);
+            var tr = imgNmSampleHeightBytes(pixels, width, height, channels, x + 1, y - 1, wrapValue);
+            var ml = imgNmSampleHeightBytes(pixels, width, height, channels, x - 1, y + 0, wrapValue);
+            var mr = imgNmSampleHeightBytes(pixels, width, height, channels, x + 1, y + 0, wrapValue);
+            var bl = imgNmSampleHeightBytes(pixels, width, height, channels, x - 1, y + 1, wrapValue);
+            var bc = imgNmSampleHeightBytes(pixels, width, height, channels, x + 0, y + 1, wrapValue);
+            var br = imgNmSampleHeightBytes(pixels, width, height, channels, x + 1, y + 1, wrapValue);
+
+            var dx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+            var dy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+
+            var nx = -dx * strengthValue;
+            var ny = -dy * strengthValue;
+            var nz = 1.0;
+            var nl = sqrt(nx * nx + ny * ny + nz * nz);
+            if (nl < 0.00001) nl = 1.0;
+            nx = nx / nl;
+            ny = ny / nl;
+            nz = nz / nl;
+
+            var p = rowBase + x * 4;
+            outPixels[p + 0] = int((nx * 0.5 + 0.5) * 255.0);
+            outPixels[p + 1] = int((ny * 0.5 + 0.5) * 255.0);
+            outPixels[p + 2] = int((nz * 0.5 + 0.5) * 255.0);
+            outPixels[p + 3] = 255;
+        }
+    }
+}
+
+
+def fillNeutralNormalMap(width, height, outPixels)
+{
+    var total = width * height;
+    for (var i = 0; i < total; i += 1)
+    {
+        var p = i * 4;
+        outPixels[p + 0] = 128;
+        outPixels[p + 1] = 128;
+        outPixels[p + 2] = 255;
+        outPixels[p + 3] = 255;
+    }
+}
+
+
+def updateBake()
+{
+    if (bakeStage == 0 || bakeStage == 6 || bakeStage == -1) return;
+    if (sourceIndex < 0 || sourceIndex >= len(samplePaths))
+    {
+        bakeStage = -1;
+        bakeFailed = true;
+        bakeStatus = "Invalid source index";
+        return;
+    }
+
+    var sourcePath = samplePaths[sourceIndex];
+    if (sourcePath == nil)
+    {
+        bakeStage = -1;
+        bakeFailed = true;
+        bakeStatus = "Texture path not found";
+        return;
+    }
+
+    if (bakeStage == 1)
+    {
+        var (loadedTex, loadedW, loadedH) = loadTexture2D(sourcePath, false, true, false);
+        sourceTex = loadedTex;
+        srcW = loadedW;
+        srcH = loadedH;
+        if (sourceTex <= 0)
+        {
+            bakeStage = -1;
+            bakeFailed = true;
+            bakeStatus = "Failed to upload source texture";
+            return;
+        }
+        bakeStage = 2;
+        bakeStatus = "Loading pixels...";
+        bakeProgress = 0.08;
+        return;
+    }
+
+    if (bakeStage == 2)
+    {
+        var (pw, ph, pixels) = loadPixelsRGBA(sourcePath);
+        if (pixels == nil || pw <= 0 || ph <= 0)
+        {
+            bakeStage = -1;
+            bakeFailed = true;
+            bakeStatus = "Failed to load source pixels";
+            return;
+        }
+        bakePixels = pixels;
+        srcW = pw;
+        srcH = ph;
+        bakeOutPixels = @(pw * ph * 4, TYPE_UINT8);
+        fillNeutralNormalMap(srcW, srcH, bakeOutPixels);
+        genTex = glGenTextures();
+        uploadTexture2D(genTex, srcW, srcH, bakeOutPixels, false);
+        bakeRowsDone = 0;
+        bakeStage = 3;
+        bakeStatus = "Generating normal map...";
+        bakeProgress = 0.12;
+        return;
+    }
+
+    if (bakeStage == 3)
+    {
+        var endRow = bakeRowsDone + bakeRowsPerStep;
+        if (endRow > srcH) endRow = srcH;
+        processNormalRows(srcW, srcH, 4, bakePixels, bakeOutPixels, bakeRowsDone, endRow, strength, wrapEdges);
+        bakeRowsDone = endRow;
+        uploadTexture2D(genTex, srcW, srcH, bakeOutPixels, false);
+
+        if (srcH > 0) bakeProgress = 0.12 + 0.78 * (bakeRowsDone / srcH);
+        else bakeProgress = 0.90;
+
+        bakeStatus = "Generating normal map... " + str(bakeRowsDone) + "/" + str(srcH) + " rows";
+        if (bakeRowsDone >= srcH)
+        {
+            bakeStage = 4;
+        }
+        return;
+    }
+
+    if (bakeStage == 4)
+    {
+        uploadTexture2D(genTex, srcW, srcH, bakeOutPixels, true);
+        bakeStage = 6;
+        bakeStatus = "Ready";
+        bakeProgress = 1.0;
+        bakePixels = nil;
+        bakeOutPixels = nil;
+        return;
+    }
+}
+
+
+beginBake();
+
+while (!WindowShouldClose())
+{
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+
+    if (dirty)
+    {
+        beginBake();
+    }
+
+    updateBake();
+
+    BeginDrawing();
+    ClearBackground(Color(28, 34, 42, 255));
+
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDepthMask(GL_FALSE);
+    
+    var isLoading = (bakeStage != 6 && !bakeFailed);
+    if (isLoading)
+    {
+        var sw = GetScreenWidth();
+        var sh = GetScreenHeight();
+        var panelW = 760;
+        var panelH = 180;
+        var px = int((sw - panelW) * 0.5);
+        var py = int((sh - panelH) * 0.5);
+
+        DrawRectangle(px, py, panelW, panelH, Color(0, 0, 0, 190));
+        DrawRectangle(px + 24, py + 88, panelW - 48, 24, Color(20, 28, 36, 220));
+        DrawRectangle(px + 26, py + 90, int((panelW - 52) * bakeProgress), 20, Color(70, 170, 255, 255));
+        DrawText("Preparing normal map preview...", px + 24, py + 24, 28, Color(245, 245, 245, 255));
+        DrawText(bakeStatus, px + 24, py + 58, 20, Color(190, 220, 255, 255));
+        DrawText("Source: " + sampleNames[sourceIndex], px + 24, py + 126, 18, Color(180, 255, 200, 255));
+        DrawText(str(int(bakeProgress * 100.0)) + "%", px + panelW - 92, py + 58, 22, Color(255, 255, 255, 255));
+    }
+    else
+    {
+        DrawRectangle(18, 18, 1180, 116, Color(0, 0, 0, 152));
+        DrawText("Normal Map Baker Lab  TAB UI", 30, 30, 24, Color(245, 245, 245, 255));
+        DrawText("Generates a normal map in memory from a Sponza diffuse texture using Sobel-like luminance gradients.", 30, 62, 18, Color(190, 220, 255, 255));
+        DrawText("No files are written. Source and generated textures are rebuilt on demand. FPS: " + str(GetFPS()), 30, 90, 18, Color(180, 255, 200, 255));
+    }
+
+    if (bakeFailed)
+    {
+        DrawText("Bake failed: " + bakeStatus, 30, 172, 20, Color(255, 130, 130, 255));
+    }
+
+    if (showUi && !isLoading)
+    {
+        BeginImGui();
+        var panel = ImGui.Begin("Normal Map Baker");
+        if (panel != nil && panel)
+        {
+            var (changedSource, nextSource) = ImGui.Combo("Source", sourceIndex,
+                sampleNames[0], sampleNames[1], sampleNames[2], sampleNames[3], sampleNames[4], sampleNames[5]);
+            if (changedSource && nextSource != sourceIndex)
+            {
+                sourceIndex = nextSource;
+                dirty = true;
+            }
+
+            var (changedStrength, nextStrength) = ImGui.SliderFloat("Strength", strength, 0.1, 24.0, "%.2f");
+            if (changedStrength)
+            {
+                strength = nextStrength;
+                dirty = true;
+            }
+
+            var (changedWrap, nextWrap) = ImGui.Checkbox("Wrap edges", wrapEdges);
+            if (changedWrap)
+            {
+                wrapEdges = nextWrap;
+                dirty = true;
+            }
+
+            var (changedRows, nextRows) = ImGui.SliderInt("Rows per step", bakeRowsPerStep, 4, 128);
+            if (changedRows)
+            {
+                bakeRowsPerStep = nextRows;
+            }
+
+            if (ImGui.Button("Rebuild"))
+            {
+                dirty = true;
+            }
+
+            ImGui.Separator();
+            ImGui.Text("Status: " + bakeStatus);
+            ImGui.Text("Progress: " + str(int(bakeProgress * 100.0)) + "%");
+            ImGui.Separator();
+            ImGui.Text("Source / Generated");
+            if (sourceTex > 0) ImGui.ImageButton("##source_tex", sourceTex, 384, 384, 0.0, 1.0, 1.0, 0.0);
+            ImGui.SameLine();
+            if (genTex > 0) ImGui.ImageButton("##generated_tex", genTex, 384, 384, 0.0, 1.0, 1.0, 0.0);
+            else ImGui.Button("Processing...", 384, 384);
+            ImGui.Text("Size: " + str(srcW) + "x" + str(srcH));
+            ImGui.Text("Source path: " + samplePaths[sourceIndex]);
+        }
+        ImGui.End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+if (sourceTex > 0) glDeleteTextures(sourceTex);
+if (genTex > 0) glDeleteTextures(genTex);
+ShutdownImGui();
+CloseWindow();

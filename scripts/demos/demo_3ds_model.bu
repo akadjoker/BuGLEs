@@ -1,0 +1,317 @@
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import GLM;
+using GLM;
+import RLGL;
+using RLGL;
+
+include "../libs/lib_3ds.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("3DS shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("3DS shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+var modelPath = resolveAssetPath(
+    "assets/3ds/bmw/model.3ds","",""
+    
+);
+
+if (modelPath == nil)
+{
+    print("3DS asset not found");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1600, 900, "BuGL - 3DS Model");
+SetTargetFPS(60);
+
+var cam = Camera3D();
+SetCamera3DPosition(cam, 0.0, 5.0, 10.0);
+SetCamera3DTarget(cam, 0.0, 1.0, 0.0);
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 60.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var eyeX = 0.0;
+var eyeY = 6.0;
+var eyeZ = 12.0;
+var yaw = -90.0;
+var pitch = -18.0;
+
+var mesh = ThreeDSModel();
+if (!mesh.load(modelPath))
+{
+    print("Failed to load 3DS: " + modelPath);
+    CloseWindow();
+    return;
+}
+
+mesh.scale = 1.0;
+mesh.posX = 0.0;
+mesh.posY = 0.0;
+mesh.posZ = 0.0;
+
+var focusX = mesh.centerX;
+var focusY = mesh.centerY;
+var focusZ = mesh.centerZ;
+var sceneRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (sceneRadius < 1.0) sceneRadius = 10.0;
+eyeX = focusX + sceneRadius * 1.9;
+eyeY = focusY + sceneRadius * 0.75;
+eyeZ = focusZ + sceneRadius * 1.9;
+yaw = -135.0;
+pitch = -15.0;
+SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+SetCamera3DTarget(cam, focusX, focusY, focusZ);
+
+var vsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vNormal;
+out vec3 vWorldPos;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = mat3(uModel) * aNormal;
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var fsSrc = @"
+#version 330 core
+in vec3 vNormal;
+in vec3 vWorldPos;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uTex;
+uniform vec3 uLightDir;
+uniform vec3 uAmbient;
+uniform vec3 uTint;
+uniform int uHasTex;
+
+void main()
+{
+    vec3 texel = texture(uTex, vUV).rgb;
+    vec3 albedo = (uHasTex != 0) ? texel : uTint;
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-uLightDir);
+    float ndl = max(dot(N, L), 0.0);
+    vec3 color = albedo * (uAmbient + vec3(ndl));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var prog = linkProgram(vsSrc, fsSrc);
+if (prog <= 0)
+{
+    CloseWindow();
+    return;
+}
+
+var uModel = glGetUniformLocation(prog, "uModel");
+var uView = glGetUniformLocation(prog, "uView");
+var uProj = glGetUniformLocation(prog, "uProj");
+var uTex = glGetUniformLocation(prog, "uTex");
+var uLightDir = glGetUniformLocation(prog, "uLightDir");
+var uAmbient = glGetUniformLocation(prog, "uAmbient");
+var uTint = glGetUniformLocation(prog, "uTint");
+var uHasTex = glGetUniformLocation(prog, "uHasTex");
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+
+var showGrid = true;
+var uiBg = Color(0, 0, 0, 160);
+var uiFg = Color(240, 240, 240, 255);
+var uiOk = Color(180, 255, 180, 255);
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    if (IsKeyPressed(KEY_G)) showGrid = !showGrid;
+    if (IsKeyPressed(KEY_R))
+    {
+        eyeX = focusX + sceneRadius * 1.9;
+        eyeY = focusY + sceneRadius * 0.75;
+        eyeZ = focusZ + sceneRadius * 1.9;
+        yaw = -135.0;
+        pitch = -15.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx = fx / fl;
+        fy = fy / fl;
+        fz = fz / fl;
+    }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001)
+    {
+        rx = rx / rl;
+        rz = rz / rl;
+    }
+
+    var moveSpeed = max(sceneRadius * 0.35, 4.0);
+    if (IsKeyDown(KEY_LEFT_SHIFT)) moveSpeed = moveSpeed * 3.0;
+    var step = moveSpeed * dt;
+
+    if (IsKeyDown(KEY_W)) { eyeX += fx * step; eyeY += fy * step; eyeZ += fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * step; eyeY -= fy * step; eyeZ -= fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * step; eyeZ -= rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * step; eyeZ += rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += step;
+    if (IsKeyDown(KEY_C)) eyeY -= step;
+
+    SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+    SetCamera3DTarget(cam, eyeX + fx, eyeY + fy, eyeZ + fz);
+
+    BeginDrawing();
+    ClearBackground(Color(28, 34, 42, 255));
+    BeginMode3D(cam);
+
+    if (showGrid)
+    {
+        var gridStep = max(sceneRadius / 20.0, 1.0);
+        DrawGrid(40, gridStep);
+    }
+
+    var modelMat = mesh.makeModelMatrix();
+    var view = rlGetMatrixModelview();
+    var aspect = GetScreenWidth() / max(GetScreenHeight(), 1);
+    var camNear = max(sceneRadius * 0.001, 0.05);
+    var camFar = max(sceneRadius * 12.0, 5000.0);
+    var proj = MatrixPerspective(60.0 * PI / 180.0, aspect, camNear, camFar);
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    glUseProgram(prog);
+    glUniformMatrix4fv(uModel, 1, false, modelBuf);
+    glUniformMatrix4fv(uView, 1, false, viewBuf);
+    glUniformMatrix4fv(uProj, 1, false, projBuf);
+    glUniform1i(uTex, 0);
+    glUniform3f(uLightDir, -0.5, -1.0, -0.25);
+    glUniform3f(uAmbient, 0.28, 0.30, 0.34);
+
+    for (var i = 0; i < len(mesh.surfaces); i += 1)
+    {
+        var surface = mesh.surfaces[i];
+        var texId = 0;
+        var tintR = 0.82; var tintG = 0.84; var tintB = 0.88;
+        if (surface.materialIndex >= 0 && surface.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[surface.materialIndex];
+            texId = mat.texId;
+            tintR = mat.diffuseR;
+            tintG = mat.diffuseG;
+            tintB = mat.diffuseB;
+        }
+
+        glUniform3f(uTint, tintR, tintG, tintB);
+        glUniform1i(uHasTex, texId > 0 ? 1 : 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        surface.draw();
+    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+
+    EndMode3D();
+
+    DrawRectangle(18, 18, 590, 124, uiBg);
+    DrawText("3DS Demo  RMB look | WASD move | SPACE/C up-down | SHIFT faster | G grid | R reset", 30, 30, 20, uiFg);
+    DrawText("Objects: " + str(mesh.objectCount()) + "  Surfaces: " + str(mesh.surfaceCount()) + "  Materials: " + str(mesh.materialCount()), 30, 62, 18, uiOk);
+    DrawText("Version: " + str(mesh.version) + "  Keyframe data: " + (mesh.hasKeyframeData ? "yes" : "no") + "  FPS: " + str(GetFPS()), 30, 88, 18, uiFg);
+    DrawText("Bounds: " + str(int(mesh.sizeX)) + " x " + str(int(mesh.sizeY)) + " x " + str(int(mesh.sizeZ)), 30, 114, 18, uiFg);
+
+    EndDrawing();
+}
+
+glDeleteProgram(prog);
+CloseWindow();

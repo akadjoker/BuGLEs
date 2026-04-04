@@ -426,12 +426,13 @@ void Compiler::fstringExpression(bool canAssign)
     }
     else if (segmentCount > 1)
     {
-        if (segmentCount > 255)
+        if (segmentCount > 65535)
         {
-            error("Too many segments in f-string (max 255)");
+            error("Too many segments in f-string (max 65535)");
             return;
         }
-        emitBytes(OP_CONCAT_N, (uint8_t)segmentCount);
+        emitByte(OP_CONCAT_N);
+        emitShort((uint16)segmentCount);
     }
 }
 
@@ -531,8 +532,9 @@ void Compiler::binary(bool canAssign)
         && peek(0).type == TOKEN_GREATER
         && peek(1).type == TOKEN_LPAREN)
     {
-        uint8 argCount = genericArgumentList();
-        emitBytes(OP_CALL, argCount);
+        uint16 argCount = genericArgumentList();
+        emitByte(OP_CALL);
+        emitShort(argCount);
         return;
     }
 

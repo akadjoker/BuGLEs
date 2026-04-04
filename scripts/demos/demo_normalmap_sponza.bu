@@ -1,0 +1,556 @@
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import ImGui;
+using ImGui;
+import STB;
+using STB;
+
+include "../libs/lib_meshbin.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("NormalMap Sponza shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("NormalMap Sponza shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def loadTexture2D(filePath, flipY, withMipmaps, repeatMode)
+{
+    if (filePath == nil || !path.exists(filePath)) return 0;
+
+    stbi_set_flip_vertically_on_load(flipY ? 1 : 0);
+    var (w, h, ch, pixels) = stbi_load(filePath, 4);
+    if (pixels == nil) return 0;
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (withMipmaps) glGenerateMipmap(GL_TEXTURE_2D);
+    if (withMipmaps) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    else glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def stringEndsWith(s, suffix)
+{
+    if (len(suffix) > len(s)) return false;
+    var start = len(s) - len(suffix);
+    for (var i = 0; i < len(suffix); i += 1)
+    {
+        if (s[start + i] != suffix[i]) return false;
+    }
+    return true;
+}
+
+
+def stringReplaceSuffix(s, suffix, replacement)
+{
+    if (!stringEndsWith(s, suffix)) return s;
+    var out = "";
+    var limit = len(s) - len(suffix);
+    for (var i = 0; i < limit; i += 1) out = out + s[i];
+    return out + replacement;
+}
+
+
+def inferNormalMapPath(model, texName)
+{
+    if (texName == nil || len(texName) == 0) return nil;
+
+    var bare = meshbinStripExt(texName);
+    var candidate = bare + "_ddn";
+    if (stringEndsWith(bare, "_diff"))
+        candidate = stringReplaceSuffix(bare, "_diff", "_ddn");
+
+    var p = model.resolveTexturePath(candidate);
+    if (p != nil) return p;
+    return nil;
+}
+
+
+def findCachedTexture(pathKey, loadedPaths, loadedIds)
+{
+    for (var i = 0; i < len(loadedPaths); i += 1)
+    {
+        if (loadedPaths[i] == pathKey) return loadedIds[i];
+    }
+    return -1;
+}
+
+
+var meshPath = resolveAssetPath(
+    "assets/sponza/sponza.h3d",
+    "../assets/sponza/sponza.h3d",
+    "../../assets/sponza/sponza.h3d"
+);
+if (meshPath == nil)
+{
+    print("sponza.h3d not found");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1680, 960, "BuGL - Normal Map Sponza");
+SetTargetFPS(60);
+
+if (!InitImGui())
+{
+    CloseWindow();
+    return;
+}
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load meshbin: " + meshPath);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 300.0;
+var targetRadius = 420.0;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 40.0) sceneRadius = 40.0;
+
+var eyeX = focusX + sceneRadius * 0.8;
+var eyeY = focusY + sceneRadius * 0.35;
+var eyeZ = focusZ + sceneRadius * 0.8;
+var yaw = -90.0;
+var pitch = -18.0;
+var showUi = true;
+
+var materialNormalIds = [];
+var materialNormalPaths = [];
+var loadedNormalPaths = [];
+var loadedNormalTexIds = [];
+var loadedNormalCount = 0;
+
+for (var i = 0; i < len(mesh.materials); i += 1)
+{
+    var normalId = 0;
+    var normalPath = "";
+    var mat = mesh.materials[i];
+    if (len(mat.textureNames) > 0)
+    {
+        normalPath = inferNormalMapPath(mesh, mat.textureNames[0]);
+        if (normalPath != nil)
+        {
+            var cachedTex = findCachedTexture(normalPath, loadedNormalPaths, loadedNormalTexIds);
+            if (cachedTex < 0)
+            {
+                cachedTex = loadTexture2D(normalPath, true, true, true);
+                if (cachedTex > 0)
+                {
+                    loadedNormalPaths.push(normalPath);
+                    loadedNormalTexIds.push(cachedTex);
+                    loadedNormalCount += 1;
+                }
+            }
+            if (cachedTex > 0) normalId = cachedTex;
+        }
+    }
+    materialNormalIds.push(normalId);
+    materialNormalPaths.push(normalPath == nil ? "" : normalPath);
+}
+
+var vsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vWorldNormal = normalize(mat3(uModel) * aNormal);
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var fsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vWorldNormal;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uTex;
+uniform sampler2D uNormalTex;
+uniform int uHasTex;
+uniform int uHasNormalTex;
+uniform int uUseNormalMap;
+uniform int uShowNormalsOnly;
+uniform float uNormalStrength;
+uniform vec3 uTint;
+uniform vec3 uLightDir;
+uniform vec3 uViewPos;
+uniform vec3 uAmbient;
+uniform float uSpecularPower;
+uniform float uSpecularStrength;
+
+mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv)
+{
+    vec3 dp1 = dFdx(p);
+    vec3 dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    return mat3(T * invmax, B * invmax, N);
+}
+
+void main()
+{
+    vec3 albedo = uHasTex != 0 ? texture(uTex, vUV).rgb : uTint;
+    vec3 N = normalize(vWorldNormal);
+
+    if (uUseNormalMap != 0 && uHasNormalTex != 0)
+    {
+        vec3 mapN = texture(uNormalTex, vUV).xyz * 2.0 - 1.0;
+        mapN.xy *= uNormalStrength;
+        mapN = normalize(mapN);
+        mat3 TBN = cotangentFrame(N, vWorldPos, vUV);
+        N = normalize(TBN * mapN);
+    }
+
+    if (uShowNormalsOnly != 0)
+    {
+        FragColor = vec4(N * 0.5 + 0.5, 1.0);
+        return;
+    }
+
+    vec3 L = normalize(-uLightDir);
+    vec3 V = normalize(uViewPos - vWorldPos);
+    vec3 H = normalize(L + V);
+    float ndl = max(dot(N, L), 0.0);
+    float spec = pow(max(dot(N, H), 0.0), uSpecularPower) * uSpecularStrength;
+
+    vec3 hemi = mix(vec3(0.08, 0.09, 0.11), vec3(0.22, 0.24, 0.28), clamp(N.y * 0.5 + 0.5, 0.0, 1.0));
+    vec3 color = albedo * (uAmbient + hemi * 0.34 + vec3(ndl * 0.92));
+    color += vec3(spec);
+    color = pow(color, vec3(1.0 / 1.05));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var prog = linkProgram(vsSrc, fsSrc);
+if (prog <= 0)
+{
+    for (var i = 0; i < len(loadedNormalTexIds); i += 1)
+        if (loadedNormalTexIds[i] > 0) glDeleteTextures(loadedNormalTexIds[i]);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var uModel = glGetUniformLocation(prog, "uModel");
+var uView = glGetUniformLocation(prog, "uView");
+var uProj = glGetUniformLocation(prog, "uProj");
+var uTex = glGetUniformLocation(prog, "uTex");
+var uNormalTex = glGetUniformLocation(prog, "uNormalTex");
+var uHasTex = glGetUniformLocation(prog, "uHasTex");
+var uHasNormalTex = glGetUniformLocation(prog, "uHasNormalTex");
+var uUseNormalMap = glGetUniformLocation(prog, "uUseNormalMap");
+var uShowNormalsOnly = glGetUniformLocation(prog, "uShowNormalsOnly");
+var uNormalStrength = glGetUniformLocation(prog, "uNormalStrength");
+var uTint = glGetUniformLocation(prog, "uTint");
+var uLightDir = glGetUniformLocation(prog, "uLightDir");
+var uViewPos = glGetUniformLocation(prog, "uViewPos");
+var uAmbient = glGetUniformLocation(prog, "uAmbient");
+var uSpecularPower = glGetUniformLocation(prog, "uSpecularPower");
+var uSpecularStrength = glGetUniformLocation(prog, "uSpecularStrength");
+
+glUseProgram(prog);
+if (uTex >= 0) glUniform1i(uTex, 0);
+if (uNormalTex >= 0) glUniform1i(uNormalTex, 1);
+glUseProgram(0);
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var hudBg = Color(0, 0, 0, 152);
+var hudFg = Color(245, 245, 245, 255);
+var hudInfo = Color(190, 220, 255, 255);
+var hudOk = Color(180, 255, 200, 255);
+
+var useNormalMap = true;
+var showNormalsOnly = false;
+var normalStrength = 1.0;
+var specularPower = 48.0;
+var specularStrength = 0.20;
+var ambientStrength = 0.08;
+var previewMaterial = 0;
+var cam = Camera3D();
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 60.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_N)) useNormalMap = !useNormalMap;
+    if (IsKeyPressed(KEY_M)) showNormalsOnly = !showNormalsOnly;
+    if (IsKeyPressed(KEY_R))
+    {
+        eyeX = focusX + sceneRadius * 0.8;
+        eyeY = focusY + sceneRadius * 0.35;
+        eyeZ = focusZ + sceneRadius * 0.8;
+        yaw = -90.0;
+        pitch = -18.0;
+    }
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx = fx / fl; fy = fy / fl; fz = fz / fl;
+    }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001) { rx = rx / rl; rz = rz / rl; }
+
+    var moveSpeed = sceneRadius * 0.35;
+    if (moveSpeed < 10.0) moveSpeed = 10.0;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) moveSpeed = moveSpeed * 3.0;
+    var step = moveSpeed * dt;
+
+    if (IsKeyDown(KEY_W)) { eyeX += fx * step; eyeY += fy * step; eyeZ += fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * step; eyeY -= fy * step; eyeZ -= fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * step; eyeZ -= rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * step; eyeZ += rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += step;
+    if (IsKeyDown(KEY_C)) eyeY -= step;
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glDepthMask(GL_TRUE);
+
+    BeginDrawing();
+    ClearBackground(Color(28, 34, 42, 255));
+    SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+    SetCamera3DTarget(cam, eyeX + fx, eyeY + fy, eyeZ + fz);
+    BeginMode3D(cam);
+
+    var modelMat = mesh.makeModelMatrix();
+    var view = rlGetMatrixModelview();
+    var proj = rlGetMatrixProjection();
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+
+    
+    glUseProgram(prog);
+    if (uModel >= 0) glUniformMatrix4fv(uModel, 1, false, modelBuf);
+    if (uView >= 0) glUniformMatrix4fv(uView, 1, false, viewBuf);
+    if (uProj >= 0) glUniformMatrix4fv(uProj, 1, false, projBuf);
+    if (uLightDir >= 0) glUniform3f(uLightDir, -0.42, -1.0, -0.24);
+    if (uViewPos >= 0) glUniform3f(uViewPos, eyeX, eyeY, eyeZ);
+    if (uAmbient >= 0) glUniform3f(uAmbient, ambientStrength, ambientStrength + 0.01, ambientStrength + 0.02);
+    if (uUseNormalMap >= 0) glUniform1i(uUseNormalMap, useNormalMap ? 1 : 0);
+    if (uShowNormalsOnly >= 0) glUniform1i(uShowNormalsOnly, showNormalsOnly ? 1 : 0);
+    if (uNormalStrength >= 0) glUniform1f(uNormalStrength, normalStrength);
+    if (uSpecularPower >= 0) glUniform1f(uSpecularPower, specularPower);
+    if (uSpecularStrength >= 0) glUniform1f(uSpecularStrength, specularStrength);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+    {
+        var b = mesh.buffers[i];
+        var texId = 0;
+        var normalId = 0;
+        var tintR = 0.74; var tintG = 0.74; var tintB = 0.74;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            tintR = mat.diffuseR;
+            tintG = mat.diffuseG;
+            tintB = mat.diffuseB;
+            if (len(mat.textureIds) > 0) texId = mat.textureIds[0];
+            if (b.materialIndex < len(materialNormalIds)) normalId = materialNormalIds[b.materialIndex];
+        }
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, normalId);
+        if (uHasTex >= 0) glUniform1i(uHasTex, texId > 0 ? 1 : 0);
+        if (uHasNormalTex >= 0) glUniform1i(uHasNormalTex, normalId > 0 ? 1 : 0);
+        if (uTint >= 0) glUniform3f(uTint, tintR, tintG, tintB);
+        b.draw();
+    }
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    EndMode3D();
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDepthMask(GL_FALSE);
+
+    DrawRectangle(18, 18, 1220, 122, hudBg);
+    DrawText("Normal Map Sponza  RMB look | WASD move | SPACE/C up-down | SHIFT faster | TAB UI | N normals on/off | M normal debug", 30, 30, 22, hudFg);
+    DrawText("This demo infers Sponza _ddn textures from the meshbin diffuse names and computes tangent space in the fragment shader.", 30, 62, 18, hudInfo);
+    DrawText("Loaded normal maps: " + str(loadedNormalCount) + " / " + str(len(mesh.materials)) + "  FPS: " + str(GetFPS()), 30, 92, 18, hudOk);
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = ImGui.Begin("Normal Map Sponza");
+        if (panel != nil && panel)
+        {
+            ImGui.Text("Sponza detail lab: compare base shading vs inferred _ddn normal maps.");
+            ImGui.Separator();
+
+            var (changedUseNormals, nextUseNormals) = ImGui.Checkbox("Use normal maps", useNormalMap);
+            if (changedUseNormals) useNormalMap = nextUseNormals;
+
+            var (changedShowNormals, nextShowNormals) = ImGui.Checkbox("Show normals only", showNormalsOnly);
+            if (changedShowNormals) showNormalsOnly = nextShowNormals;
+
+            var (changedStrength, nextStrength) = ImGui.SliderFloat("Normal strength", normalStrength, 0.0, 3.0, "%.2f");
+            if (changedStrength) normalStrength = nextStrength;
+
+            var (changedSpecPower, nextSpecPower) = ImGui.SliderFloat("Specular power", specularPower, 2.0, 128.0, "%.1f");
+            if (changedSpecPower) specularPower = nextSpecPower;
+
+            var (changedSpecStrength, nextSpecStrength) = ImGui.SliderFloat("Specular strength", specularStrength, 0.0, 1.0, "%.2f");
+            if (changedSpecStrength) specularStrength = nextSpecStrength;
+
+            var (changedAmbient, nextAmbient) = ImGui.SliderFloat("Ambient", ambientStrength, 0.0, 0.3, "%.2f");
+            if (changedAmbient) ambientStrength = nextAmbient;
+
+            if (len(mesh.materials) > 0)
+            {
+                var (changedMat, nextMat) = ImGui.SliderInt("Preview material", previewMaterial, 0, len(mesh.materials) - 1);
+                if (changedMat) previewMaterial = nextMat;
+                var previewMat = mesh.materials[previewMaterial];
+                var previewDiffuse = len(previewMat.textureIds) > 0 ? previewMat.textureIds[0] : 0;
+                var previewNormal = materialNormalIds[previewMaterial];
+                ImGui.Text("Material: " + previewMat.name);
+                if (len(previewMat.textureNames) > 0) ImGui.Text("Diffuse: " + previewMat.textureNames[0]);
+                if (len(materialNormalPaths[previewMaterial]) > 0) ImGui.Text("Normal: " + materialNormalPaths[previewMaterial]);
+                else ImGui.Text("Normal: none");
+                ImGui.ImageButton("##preview_diff", previewDiffuse, 256, 256, 0.0, 1.0, 1.0, 0.0);
+                ImGui.SameLine();
+                if (previewNormal > 0) ImGui.ImageButton("##preview_normal", previewNormal, 256, 256, 0.0, 1.0, 1.0, 0.0);
+            }
+        }
+        ImGui.End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+for (var i = 0; i < len(loadedNormalTexIds); i += 1)
+{
+    if (loadedNormalTexIds[i] > 0) glDeleteTextures(loadedNormalTexIds[i]);
+}
+glDeleteProgram(prog);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();

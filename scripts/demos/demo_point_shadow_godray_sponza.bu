@@ -1,0 +1,1053 @@
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import ImGui;
+using ImGui;
+
+include "../libs/lib_meshbin.bu";
+
+var LAB_SHADOW_SIZE = 768;
+var LAB_CAMERA_FOV_RAD = 60.0 * PI / 180.0;
+var LAB_CAMERA_NEAR = 0.05;
+var LAB_CAMERA_FAR = 4000.0;
+var LAB_POINT_NEAR = 1.0;
+var LAB_POINT_FAR = 160.0;
+
+var hudBg = Color(0, 0, 0, 152);
+var hudFg = Color(245, 245, 245, 255);
+var hudInfo = Color(190, 220, 255, 255);
+var hudOk = Color(180, 255, 200, 255);
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Point Shadow Godray Sponza shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Point Shadow Godray Sponza shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+class PointShadowTarget
+{
+    var fbo;
+    var depthCube;
+    var debugFaces;
+    var size;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.depthCube = 0;
+        self.debugFaces = [];
+        self.size = 0;
+    }
+
+    def destroy()
+    {
+        for (var i = 0; i < len(self.debugFaces); i += 1)
+            if (self.debugFaces[i] > 0) glDeleteTextures(self.debugFaces[i]);
+        if (self.depthCube > 0) glDeleteTextures(self.depthCube);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.depthCube = 0;
+        self.debugFaces = [];
+        self.size = 0;
+    }
+}
+
+
+class PostTarget
+{
+    var fbo;
+    var color;
+    var depth;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteRenderbuffers(self.depth);
+        if (self.color > 0) glDeleteTextures(self.color);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+def makePointShadowTarget(size)
+{
+    var rt = PointShadowTarget();
+    rt.size = size;
+    rt.fbo = glGenFramebuffers();
+    rt.depthCube = glGenTextures();
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP, rt.depthCube);
+    for (var i = 0; i < 6; i += 1)
+    {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_DEPTH_COMPONENT24, size, size, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nil);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+
+    rt.debugFaces = [];
+    for (var i = 0; i < 6; i += 1)
+    {
+        var tex = glGenTextures();
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        rt.debugFaces.push(tex);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_CUBE_MAP_POSITIVE_X, rt.depthCube, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.debugFaces[0], 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("Point Shadow Godray target incomplete: " + status);
+        rt.destroy();
+        return nil;
+    }
+    return rt;
+}
+
+
+def makePostTarget(width, height, withDepth)
+{
+    var rt = PostTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.color = glGenTextures();
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.color, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+
+    if (withDepth)
+    {
+        rt.depth = glGenRenderbuffers();
+        glBindRenderbuffer(GL_RENDERBUFFER, rt.depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt.depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    }
+
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("Point Shadow Godray post target incomplete: " + status);
+        rt.destroy();
+        return nil;
+    }
+    return rt;
+}
+
+
+def resizePostTarget(rt, width, height, withDepth)
+{
+    if (rt == nil) return nil;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    if (rt.width == width && rt.height == height) return rt;
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (withDepth && rt.depth > 0)
+    {
+        glBindRenderbuffer(GL_RENDERBUFFER, rt.depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    }
+    rt.width = width;
+    rt.height = height;
+    return rt;
+}
+
+
+def makeCubeGeometry()
+{
+    var verts = Float32Array([
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,
+         1.0, -1.0,  1.0,   0.0,  0.0,  1.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,
+        -1.0,  1.0,  1.0,   0.0,  0.0,  1.0,
+
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,
+        -1.0,  1.0, -1.0,   0.0,  0.0, -1.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,
+         1.0, -1.0, -1.0,   0.0,  0.0, -1.0,
+
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,
+        -1.0, -1.0,  1.0,  -1.0,  0.0,  0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,
+        -1.0,  1.0, -1.0,  -1.0,  0.0,  0.0,
+
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,
+         1.0, -1.0,  1.0,   1.0,  0.0,  0.0,
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,
+         1.0,  1.0, -1.0,   1.0,  0.0,  0.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,
+
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,
+        -1.0,  1.0,  1.0,   0.0,  1.0,  0.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,
+         1.0,  1.0, -1.0,   0.0,  1.0,  0.0,
+
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0,
+        -1.0, -1.0,  1.0,   0.0, -1.0,  0.0,
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,
+         1.0, -1.0, -1.0,   0.0, -1.0,  0.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0]
+    );
+    var vao = glGenVertexArrays();
+    var vbo = glGenBuffers();
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, 24, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, false, 24, 12);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return (vao, vbo);
+}
+
+
+def makeQuadGeometry()
+{
+    var verts = Float32Array([
+        -1.0, -1.0, 0.0, 0.0,
+         1.0, -1.0, 1.0, 0.0,
+         1.0,  1.0, 1.0, 1.0,
+        -1.0, -1.0, 0.0, 0.0,
+         1.0,  1.0, 1.0, 1.0,
+        -1.0,  1.0, 0.0, 1.0
+    ]);
+    var vao = glGenVertexArrays();
+    var vbo = glGenBuffers();
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, false, 16, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, false, 16, 8);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return (vao, vbo);
+}
+
+
+def drawFullscreenQuad(vao)
+{
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+
+def writeModelMatrix(buf, tx, ty, tz, sx, sy, sz)
+{
+    var m = MatrixScale(sx, sy, sz);
+    m = MatrixMultiply(m, MatrixTranslate(tx, ty, tz));
+    MatrixWriteBuffer(m, buf);
+}
+
+
+def projectWorldToScreenUv(view, proj, x, y, z)
+{
+    var vp = MatrixMultiply(view, proj);
+    var cx = vp.m0 * x + vp.m4 * y + vp.m8  * z + vp.m12;
+    var cy = vp.m1 * x + vp.m5 * y + vp.m9  * z + vp.m13;
+    var cw = vp.m3 * x + vp.m7 * y + vp.m11 * z + vp.m15;
+    if (abs(cw) < 0.00001) return (0.5, 0.5, false);
+    var ndcX = cx / cw;
+    var ndcY = cy / cw;
+    var uvX = ndcX * 0.5 + 0.5;
+    var uvY = ndcY * 0.5 + 0.5;
+    var visible = cw > 0.0 && uvX >= 0.0 && uvX <= 1.0 && uvY >= 0.0 && uvY <= 1.0;
+    return (uvX, uvY, visible);
+}
+
+
+var meshPath = resolveAssetPath(
+    "assets/sponza/sponza.h3d",
+    "../assets/sponza/sponza.h3d",
+    "../../assets/sponza/sponza.h3d"
+);
+if (meshPath == nil)
+{
+    print("sponza.h3d not found");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1680, 960, "BuGL - Point Shadow Godray Sponza");
+SetTargetFPS(60);
+
+if (!InitImGui())
+{
+    CloseWindow();
+    return;
+}
+
+var cam = Camera3D();
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 60.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load meshbin: " + meshPath);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 300.0;
+var targetRadius = 420.0;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 40.0) sceneRadius = 40.0;
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+
+var (cubeVAO, cubeVBO) = makeCubeGeometry();
+var (quadVAO, quadVBO) = makeQuadGeometry();
+var shadowRt = makePointShadowTarget(LAB_SHADOW_SIZE);
+var sceneRt = makePostTarget(1280, 720, true);
+var occRt = makePostTarget(1280, 720, true);
+var rayRt = makePostTarget(1280, 720, false);
+if (shadowRt == nil || sceneRt == nil || occRt == nil || rayRt == nil)
+{
+    if (shadowRt != nil) shadowRt.destroy();
+    if (sceneRt != nil) sceneRt.destroy();
+    if (occRt != nil) occRt.destroy();
+    if (rayRt != nil) rayRt.destroy();
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    glDeleteBuffers(quadVBO);
+    glDeleteVertexArrays(quadVAO);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var depthVs = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+out vec3 vWorldPos;
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var depthFs = @"
+#version 330 core
+in vec3 vWorldPos;
+uniform vec3 uLightPos;
+uniform float uFarPlane;
+out vec4 FragColor;
+void main()
+{
+    float dist = length(vWorldPos - uLightPos);
+    float d = clamp(dist / uFarPlane, 0.0, 1.0);
+    gl_FragDepth = d;
+    FragColor = vec4(vec3(d), 1.0);
+}
+";
+
+var sceneVs = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+out vec3 vWorldPos;
+out vec3 vWorldNormal;
+out vec2 vUV;
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vWorldNormal = mat3(transpose(inverse(uModel))) * aNormal;
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var litFs = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vWorldNormal;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uTex;
+uniform samplerCube uShadowCube;
+uniform int uHasTex;
+uniform vec3 uViewPos;
+uniform vec3 uLightPos;
+uniform vec3 uLightColor;
+uniform vec3 uAmbient;
+uniform float uFarPlane;
+uniform float uShadowBias;
+uniform float uShadowStrength;
+
+vec3 gridSamplingDisk[20] = vec3[](
+    vec3( 1,  1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1,  1,  1),
+    vec3( 1,  1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1,  1, -1),
+    vec3( 1,  1,  0), vec3( 1, -1,  0), vec3(-1, -1,  0), vec3(-1,  1,  0),
+    vec3( 1,  0,  1), vec3(-1,  0,  1), vec3( 1,  0, -1), vec3(-1,  0, -1),
+    vec3( 0,  1,  1), vec3( 0, -1,  1), vec3( 0, -1, -1), vec3( 0,  1, -1)
+);
+
+float pointShadow(vec3 fragPos)
+{
+    vec3 fragToLight = fragPos - uLightPos;
+    float currentDepth = length(fragToLight);
+    float viewDistance = length(uViewPos - fragPos);
+    float diskRadius = (1.0 + (viewDistance / uFarPlane)) * 0.18;
+    float shadow = 0.0;
+    for (int i = 0; i < 20; ++i)
+    {
+        float closestDepth = texture(uShadowCube, fragToLight + gridSamplingDisk[i] * diskRadius).r;
+        closestDepth *= uFarPlane;
+        if (currentDepth - uShadowBias > closestDepth) shadow += 1.0;
+    }
+    shadow /= 20.0;
+    return shadow * uShadowStrength;
+}
+
+void main()
+{
+    vec3 albedo = uHasTex != 0 ? texture(uTex, vUV).rgb : vec3(0.72, 0.72, 0.72);
+    vec3 N = normalize(vWorldNormal);
+    vec3 Lvec = uLightPos - vWorldPos;
+    float dist = length(Lvec);
+    vec3 L = Lvec / max(dist, 0.0001);
+    vec3 V = normalize(uViewPos - vWorldPos);
+    vec3 H = normalize(L + V);
+    float atten = 1.0 / (1.0 + 0.035 * dist + 0.008 * dist * dist);
+    float ndl = max(dot(N, L), 0.0);
+    float spec = pow(max(dot(N, H), 0.0), 48.0) * 0.18;
+    float shadow = pointShadow(vWorldPos);
+    vec3 hemi = mix(vec3(0.05, 0.06, 0.08), vec3(0.15, 0.17, 0.20), clamp(N.y * 0.5 + 0.5, 0.0, 1.0));
+    vec3 color = albedo * (uAmbient + hemi * 0.10);
+    color += (1.0 - shadow) * albedo * uLightColor * ndl * atten * 1.18;
+    color += (1.0 - shadow) * uLightColor * spec * atten * 1.08;
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var occFs = @"
+#version 330 core
+in vec3 vWorldPos;
+out vec4 FragColor;
+uniform vec3 uTint;
+void main()
+{
+    FragColor = vec4(uTint, 1.0);
+}
+";
+
+var quadVs = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+out vec2 vUV;
+void main()
+{
+    vUV = aUV;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+";
+
+var rayFs = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uOcclusion;
+uniform vec2 uLightScreenPos;
+uniform float uExposure;
+uniform float uDecay;
+uniform float uDensity;
+uniform float uWeight;
+uniform int uLightVisible;
+void main()
+{
+    if (uLightVisible == 0)
+    {
+        FragColor = vec4(0.0);
+        return;
+    }
+    const int NUM_SAMPLES = 96;
+    vec2 delta = (vUV - uLightScreenPos) * (uDensity / float(NUM_SAMPLES));
+    vec2 coord = vUV;
+    float illuminationDecay = 1.0;
+    vec3 color = vec3(0.0);
+    for (int i = 0; i < NUM_SAMPLES; ++i)
+    {
+        coord -= delta;
+        vec3 sampleCol = texture(uOcclusion, coord).rgb;
+        sampleCol *= illuminationDecay * uWeight;
+        color += sampleCol;
+        illuminationDecay *= uDecay;
+    }
+    color *= uExposure;
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var compositeFs = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uScene;
+uniform sampler2D uRays;
+uniform float uRayStrength;
+uniform float uExposure;
+void main()
+{
+    vec3 scene = texture(uScene, vUV).rgb;
+    vec3 rays = texture(uRays, vUV).rgb * uRayStrength;
+    vec3 hdr = scene + rays;
+    vec3 mapped = vec3(1.0) - exp(-hdr * uExposure);
+    mapped = pow(mapped, vec3(1.0 / 2.2));
+    FragColor = vec4(mapped, 1.0);
+}
+";
+
+var progDepth = linkProgram(depthVs, depthFs);
+var progLit = linkProgram(sceneVs, litFs);
+var progOcc = linkProgram(sceneVs, occFs);
+var progRay = linkProgram(quadVs, rayFs);
+var progComposite = linkProgram(quadVs, compositeFs);
+if (progDepth <= 0 || progLit <= 0 || progOcc <= 0 || progRay <= 0 || progComposite <= 0)
+{
+    if (progDepth > 0) glDeleteProgram(progDepth);
+    if (progLit > 0) glDeleteProgram(progLit);
+    if (progOcc > 0) glDeleteProgram(progOcc);
+    if (progRay > 0) glDeleteProgram(progRay);
+    if (progComposite > 0) glDeleteProgram(progComposite);
+    shadowRt.destroy();
+    sceneRt.destroy();
+    occRt.destroy();
+    rayRt.destroy();
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    glDeleteBuffers(quadVBO);
+    glDeleteVertexArrays(quadVAO);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var dModel = glGetUniformLocation(progDepth, "uModel");
+var dView = glGetUniformLocation(progDepth, "uView");
+var dProj = glGetUniformLocation(progDepth, "uProj");
+var dLightPos = glGetUniformLocation(progDepth, "uLightPos");
+var dFarPlane = glGetUniformLocation(progDepth, "uFarPlane");
+
+var lModel = glGetUniformLocation(progLit, "uModel");
+var lView = glGetUniformLocation(progLit, "uView");
+var lProj = glGetUniformLocation(progLit, "uProj");
+var lTex = glGetUniformLocation(progLit, "uTex");
+var lShadowCube = glGetUniformLocation(progLit, "uShadowCube");
+var lHasTex = glGetUniformLocation(progLit, "uHasTex");
+var lViewPos = glGetUniformLocation(progLit, "uViewPos");
+var lLightPos = glGetUniformLocation(progLit, "uLightPos");
+var lLightColor = glGetUniformLocation(progLit, "uLightColor");
+var lAmbient = glGetUniformLocation(progLit, "uAmbient");
+var lFarPlane = glGetUniformLocation(progLit, "uFarPlane");
+var lShadowBias = glGetUniformLocation(progLit, "uShadowBias");
+var lShadowStrength = glGetUniformLocation(progLit, "uShadowStrength");
+
+var oModel = glGetUniformLocation(progOcc, "uModel");
+var oView = glGetUniformLocation(progOcc, "uView");
+var oProj = glGetUniformLocation(progOcc, "uProj");
+var oTint = glGetUniformLocation(progOcc, "uTint");
+
+var rOcc = glGetUniformLocation(progRay, "uOcclusion");
+var rLightScreen = glGetUniformLocation(progRay, "uLightScreenPos");
+var rExposure = glGetUniformLocation(progRay, "uExposure");
+var rDecay = glGetUniformLocation(progRay, "uDecay");
+var rDensity = glGetUniformLocation(progRay, "uDensity");
+var rWeight = glGetUniformLocation(progRay, "uWeight");
+var rVisible = glGetUniformLocation(progRay, "uLightVisible");
+
+var cScene = glGetUniformLocation(progComposite, "uScene");
+var cRays = glGetUniformLocation(progComposite, "uRays");
+var cRayStrength = glGetUniformLocation(progComposite, "uRayStrength");
+var cExposure = glGetUniformLocation(progComposite, "uExposure");
+
+glUseProgram(progLit);
+if (lTex >= 0) glUniform1i(lTex, 0);
+if (lShadowCube >= 0) glUniform1i(lShadowCube, 1);
+glUseProgram(progRay);
+if (rOcc >= 0) glUniform1i(rOcc, 0);
+glUseProgram(progComposite);
+if (cScene >= 0) glUniform1i(cScene, 0);
+if (cRays >= 0) glUniform1i(cRays, 1);
+glUseProgram(0);
+
+var probeDirX = [ 1.0, -1.0,  0.0,  0.0,  0.0,  0.0];
+var probeDirY = [ 0.0,  0.0,  1.0, -1.0,  0.0,  0.0];
+var probeDirZ = [ 0.0,  0.0,  0.0,  0.0,  1.0, -1.0];
+var probeUpX  = [ 0.0,  0.0,  0.0,  0.0,  0.0,  0.0];
+var probeUpY  = [-1.0, -1.0,  0.0,  0.0, -1.0, -1.0];
+var probeUpZ  = [ 0.0,  0.0,  1.0, -1.0,  0.0,  0.0];
+var probeProj = MatrixPerspective(90.0 * PI / 180.0, 1.0, LAB_POINT_NEAR, LAB_POINT_FAR);
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+
+var eyeX = focusX + sceneRadius * 0.8;
+var eyeY = focusY + sceneRadius * 0.35;
+var eyeZ = focusZ + sceneRadius * 0.8;
+var yaw = -90.0;
+var pitch = -18.0;
+var showUi = true;
+
+var lightX = 0.0;
+var lightY = 18.0;
+var lightZ = 0.0;
+var lightAnim = true;
+var lightAnimSpeed = 0.55;
+var lightOrbitRadius = 32.0;
+var lightColorR = 1.0;
+var lightColorG = 0.86;
+var lightColorB = 0.68;
+var ambient = 0.02;
+var shadowBias = 0.42;
+var shadowStrength = 1.25;
+var showLightMarker = true;
+var rayExposure = 0.38;
+var rayDecay = 0.958;
+var rayDensity = 0.96;
+var rayWeight = 0.12;
+var rayStrength = 1.65;
+var finalExposure = 1.05;
+var debugFace = 0;
+var t = 0.0;
+
+def renderShadowFace(view, proj)
+{
+    glUseProgram(progDepth);
+    glUniform3f(dLightPos, lightX, lightY, lightZ);
+    glUniform1f(dFarPlane, LAB_POINT_FAR);
+    MatrixWriteBuffer(mesh.makeModelMatrix(), modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    glUniformMatrix4fv(dModel, 1, false, modelBuf);
+    glUniformMatrix4fv(dView, 1, false, viewBuf);
+    glUniformMatrix4fv(dProj, 1, false, projBuf);
+    for (var i = 0; i < len(mesh.buffers); i += 1) mesh.buffers[i].draw();
+}
+
+
+def renderLitScene(view, proj, camX, camY, camZ)
+{
+    glUseProgram(progLit);
+    MatrixWriteBuffer(mesh.makeModelMatrix(), modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    glUniformMatrix4fv(lModel, 1, false, modelBuf);
+    glUniformMatrix4fv(lView, 1, false, viewBuf);
+    glUniformMatrix4fv(lProj, 1, false, projBuf);
+    glUniform3f(lViewPos, camX, camY, camZ);
+    glUniform3f(lLightPos, lightX, lightY, lightZ);
+    glUniform3f(lLightColor, lightColorR, lightColorG, lightColorB);
+    glUniform3f(lAmbient, ambient, ambient + 0.01, ambient + 0.02);
+    glUniform1f(lFarPlane, LAB_POINT_FAR);
+    glUniform1f(lShadowBias, shadowBias);
+    glUniform1f(lShadowStrength, shadowStrength);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, shadowRt.depthCube);
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+    {
+        var b = mesh.buffers[i];
+        var texId = 0;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            if (len(mat.textureIds) > 0) texId = mat.textureIds[0];
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        glUniform1i(lHasTex, texId > 0 ? 1 : 0);
+        b.draw();
+    }
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+}
+
+
+def renderOcclusionScene(view, proj)
+{
+    glUseProgram(progOcc);
+    MatrixWriteBuffer(mesh.makeModelMatrix(), modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    glUniformMatrix4fv(oModel, 1, false, modelBuf);
+    glUniformMatrix4fv(oView, 1, false, viewBuf);
+    glUniformMatrix4fv(oProj, 1, false, projBuf);
+    glUniform3f(oTint, 0.0, 0.0, 0.0);
+    for (var i = 0; i < len(mesh.buffers); i += 1) mesh.buffers[i].draw();
+    glUseProgram(0);
+}
+
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+    t += dt;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_P)) lightAnim = !lightAnim;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001) { fx = fx / fl; fy = fy / fl; fz = fz / fl; }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001) { rx = rx / rl; rz = rz / rl; }
+
+    var moveSpeed = sceneRadius * 0.35;
+    if (moveSpeed < 10.0) moveSpeed = 10.0;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) moveSpeed = moveSpeed * 3.0;
+    var step = moveSpeed * dt;
+    if (IsKeyDown(KEY_W)) { eyeX += fx * step; eyeY += fy * step; eyeZ += fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * step; eyeY -= fy * step; eyeZ -= fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * step; eyeZ -= rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * step; eyeZ += rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += step;
+    if (IsKeyDown(KEY_C)) eyeY -= step;
+
+    if (lightAnim)
+    {
+        lightX = cos(t * lightAnimSpeed) * lightOrbitRadius;
+        lightZ = sin(t * lightAnimSpeed * 1.17) * lightOrbitRadius;
+        lightY = 14.0 + sin(t * lightAnimSpeed * 0.63) * 10.0;
+    }
+
+    SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+    SetCamera3DTarget(cam, eyeX + fx, eyeY + fy, eyeZ + fz);
+
+    var screenW = GetScreenWidth();
+    var screenH = max(GetScreenHeight(), 1);
+    sceneRt = resizePostTarget(sceneRt, screenW, screenH, true);
+    occRt = resizePostTarget(occRt, screenW, screenH, true);
+    rayRt = resizePostTarget(rayRt, screenW, screenH, false);
+
+    BeginMode3D(cam);
+    var view = rlGetMatrixModelview();
+    var proj = rlGetMatrixProjection();
+    EndMode3D();
+
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowRt.fbo);
+    glViewport(0, 0, shadowRt.size, shadowRt.size);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    for (var i = 0; i < 6; i += 1)
+    {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, shadowRt.depthCube, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, shadowRt.debugFaces[i], 0);
+        glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+        glClearColor(1.0, 1.0, 1.0, 1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        var faceView = MatrixLookAt(
+            Vector3(lightX, lightY, lightZ),
+            Vector3(lightX + probeDirX[i], lightY + probeDirY[i], lightZ + probeDirZ[i]),
+            Vector3(probeUpX[i], probeUpY[i], probeUpZ[i])
+        );
+        renderShadowFace(faceView, probeProj);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, sceneRt.fbo);
+    glViewport(0, 0, sceneRt.width, sceneRt.height);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glClearColor(0.03, 0.04, 0.05, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    renderLitScene(view, proj, eyeX, eyeY, eyeZ);
+    if (showLightMarker)
+    {
+        BeginMode3D(cam);
+        DrawSphere(lightX, lightY, lightZ, 1.2, Color(min(255, int(lightColorR * 255.0)), min(255, int(lightColorG * 255.0)), min(255, int(lightColorB * 255.0)), 255));
+        EndMode3D();
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, occRt.fbo);
+    glViewport(0, 0, occRt.width, occRt.height);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glClearColor(0.0, 0.0, 0.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    renderOcclusionScene(view, proj);
+    BeginMode3D(cam);
+    DrawSphere(lightX, lightY, lightZ, 2.2, Color(255, 255, 255, 255));
+    EndMode3D();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    var (lightUvX, lightUvY, lightVisible) = projectWorldToScreenUv(view, proj, lightX, lightY, lightZ);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rayRt.fbo);
+    glViewport(0, 0, rayRt.width, rayRt.height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glClearColor(0.0, 0.0, 0.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(progRay);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, occRt.color);
+    glUniform2f(rLightScreen, lightUvX, lightUvY);
+    glUniform1f(rExposure, rayExposure);
+    glUniform1f(rDecay, rayDecay);
+    glUniform1f(rDensity, rayDensity);
+    glUniform1f(rWeight, rayWeight);
+    glUniform1i(rVisible, lightVisible ? 1 : 0);
+    drawFullscreenQuad(quadVAO);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    BeginDrawing();
+    ClearBackground(Color(18, 20, 26, 255));
+    glViewport(0, 0, screenW, screenH);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(progComposite);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sceneRt.color);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, rayRt.color);
+    glUniform1f(cRayStrength, rayStrength);
+    glUniform1f(cExposure, finalExposure);
+    drawFullscreenQuad(quadVAO);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+
+    DrawRectangle(18, 18, 1320, 120, hudBg);
+    DrawText("Point Shadow + Godray Sponza  RMB look | WASD move | SHIFT faster | SPACE/C up-down | TAB UI | P light anim", 30, 30, 22, hudFg);
+    DrawText("Pipeline: point shadow cubemap -> lit scene RT -> occlusion RT -> rays RT -> composite.", 30, 62, 18, hudInfo);
+    DrawText("This is the combo lab over Sponza. FPS: " + str(GetFPS()), 30, 92, 18, hudOk);
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = ImGui.Begin("Point Shadow Godray Sponza");
+        if (panel != nil && panel)
+        {
+            var (changedAnim, nextAnim) = ImGui.Checkbox("Animate light", lightAnim);
+            if (changedAnim) lightAnim = nextAnim;
+            var (changedMarker, nextMarker) = ImGui.Checkbox("Show light marker", showLightMarker);
+            if (changedMarker) showLightMarker = nextMarker;
+
+            var (changedBias, nextBias) = ImGui.SliderFloat("Shadow bias", shadowBias, 0.01, 2.0, "%.3f");
+            if (changedBias) shadowBias = nextBias;
+            var (changedShadowStrength, nextShadowStrength) = ImGui.SliderFloat("Shadow strength", shadowStrength, 0.0, 1.5, "%.2f");
+            if (changedShadowStrength) shadowStrength = nextShadowStrength;
+            var (changedAmbient, nextAmbient) = ImGui.SliderFloat("Ambient", ambient, 0.0, 0.25, "%.2f");
+            if (changedAmbient) ambient = nextAmbient;
+
+            var (changedRayExposure, nextRayExposure) = ImGui.SliderFloat("Ray exposure", rayExposure, 0.0, 1.2, "%.3f");
+            if (changedRayExposure) rayExposure = nextRayExposure;
+            var (changedRayDecay, nextRayDecay) = ImGui.SliderFloat("Ray decay", rayDecay, 0.84, 0.999, "%.3f");
+            if (changedRayDecay) rayDecay = nextRayDecay;
+            var (changedRayDensity, nextRayDensity) = ImGui.SliderFloat("Ray density", rayDensity, 0.1, 1.6, "%.3f");
+            if (changedRayDensity) rayDensity = nextRayDensity;
+            var (changedRayWeight, nextRayWeight) = ImGui.SliderFloat("Ray weight", rayWeight, 0.0, 0.3, "%.3f");
+            if (changedRayWeight) rayWeight = nextRayWeight;
+            var (changedRayStrength, nextRayStrength) = ImGui.SliderFloat("Ray strength", rayStrength, 0.0, 4.0, "%.2f");
+            if (changedRayStrength) rayStrength = nextRayStrength;
+            var (changedFinalExposure, nextFinalExposure) = ImGui.SliderFloat("Final exposure", finalExposure, 0.2, 2.5, "%.2f");
+            if (changedFinalExposure) finalExposure = nextFinalExposure;
+
+            var (changedRadius, nextRadius) = ImGui.SliderFloat("Orbit radius", lightOrbitRadius, 4.0, 80.0, "%.2f");
+            if (changedRadius) lightOrbitRadius = nextRadius;
+            var (changedSpeed, nextSpeed) = ImGui.SliderFloat("Anim speed", lightAnimSpeed, 0.05, 2.0, "%.2f");
+            if (changedSpeed) lightAnimSpeed = nextSpeed;
+
+            var (changedFace, nextFace) = ImGui.SliderInt("Shadow face", debugFace, 0, 5);
+            if (changedFace) debugFace = nextFace;
+
+            ImGui.Separator();
+            ImGui.Text("Targets");
+            ImGui.ImageButton("##combo_scene", sceneRt.color, 220, 124, 0.0, 1.0, 1.0, 0.0);
+            ImGui.SameLine();
+            ImGui.ImageButton("##combo_occ", occRt.color, 220, 124, 0.0, 1.0, 1.0, 0.0);
+            ImGui.SameLine();
+            ImGui.ImageButton("##combo_rays", rayRt.color, 220, 124, 0.0, 1.0, 1.0, 0.0);
+
+            ImGui.Separator();
+            ImGui.Text("Selected shadow face");
+            ImGui.ImageButton("##combo_shadow_big", shadowRt.debugFaces[debugFace], 220, 220, 0.0, 1.0, 1.0, 0.0);
+
+            ImGui.Separator();
+            ImGui.Text("All cubemap faces");
+            for (var i = 0; i < 6; i += 1)
+            {
+                ImGui.ImageButton("##combo_shadow_face_" + str(i), shadowRt.debugFaces[i], 84, 84, 0.0, 1.0, 1.0, 0.0);
+                if (i != 2 && i != 5) ImGui.SameLine();
+            }
+        }
+        ImGui.End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+shadowRt.destroy();
+sceneRt.destroy();
+occRt.destroy();
+rayRt.destroy();
+glDeleteProgram(progDepth);
+glDeleteProgram(progLit);
+glDeleteProgram(progOcc);
+glDeleteProgram(progRay);
+glDeleteProgram(progComposite);
+glDeleteBuffers(cubeVBO);
+glDeleteVertexArrays(cubeVAO);
+glDeleteBuffers(quadVBO);
+glDeleteVertexArrays(quadVAO);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();

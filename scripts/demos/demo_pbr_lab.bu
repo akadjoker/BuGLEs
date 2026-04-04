@@ -1,0 +1,715 @@
+import math;
+using math;
+import path;
+using path;
+import OpenGl;
+using OpenGl;
+import GLM;
+using GLM;
+import ImGui;
+using ImGui;
+import STB;
+using STB;
+
+var PBR_SKY_SET = "morning";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def cubemapFacePath(setName, suffix)
+{
+    var p = "assets/cubemaps/" + setName + "_" + suffix + ".jpg";
+    if (path.exists(p)) return p;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("PBR Lab shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("PBR Lab shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def destroySkyboxCubemap(texId)
+{
+    if (texId > 0) glDeleteTextures(texId);
+}
+
+
+def loadSkyboxCubemap(setName)
+{
+    var rtPath = cubemapFacePath(setName, "rt");
+    var lfPath = cubemapFacePath(setName, "lf");
+    var upPath = cubemapFacePath(setName, "up");
+    var dnPath = cubemapFacePath(setName, "dn");
+    var frPath = cubemapFacePath(setName, "fr");
+    var bkPath = cubemapFacePath(setName, "bk");
+    if (rtPath == nil || lfPath == nil || upPath == nil || dnPath == nil || frPath == nil || bkPath == nil)
+    {
+        print("Missing cubemap faces for set: " + setName);
+        return 0;
+    }
+
+    var facePaths = [rtPath, lfPath, upPath, dnPath, frPath, bkPath];
+    var faceTargets = [
+        GL_TEXTURE_CUBE_MAP_POSITIVE_X,
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+        GL_TEXTURE_CUBE_MAP_POSITIVE_Y,
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+        GL_TEXTURE_CUBE_MAP_POSITIVE_Z,
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_Z
+    ];
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    for (var i = 0; i < 6; i += 1)
+    {
+        stbi_set_flip_vertically_on_load(0);
+        var (w, h, ch, pixels) = stbi_load(facePaths[i], 4);
+        if (pixels == nil)
+        {
+            glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+            destroySkyboxCubemap(tex);
+            print("Failed to load cubemap face: " + facePaths[i]);
+            return 0;
+        }
+        glTexImage2D(faceTargets[i], 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    }
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    return tex;
+}
+
+
+class Geometry
+{
+    var vao;
+    var vbo;
+    var ebo;
+    var indexCount;
+
+    def init()
+    {
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.indexCount = 0;
+    }
+
+    def destroy()
+    {
+        if (self.ebo > 0) glDeleteBuffers(self.ebo);
+        if (self.vbo > 0) glDeleteBuffers(self.vbo);
+        if (self.vao > 0) glDeleteVertexArrays(self.vao);
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.indexCount = 0;
+    }
+}
+
+
+def makeSphereGeometry(radius, slices, stacks)
+{
+    var geom = Geometry();
+    var verts = Float32Array(0);
+    verts.reserve((slices + 1) * (stacks + 1) * 8);
+    for (var stack = 0; stack <= stacks; stack += 1)
+    {
+        var v = stack / stacks;
+        var phi = v * PI;
+        var sinPhi = sin(phi);
+        var cosPhi = cos(phi);
+        for (var slice = 0; slice <= slices; slice += 1)
+        {
+            var u = slice / slices;
+            var theta = u * PI * 2.0;
+            var sinTheta = sin(theta);
+            var cosTheta = cos(theta);
+            var nx = cosTheta * sinPhi;
+            var ny = cosPhi;
+            var nz = sinTheta * sinPhi;
+            verts.add(nx * radius, ny * radius, nz * radius, nx, ny, nz, u, 1.0 - v);
+        }
+    }
+
+    var indices = Uint32Array(0);
+    indices.reserve(slices * stacks * 6);
+    var rowStride = slices + 1;
+    for (var stack = 0; stack < stacks; stack += 1)
+    {
+        for (var slice = 0; slice < slices; slice += 1)
+        {
+            var a = stack * rowStride + slice;
+            var b = a + rowStride;
+            indices.add(a, b, a + 1);
+            indices.add(b, b + 1, a + 1);
+        }
+    }
+
+    geom.indexCount = indices.length();
+    geom.vao = glGenVertexArrays();
+    geom.vbo = glGenBuffers();
+    geom.ebo = glGenBuffers();
+    glBindVertexArray(geom.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, geom.vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, geom.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.byteLength(), indices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, 32, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, false, 32, 12);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, false, 32, 24);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return geom;
+}
+
+
+def makeCubeGeometry()
+{
+    var geom = Geometry();
+    var verts = Float32Array([
+        -1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         1.0,  1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        -1.0,  1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        -1.0, -1.0,  1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         1.0, -1.0,  1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         1.0,  1.0,  1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        -1.0,  1.0,  1.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ]);
+    var indices = Uint32Array([
+        0, 1, 2, 2, 3, 0,
+        4, 7, 6, 6, 5, 4,
+        0, 4, 5, 5, 1, 0,
+        1, 5, 6, 6, 2, 1,
+        2, 6, 7, 7, 3, 2,
+        3, 7, 4, 4, 0, 3
+    ]);
+
+    geom.indexCount = indices.length();
+    geom.vao = glGenVertexArrays();
+    geom.vbo = glGenBuffers();
+    geom.ebo = glGenBuffers();
+    glBindVertexArray(geom.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, geom.vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, geom.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.byteLength(), indices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, 32, 0);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return geom;
+}
+
+
+def writeTransform(buf, tx, ty, tz, sx, sy, sz)
+{
+    var m = MatrixScale(sx, sy, sz);
+    m = MatrixMultiply(m, MatrixTranslate(tx, ty, tz));
+    MatrixWriteBuffer(m, buf);
+}
+
+
+var pbrVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = normalize(mat3(uModel) * aNormal);
+    gl_Position = uProj * uView * world;
+}
+";
+
+var pbrFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+out vec4 FragColor;
+
+uniform vec3 uCameraPos;
+uniform vec3 uLightDir;
+uniform vec3 uLightColor;
+uniform vec3 uAlbedo;
+uniform float uMetallic;
+uniform float uRoughness;
+uniform float uAo;
+uniform float uEnvStrength;
+uniform float uExposure;
+uniform samplerCube uSkyCube;
+
+const float PI = 3.14159265359;
+
+float DistributionGGX(vec3 N, vec3 H, float roughness)
+{
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float denom = NdotH2 * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * denom * denom, 0.0001);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness)
+{
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return NdotV / max(NdotV * (1.0 - k) + k, 0.0001);
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
+{
+    float ggx2 = GeometrySchlickGGX(max(dot(N, V), 0.0), roughness);
+    float ggx1 = GeometrySchlickGGX(max(dot(N, L), 0.0), roughness);
+    return ggx1 * ggx2;
+}
+
+vec3 fresnelSchlick(float cosTheta, vec3 F0)
+{
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness)
+{
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+void main()
+{
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uCameraPos - vWorldPos);
+    vec3 R = reflect(-V, N);
+    vec3 L = normalize(-uLightDir);
+    vec3 H = normalize(V + L);
+
+    float roughness = clamp(uRoughness, 0.045, 1.0);
+    float metallic = clamp(uMetallic, 0.0, 1.0);
+    vec3 albedo = pow(uAlbedo, vec3(2.2));
+
+    vec3 F0 = vec3(0.04);
+    F0 = mix(F0, albedo, metallic);
+
+    float NDF = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+    vec3 numerator = NDF * G * F;
+    float denom = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+    vec3 specular = numerator / denom;
+
+    vec3 kS = F;
+    vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
+    float NdotL = max(dot(N, L), 0.0);
+
+    vec3 radiance = uLightColor;
+    vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
+
+    vec3 Fenv = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+    float mipLevel = roughness * 5.0;
+    vec3 envSpec = textureLod(uSkyCube, normalize(R), mipLevel).rgb;
+    vec3 envDiff = textureLod(uSkyCube, normalize(N), 5.0).rgb;
+    vec3 ambient = (kD * envDiff * albedo + envSpec * Fenv) * uAo * uEnvStrength;
+
+    vec3 color = ambient + Lo;
+    color = vec3(1.0) - exp(-color * uExposure);
+    color = pow(color, vec3(1.0 / 2.2));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var skyVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uView;
+uniform mat4 uProj;
+out vec3 vDir;
+
+void main()
+{
+    mat4 rotView = mat4(mat3(uView));
+    vec4 pos = uProj * rotView * vec4(aPos, 1.0);
+    gl_Position = pos.xyww;
+    vDir = aPos;
+}
+";
+
+var skyFsSrc = @"
+#version 330 core
+in vec3 vDir;
+out vec4 FragColor;
+uniform samplerCube uSkyCube;
+
+void main()
+{
+    vec3 color = texture(uSkyCube, normalize(vDir)).rgb;
+    color = pow(color, vec3(1.0 / 2.2));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1680, 960, "BuGL - PBR Lab");
+SetTargetFPS(60);
+
+if (!InitImGui())
+{
+    CloseWindow();
+    return;
+}
+
+var skyCube = loadSkyboxCubemap(PBR_SKY_SET);
+if (skyCube <= 0)
+{
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var sphereGeom = makeSphereGeometry(1.0, 48, 32);
+var cubeGeom = makeCubeGeometry();
+if (sphereGeom.vao <= 0 || cubeGeom.vao <= 0)
+{
+    sphereGeom.destroy();
+    cubeGeom.destroy();
+    destroySkyboxCubemap(skyCube);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var pbrProg = linkProgram(pbrVsSrc, pbrFsSrc);
+var skyProg = linkProgram(skyVsSrc, skyFsSrc);
+if (pbrProg <= 0 || skyProg <= 0)
+{
+    if (pbrProg > 0) glDeleteProgram(pbrProg);
+    if (skyProg > 0) glDeleteProgram(skyProg);
+    sphereGeom.destroy();
+    cubeGeom.destroy();
+    destroySkyboxCubemap(skyCube);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var pModel = glGetUniformLocation(pbrProg, "uModel");
+var pView = glGetUniformLocation(pbrProg, "uView");
+var pProj = glGetUniformLocation(pbrProg, "uProj");
+var pCameraPos = glGetUniformLocation(pbrProg, "uCameraPos");
+var pLightDir = glGetUniformLocation(pbrProg, "uLightDir");
+var pLightColor = glGetUniformLocation(pbrProg, "uLightColor");
+var pAlbedo = glGetUniformLocation(pbrProg, "uAlbedo");
+var pMetallic = glGetUniformLocation(pbrProg, "uMetallic");
+var pRoughness = glGetUniformLocation(pbrProg, "uRoughness");
+var pAo = glGetUniformLocation(pbrProg, "uAo");
+var pEnvStrength = glGetUniformLocation(pbrProg, "uEnvStrength");
+var pExposure = glGetUniformLocation(pbrProg, "uExposure");
+var pSky = glGetUniformLocation(pbrProg, "uSkyCube");
+
+var sView = glGetUniformLocation(skyProg, "uView");
+var sProj = glGetUniformLocation(skyProg, "uProj");
+var sSky = glGetUniformLocation(skyProg, "uSkyCube");
+
+glUseProgram(pbrProg);
+if (pSky >= 0) glUniform1i(pSky, 0);
+glUseProgram(skyProg);
+if (sSky >= 0) glUniform1i(sSky, 0);
+glUseProgram(0);
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var cachedScreenW = 0;
+var cachedScreenH = 0;
+var proj = MatrixIdentity();
+
+var focusX = 0.0;
+var focusY = 0.4;
+var focusZ = 0.0;
+var orbitDistance = 14.0;
+var yaw = -118.0;
+var pitch = -10.0;
+var showUi = true;
+
+var albedoR = 0.95;
+var albedoG = 0.17;
+var albedoB = 0.12;
+var aoStrength = 1.0;
+var envStrength = 1.10;
+var exposure = 1.20;
+var lightYaw = -28.0;
+var lightPitch = -38.0;
+var lightIntensity = 4.8;
+var previewMetallic = 0.1;
+var previewRoughness = 0.35;
+var useGrid = true;
+var rows = 5;
+var cols = 5;
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_G)) useGrid = !useGrid;
+    if (IsKeyPressed(KEY_R))
+    {
+        orbitDistance = 14.0;
+        yaw = -118.0;
+        pitch = -10.0;
+    }
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    orbitDistance = orbitDistance - GetMouseWheelMove() * 0.9;
+    if (orbitDistance < 4.0) orbitDistance = 4.0;
+    if (orbitDistance > 48.0) orbitDistance = 48.0;
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var dirX = cos(pitchRad) * cos(yawRad);
+    var dirY = sin(pitchRad);
+    var dirZ = cos(pitchRad) * sin(yawRad);
+    var dirLen = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+    if (dirLen < 0.0001) dirLen = 1.0;
+    dirX = dirX / dirLen;
+    dirY = dirY / dirLen;
+    dirZ = dirZ / dirLen;
+
+    var eyeX = focusX + dirX * orbitDistance;
+    var eyeY = focusY + dirY * orbitDistance;
+    var eyeZ = focusZ + dirZ * orbitDistance;
+
+    var screenW = GetScreenWidth();
+    var screenH = max(GetScreenHeight(), 1);
+    if (screenW != cachedScreenW || screenH != cachedScreenH)
+    {
+        proj = MatrixPerspective(55.0 * PI / 180.0, screenW / screenH, 0.02, 2000.0);
+        cachedScreenW = screenW;
+        cachedScreenH = screenH;
+    }
+
+    var view = MatrixLookAt(Vector3(eyeX, eyeY, eyeZ), Vector3(focusX, focusY, focusZ), Vector3(0.0, 1.0, 0.0));
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    var lightYawRad = lightYaw * PI / 180.0;
+    var lightPitchRad = lightPitch * PI / 180.0;
+    var lightDirX = cos(lightPitchRad) * cos(lightYawRad);
+    var lightDirY = sin(lightPitchRad);
+    var lightDirZ = cos(lightPitchRad) * sin(lightYawRad);
+    var lightDirLen = sqrt(lightDirX * lightDirX + lightDirY * lightDirY + lightDirZ * lightDirZ);
+    if (lightDirLen < 0.0001) lightDirLen = 1.0;
+    lightDirX = lightDirX / lightDirLen;
+    lightDirY = lightDirY / lightDirLen;
+    lightDirZ = lightDirZ / lightDirLen;
+
+    BeginDrawing();
+    glViewport(0, 0, screenW, screenH);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glClearColor(0.03, 0.04, 0.05, 1.0);
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glDepthMask(GL_TRUE);
+
+    glDepthFunc(GL_LEQUAL);
+    glUseProgram(skyProg);
+    glUniformMatrix4fv(sView, 1, false, viewBuf);
+    glUniformMatrix4fv(sProj, 1, false, projBuf);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, skyCube);
+    glBindVertexArray(cubeGeom.vao);
+    glDrawElements(GL_TRIANGLES, cubeGeom.indexCount, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glUseProgram(0);
+    glDepthFunc(GL_LESS);
+
+    glUseProgram(pbrProg);
+    glUniformMatrix4fv(pView, 1, false, viewBuf);
+    glUniformMatrix4fv(pProj, 1, false, projBuf);
+    glUniform3f(pCameraPos, eyeX, eyeY, eyeZ);
+    glUniform3f(pLightDir, lightDirX, lightDirY, lightDirZ);
+    glUniform3f(pLightColor, lightIntensity, lightIntensity, lightIntensity);
+    glUniform1f(pAo, aoStrength);
+    glUniform1f(pEnvStrength, envStrength);
+    glUniform1f(pExposure, exposure);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, skyCube);
+    glBindVertexArray(sphereGeom.vao);
+
+    if (useGrid)
+    {
+        for (var row = 0; row < rows; row += 1)
+        {
+            for (var col = 0; col < cols; col += 1)
+            {
+                var metallic = col / max(cols - 1, 1);
+                var roughness = row / max(rows - 1, 1);
+                if (roughness < 0.05) roughness = 0.05;
+                var px = (col - (cols - 1) * 0.5) * 2.3;
+                var py = (rows - 1 - row - (rows - 1) * 0.5) * 2.0 + 2.0;
+                var pz = 0.0;
+                writeTransform(modelBuf, px, py, pz, 0.85, 0.85, 0.85);
+                glUniformMatrix4fv(pModel, 1, false, modelBuf);
+                glUniform3f(pAlbedo, albedoR, albedoG, albedoB);
+                glUniform1f(pMetallic, metallic);
+                glUniform1f(pRoughness, roughness);
+                glDrawElements(GL_TRIANGLES, sphereGeom.indexCount, GL_UNSIGNED_INT, 0);
+            }
+        }
+    }
+    else
+    {
+        writeTransform(modelBuf, 0.0, 1.8, 0.0, 1.6, 1.6, 1.6);
+        glUniformMatrix4fv(pModel, 1, false, modelBuf);
+        glUniform3f(pAlbedo, albedoR, albedoG, albedoB);
+        glUniform1f(pMetallic, previewMetallic);
+        glUniform1f(pRoughness, previewRoughness < 0.05 ? 0.05 : previewRoughness);
+        glDrawElements(GL_TRIANGLES, sphereGeom.indexCount, GL_UNSIGNED_INT, 0);
+    }
+
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glUseProgram(0);
+
+    DrawRectangle(18, 18, 1180, 118, Color(0, 0, 0, 150));
+    DrawText("PBR Lab  RMB orbit | wheel zoom | TAB UI | G grid/single | R reset", 30, 30, 22, Color(245, 245, 245, 255));
+    DrawText("Grid mode shows metalness across X and roughness across Y. Single mode lets you inspect one sphere in detail.", 30, 60, 18, Color(190, 220, 255, 255));
+    DrawText("Sky set: " + PBR_SKY_SET + "  FPS: " + str(GetFPS()), 30, 88, 18, Color(180, 255, 200, 255));
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = ImGui.Begin("PBR Lab");
+        if (panel != nil && panel)
+        {
+            ImGui.Text("Classical metal/roughness playground before taking PBR to Sponza.");
+            ImGui.Separator();
+
+            var (changedGrid, nextGrid) = ImGui.Checkbox("Use grid", useGrid);
+            if (changedGrid) useGrid = nextGrid;
+
+            var (changedAlbedoR, nextAlbedoR) = ImGui.SliderFloat("Albedo R", albedoR, 0.0, 1.0, "%.2f");
+            if (changedAlbedoR) albedoR = nextAlbedoR;
+            var (changedAlbedoG, nextAlbedoG) = ImGui.SliderFloat("Albedo G", albedoG, 0.0, 1.0, "%.2f");
+            if (changedAlbedoG) albedoG = nextAlbedoG;
+            var (changedAlbedoB, nextAlbedoB) = ImGui.SliderFloat("Albedo B", albedoB, 0.0, 1.0, "%.2f");
+            if (changedAlbedoB) albedoB = nextAlbedoB;
+
+            var (changedAo, nextAo) = ImGui.SliderFloat("AO", aoStrength, 0.0, 1.5, "%.2f");
+            if (changedAo) aoStrength = nextAo;
+
+            var (changedEnv, nextEnv) = ImGui.SliderFloat("Env strength", envStrength, 0.0, 3.0, "%.2f");
+            if (changedEnv) envStrength = nextEnv;
+
+            var (changedExposure, nextExposure) = ImGui.SliderFloat("Exposure", exposure, 0.2, 3.0, "%.2f");
+            if (changedExposure) exposure = nextExposure;
+
+            var (changedLightIntensity, nextLightIntensity) = ImGui.SliderFloat("Light intensity", lightIntensity, 0.0, 12.0, "%.2f");
+            if (changedLightIntensity) lightIntensity = nextLightIntensity;
+
+            var (changedLightYaw, nextLightYaw) = ImGui.SliderFloat("Light yaw", lightYaw, -180.0, 180.0, "%.1f");
+            if (changedLightYaw) lightYaw = nextLightYaw;
+
+            var (changedLightPitch, nextLightPitch) = ImGui.SliderFloat("Light pitch", lightPitch, -85.0, -1.0, "%.1f");
+            if (changedLightPitch) lightPitch = nextLightPitch;
+
+            if (!useGrid)
+            {
+                var (changedMetal, nextMetal) = ImGui.SliderFloat("Metallic", previewMetallic, 0.0, 1.0, "%.2f");
+                if (changedMetal) previewMetallic = nextMetal;
+                var (changedRough, nextRough) = ImGui.SliderFloat("Roughness", previewRoughness, 0.0, 1.0, "%.2f");
+                if (changedRough) previewRoughness = nextRough;
+            }
+        }
+        ImGui.End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+glDeleteProgram(pbrProg);
+glDeleteProgram(skyProg);
+sphereGeom.destroy();
+cubeGeom.destroy();
+destroySkyboxCubemap(skyCube);
+ShutdownImGui();
+CloseWindow();

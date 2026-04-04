@@ -1,0 +1,851 @@
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import GLM;
+using GLM;
+import ImGui;
+using ImGui;
+
+include "../libs/lib_meshbin.bu";
+
+var LAB_CAMERA_FOV_RAD = 60.0 * PI / 180.0;
+var LAB_CAMERA_NEAR = 0.02;
+var LAB_CAMERA_FAR = 4000.0;
+
+var hudBg = Color(0, 0, 0, 152);
+var hudFg = Color(245, 245, 245, 255);
+var hudInfo = Color(190, 220, 255, 255);
+var hudOk = Color(180, 255, 200, 255);
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Godray powerplant shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Godray powerplant shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+class PostTarget
+{
+    var fbo;
+    var color;
+    var depth;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteRenderbuffers(self.depth);
+        if (self.color > 0) glDeleteTextures(self.color);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+def makePostTarget(width, height, withDepth)
+{
+    var rt = PostTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.color = glGenTextures();
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.color, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+
+    if (withDepth)
+    {
+        rt.depth = glGenRenderbuffers();
+        glBindRenderbuffer(GL_RENDERBUFFER, rt.depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt.depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    }
+
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        rt.destroy();
+        return nil;
+    }
+    return rt;
+}
+
+
+def resizePostTarget(rt, width, height, withDepth)
+{
+    if (rt == nil) return nil;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    if (rt.width == width && rt.height == height) return rt;
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (withDepth && rt.depth > 0)
+    {
+        glBindRenderbuffer(GL_RENDERBUFFER, rt.depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    }
+
+    rt.width = width;
+    rt.height = height;
+    return rt;
+}
+
+
+def makeCubeGeometry()
+{
+    var verts = Float32Array([
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,
+         1.0, -1.0,  1.0,   0.0,  0.0,  1.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,
+        -1.0,  1.0,  1.0,   0.0,  0.0,  1.0,
+
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,
+        -1.0,  1.0, -1.0,   0.0,  0.0, -1.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,
+         1.0, -1.0, -1.0,   0.0,  0.0, -1.0,
+
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,
+        -1.0, -1.0,  1.0,  -1.0,  0.0,  0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,
+        -1.0,  1.0, -1.0,  -1.0,  0.0,  0.0,
+
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,
+         1.0, -1.0,  1.0,   1.0,  0.0,  0.0,
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,
+         1.0,  1.0, -1.0,   1.0,  0.0,  0.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,
+
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,
+        -1.0,  1.0,  1.0,   0.0,  1.0,  0.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,
+         1.0,  1.0, -1.0,   0.0,  1.0,  0.0,
+
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0,
+        -1.0, -1.0,  1.0,   0.0, -1.0,  0.0,
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,
+         1.0, -1.0, -1.0,   0.0, -1.0,  0.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0]
+    );
+
+    var vao = glGenVertexArrays();
+    var vbo = glGenBuffers();
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, 24, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, false, 24, 12);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return (vao, vbo);
+}
+
+
+def makeQuadGeometry()
+{
+    var verts = Float32Array([
+        -1.0, -1.0, 0.0, 0.0,
+         1.0, -1.0, 1.0, 0.0,
+         1.0,  1.0, 1.0, 1.0,
+        -1.0, -1.0, 0.0, 0.0,
+         1.0,  1.0, 1.0, 1.0,
+        -1.0,  1.0, 0.0, 1.0
+    ]);
+
+    var vao = glGenVertexArrays();
+    var vbo = glGenBuffers();
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, false, 16, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, false, 16, 8);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return (vao, vbo);
+}
+
+
+def drawFullscreenQuad(vao)
+{
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+
+def writeModelMatrix(buf, tx, ty, tz, sx, sy, sz)
+{
+    var m = MatrixScale(sx, sy, sz);
+    m = MatrixMultiply(m, MatrixTranslate(tx, ty, tz));
+    MatrixWriteBuffer(m, buf);
+}
+
+
+def projectWorldToScreenUv(view, proj, x, y, z)
+{
+    var vp = MatrixMultiply(view, proj);
+    var cx = vp.m0 * x + vp.m4 * y + vp.m8  * z + vp.m12;
+    var cy = vp.m1 * x + vp.m5 * y + vp.m9  * z + vp.m13;
+    var cw = vp.m3 * x + vp.m7 * y + vp.m11 * z + vp.m15;
+    if (abs(cw) < 0.00001) return (0.5, 0.5, false);
+    var ndcX = cx / cw;
+    var ndcY = cy / cw;
+    var uvX = ndcX * 0.5 + 0.5;
+    var uvY = ndcY * 0.5 + 0.5;
+    var visible = cw > 0.0 && uvX >= 0.0 && uvX <= 1.0 && uvY >= 0.0 && uvY <= 1.0;
+    return (uvX, uvY, visible);
+}
+
+
+var meshVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = normalize(mat3(uModel) * aNormal);
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var sceneFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uTex;
+uniform int uHasTex;
+uniform vec3 uTint;
+uniform vec3 uLightPos;
+uniform vec3 uAmbient;
+uniform float uEmissive;
+
+void main()
+{
+    vec3 base = uHasTex != 0 ? texture(uTex, vUV).rgb : uTint;
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(uLightPos - vWorldPos);
+    float ndl = max(dot(N, L), 0.0);
+    vec3 hemi = mix(vec3(0.05, 0.06, 0.08), vec3(0.20, 0.22, 0.24), clamp(N.y * 0.5 + 0.5, 0.0, 1.0));
+    vec3 color = base * (uAmbient + hemi * 0.48 + vec3(ndl * 0.85)) + uTint * uEmissive;
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var occFsSrc = @"
+#version 330 core
+out vec4 FragColor;
+uniform vec3 uTint;
+
+void main()
+{
+    FragColor = vec4(uTint, 1.0);
+}
+";
+
+var quadVsSrc = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+out vec2 vUV;
+
+void main()
+{
+    vUV = aUV;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+";
+
+var rayFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uOcclusion;
+uniform vec2 uLightScreenPos;
+uniform float uExposure;
+uniform float uDecay;
+uniform float uDensity;
+uniform float uWeight;
+uniform int uLightVisible;
+
+void main()
+{
+    if (uLightVisible == 0)
+    {
+        FragColor = vec4(0.0);
+        return;
+    }
+
+    const int NUM_SAMPLES = 72;
+    vec2 delta = (vUV - uLightScreenPos) * (uDensity / float(NUM_SAMPLES));
+    vec2 coord = vUV;
+    float illuminationDecay = 1.0;
+    vec3 color = vec3(0.0);
+
+    for (int i = 0; i < NUM_SAMPLES; ++i)
+    {
+        coord -= delta;
+        vec3 sampleCol = texture(uOcclusion, coord).rgb;
+        sampleCol *= illuminationDecay * uWeight;
+        color += sampleCol;
+        illuminationDecay *= uDecay;
+    }
+
+    color *= uExposure;
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var compositeFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uScene;
+uniform sampler2D uRays;
+uniform float uRayStrength;
+uniform float uExposure;
+
+void main()
+{
+    vec3 scene = texture(uScene, vUV).rgb;
+    vec3 rays = texture(uRays, vUV).rgb * uRayStrength;
+    vec3 hdr = scene + rays;
+    vec3 mapped = vec3(1.0) - exp(-hdr * uExposure);
+    mapped = pow(mapped, vec3(1.0 / 2.2));
+    FragColor = vec4(mapped, 1.0);
+}
+";
+
+var meshPath = resolveAssetPath(
+    "assets/powerplant/powerplant.h3d",
+    "../assets/powerplant/powerplant.h3d",
+    "../../assets/powerplant/powerplant.h3d"
+);
+if (meshPath == nil)
+{
+    print("powerplant.h3d not found");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1680, 960, "BuGL - Godray Powerplant");
+SetTargetFPS(60);
+
+if (!InitImGui())
+{
+    CloseWindow();
+    return;
+}
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load powerplant meshbin: " + meshPath);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 300.0;
+var targetRadius = 420.0;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 80.0) sceneRadius = 80.0;
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+
+var (cubeVAO, cubeVBO) = makeCubeGeometry();
+var (quadVAO, quadVBO) = makeQuadGeometry();
+
+var sceneProg = linkProgram(meshVsSrc, sceneFsSrc);
+var occProg = linkProgram(meshVsSrc, occFsSrc);
+var compositeProg = linkProgram(quadVsSrc, compositeFsSrc);
+var rayProg = linkProgram(quadVsSrc, rayFsSrc);
+if (sceneProg <= 0 || occProg <= 0 || compositeProg <= 0 || rayProg <= 0)
+{
+    if (sceneProg > 0) glDeleteProgram(sceneProg);
+    if (occProg > 0) glDeleteProgram(occProg);
+    if (compositeProg > 0) glDeleteProgram(compositeProg);
+    if (rayProg > 0) glDeleteProgram(rayProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    glDeleteBuffers(quadVBO);
+    glDeleteVertexArrays(quadVAO);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var sModel = glGetUniformLocation(sceneProg, "uModel");
+var sView = glGetUniformLocation(sceneProg, "uView");
+var sProj = glGetUniformLocation(sceneProg, "uProj");
+var sTex = glGetUniformLocation(sceneProg, "uTex");
+var sHasTex = glGetUniformLocation(sceneProg, "uHasTex");
+var sTint = glGetUniformLocation(sceneProg, "uTint");
+var sLightPos = glGetUniformLocation(sceneProg, "uLightPos");
+var sAmbient = glGetUniformLocation(sceneProg, "uAmbient");
+var sEmissive = glGetUniformLocation(sceneProg, "uEmissive");
+
+var oModel = glGetUniformLocation(occProg, "uModel");
+var oView = glGetUniformLocation(occProg, "uView");
+var oProj = glGetUniformLocation(occProg, "uProj");
+var oTint = glGetUniformLocation(occProg, "uTint");
+
+var rOccTex = glGetUniformLocation(rayProg, "uOcclusion");
+var rLightScreen = glGetUniformLocation(rayProg, "uLightScreenPos");
+var rExposure = glGetUniformLocation(rayProg, "uExposure");
+var rDecay = glGetUniformLocation(rayProg, "uDecay");
+var rDensity = glGetUniformLocation(rayProg, "uDensity");
+var rWeight = glGetUniformLocation(rayProg, "uWeight");
+var rVisible = glGetUniformLocation(rayProg, "uLightVisible");
+
+var cScene = glGetUniformLocation(compositeProg, "uScene");
+var cRays = glGetUniformLocation(compositeProg, "uRays");
+var cRayStrength = glGetUniformLocation(compositeProg, "uRayStrength");
+var cExposure = glGetUniformLocation(compositeProg, "uExposure");
+
+glUseProgram(sceneProg);
+if (sTex >= 0) glUniform1i(sTex, 0);
+glUseProgram(rayProg);
+if (rOccTex >= 0) glUniform1i(rOccTex, 0);
+glUseProgram(compositeProg);
+if (cScene >= 0) glUniform1i(cScene, 0);
+if (cRays >= 0) glUniform1i(cRays, 1);
+glUseProgram(0);
+
+glEnable(GL_DEPTH_TEST);
+glEnable(GL_CULL_FACE);
+glCullFace(GL_BACK);
+glFrontFace(GL_CCW);
+glClearColor(0.04, 0.05, 0.06, 1.0);
+
+var sceneRt = makePostTarget(1280, 720, true);
+var occRt = makePostTarget(1280, 720, true);
+var rayRt = makePostTarget(1280, 720, false);
+if (sceneRt == nil || occRt == nil || rayRt == nil)
+{
+    if (sceneRt != nil) sceneRt.destroy();
+    if (occRt != nil) occRt.destroy();
+    if (rayRt != nil) rayRt.destroy();
+    glDeleteProgram(sceneProg);
+    glDeleteProgram(occProg);
+    glDeleteProgram(compositeProg);
+    glDeleteProgram(rayProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    glDeleteBuffers(quadVBO);
+    glDeleteVertexArrays(quadVAO);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var proj = MatrixIdentity();
+var cachedScreenW = 0;
+var cachedScreenH = 0;
+
+var eyeX = focusX + sceneRadius * 0.72;
+var eyeY = focusY + sceneRadius * 0.28;
+var eyeZ = focusZ + sceneRadius * 0.72;
+var yaw = -135.0;
+var pitch = -18.0;
+var camMoveBoost = 1.0;
+var showUi = true;
+
+var lightX = sceneRadius * 0.18;
+var lightY = sceneRadius * 0.42;
+var lightZ = -sceneRadius * 0.08;
+var lightScale = sceneRadius * 0.022;
+var ambientStrength = 0.06;
+var rayExposure = 0.34;
+var rayDecay = 0.958;
+var rayDensity = 0.96;
+var rayWeight = 0.12;
+var rayStrength = 1.65;
+var finalExposure = 1.05;
+
+
+def renderPowerplantScene(view, proj)
+{
+    var modelMat = mesh.makeModelMatrix();
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    glUseProgram(sceneProg);
+    glUniformMatrix4fv(sModel, 1, false, modelBuf);
+    glUniformMatrix4fv(sView, 1, false, viewBuf);
+    glUniformMatrix4fv(sProj, 1, false, projBuf);
+    glUniform3f(sLightPos, lightX, lightY, lightZ);
+    glUniform3f(sAmbient, ambientStrength, ambientStrength + 0.015, ambientStrength + 0.03);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+    {
+        var b = mesh.buffers[i];
+        var texId = 0;
+        var tintR = 0.74; var tintG = 0.74; var tintB = 0.74;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            tintR = mat.diffuseR;
+            tintG = mat.diffuseG;
+            tintB = mat.diffuseB;
+            if (len(mat.textureIds) > 0) texId = mat.textureIds[0];
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        glUniform1i(sHasTex, texId > 0 ? 1 : 0);
+        glUniform3f(sTint, tintR, tintG, tintB);
+        glUniform1f(sEmissive, 0.0);
+        b.draw();
+    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindVertexArray(cubeVAO);
+    writeModelMatrix(modelBuf, lightX, lightY, lightZ, lightScale, lightScale, lightScale);
+    glUniformMatrix4fv(sModel, 1, false, modelBuf);
+    glUniform1i(sHasTex, 0);
+    glUniform3f(sTint, 1.00, 0.92, 0.68);
+    glUniform1f(sEmissive, 11.0);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glBindVertexArray(0);
+    glUseProgram(0);
+}
+
+
+def renderPowerplantOcclusion(view, proj)
+{
+    var modelMat = mesh.makeModelMatrix();
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    glUseProgram(occProg);
+    glUniformMatrix4fv(oModel, 1, false, modelBuf);
+    glUniformMatrix4fv(oView, 1, false, viewBuf);
+    glUniformMatrix4fv(oProj, 1, false, projBuf);
+    glUniform3f(oTint, 0.0, 0.0, 0.0);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+        mesh.buffers[i].draw();
+
+    glBindVertexArray(cubeVAO);
+    writeModelMatrix(modelBuf, lightX, lightY, lightZ, lightScale, lightScale, lightScale);
+    glUniformMatrix4fv(oModel, 1, false, modelBuf);
+    glUniform3f(oTint, 1.0, 1.0, 1.0);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glBindVertexArray(0);
+    glUseProgram(0);
+}
+
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_R))
+    {
+        eyeX = focusX + sceneRadius * 0.72;
+        eyeY = focusY + sceneRadius * 0.28;
+        eyeZ = focusZ + sceneRadius * 0.72;
+        yaw = -135.0;
+        pitch = -18.0;
+    }
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx = fx / fl; fy = fy / fl; fz = fz / fl;
+    }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001) { rx = rx / rl; rz = rz / rl; }
+
+    var moveSpeed = sceneRadius * 0.35 * camMoveBoost;
+    if (moveSpeed < 10.0) moveSpeed = 10.0;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) moveSpeed = moveSpeed * 3.0;
+    var step = moveSpeed * dt;
+
+    if (IsKeyDown(KEY_W)) { eyeX += fx * step; eyeY += fy * step; eyeZ += fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * step; eyeY -= fy * step; eyeZ -= fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * step; eyeZ -= rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * step; eyeZ += rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += step;
+    if (IsKeyDown(KEY_C)) eyeY -= step;
+
+    var screenW = GetScreenWidth();
+    var screenH = max(GetScreenHeight(), 1);
+    if (screenW != cachedScreenW || screenH != cachedScreenH)
+    {
+        proj = MatrixPerspective(LAB_CAMERA_FOV_RAD, screenW / screenH, LAB_CAMERA_NEAR, LAB_CAMERA_FAR);
+        cachedScreenW = screenW;
+        cachedScreenH = screenH;
+    }
+
+    sceneRt = resizePostTarget(sceneRt, screenW, screenH, true);
+    occRt = resizePostTarget(occRt, screenW, screenH, true);
+    rayRt = resizePostTarget(rayRt, screenW, screenH, false);
+
+    var view = MatrixLookAt(
+        Vector3(eyeX, eyeY, eyeZ),
+        Vector3(eyeX + fx, eyeY + fy, eyeZ + fz),
+        Vector3(0.0, 1.0, 0.0)
+    );
+
+    var (lightUvX, lightUvY, lightVisible) = projectWorldToScreenUv(view, proj, lightX, lightY, lightZ);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, sceneRt.fbo);
+    glViewport(0, 0, sceneRt.width, sceneRt.height);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    renderPowerplantScene(view, proj);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, occRt.fbo);
+    glViewport(0, 0, occRt.width, occRt.height);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    renderPowerplantOcclusion(view, proj);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rayRt.fbo);
+    glViewport(0, 0, rayRt.width, rayRt.height);
+    glDisable(GL_DEPTH_TEST);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(rayProg);
+    glUniform2f(rLightScreen, lightUvX, lightUvY);
+    glUniform1f(rExposure, rayExposure);
+    glUniform1f(rDecay, rayDecay);
+    glUniform1f(rDensity, rayDensity);
+    glUniform1f(rWeight, rayWeight);
+    glUniform1i(rVisible, lightVisible ? 1 : 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, occRt.color);
+    drawFullscreenQuad(quadVAO);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    glEnable(GL_DEPTH_TEST);
+
+    BeginDrawing();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, screenW, screenH);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(compositeProg);
+    glUniform1f(cRayStrength, rayStrength);
+    glUniform1f(cExposure, finalExposure);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sceneRt.color);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, rayRt.color);
+    drawFullscreenQuad(quadVAO);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glUseProgram(0);
+    glEnable(GL_DEPTH_TEST);
+
+    DrawRectangle(18, 18, 1200, 122, hudBg);
+    DrawText("Godray Powerplant  RMB look | WASD move | SPACE/C up-down | SHIFT faster | TAB UI", 30, 30, 24, hudFg);
+    DrawText("Real-scene godray lab using powerplant.h3d: scene RT -> occlusion RT -> radial blur -> composite.", 30, 62, 18, hudInfo);
+    DrawText("Light UV: " + str(lightUvX) + ", " + str(lightUvY) + "  Visible: " + str(lightVisible) + "  FPS: " + str(GetFPS()), 30, 92, 18, hudOk);
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = ImGui.Begin("Godray Powerplant");
+        if (panel != nil && panel)
+        {
+            ImGui.Text("A more realistic scene for the same godray pipeline.");
+            ImGui.Separator();
+
+            var (changedAmbient, nextAmbient) = ImGui.SliderFloat("Ambient", ambientStrength, 0.0, 0.25, "%.2f");
+            if (changedAmbient) ambientStrength = nextAmbient;
+
+            var (changedRayExposure, nextRayExposure) = ImGui.SliderFloat("Ray exposure", rayExposure, 0.0, 1.5, "%.2f");
+            if (changedRayExposure) rayExposure = nextRayExposure;
+
+            var (changedDecay, nextDecay) = ImGui.SliderFloat("Ray decay", rayDecay, 0.84, 0.995, "%.3f");
+            if (changedDecay) rayDecay = nextDecay;
+
+            var (changedDensity, nextDensity) = ImGui.SliderFloat("Ray density", rayDensity, 0.1, 1.8, "%.2f");
+            if (changedDensity) rayDensity = nextDensity;
+
+            var (changedWeight, nextWeight) = ImGui.SliderFloat("Ray weight", rayWeight, 0.01, 0.35, "%.3f");
+            if (changedWeight) rayWeight = nextWeight;
+
+            var (changedStrength, nextStrength) = ImGui.SliderFloat("Ray strength", rayStrength, 0.0, 3.0, "%.2f");
+            if (changedStrength) rayStrength = nextStrength;
+
+            var (changedExposure, nextExposure) = ImGui.SliderFloat("Final exposure", finalExposure, 0.4, 2.5, "%.2f");
+            if (changedExposure) finalExposure = nextExposure;
+
+            var (changedLightX, nextLightX) = ImGui.SliderFloat("Light X", lightX, -sceneRadius * 0.8, sceneRadius * 0.8, "%.1f");
+            if (changedLightX) lightX = nextLightX;
+
+            var (changedLightY, nextLightY) = ImGui.SliderFloat("Light Y", lightY, 0.0, sceneRadius * 0.9, "%.1f");
+            if (changedLightY) lightY = nextLightY;
+
+            var (changedLightZ, nextLightZ) = ImGui.SliderFloat("Light Z", lightZ, -sceneRadius * 0.8, sceneRadius * 0.8, "%.1f");
+            if (changedLightZ) lightZ = nextLightZ;
+
+            ImGui.Separator();
+            ImGui.Text("Scene / Occlusion / Rays");
+            ImGui.ImageButton("##powerplant_scene", sceneRt.color, 240, 135, 0.0, 1.0, 1.0, 0.0);
+            ImGui.SameLine();
+            ImGui.ImageButton("##powerplant_occ", occRt.color, 240, 135, 0.0, 1.0, 1.0, 0.0);
+            ImGui.SameLine();
+            ImGui.ImageButton("##powerplant_rays", rayRt.color, 240, 135, 0.0, 1.0, 1.0, 0.0);
+        }
+        ImGui.End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+sceneRt.destroy();
+occRt.destroy();
+rayRt.destroy();
+glDeleteProgram(sceneProg);
+glDeleteProgram(occProg);
+glDeleteProgram(compositeProg);
+glDeleteProgram(rayProg);
+glDeleteBuffers(cubeVBO);
+glDeleteVertexArrays(cubeVAO);
+glDeleteBuffers(quadVBO);
+glDeleteVertexArrays(quadVAO);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();

@@ -1,0 +1,1094 @@
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import RLGL;
+using RLGL;
+import ImGui;
+using ImGui;
+import STB;
+using STB;
+
+include "../libs/lib_meshbin.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("NormalMap SSAO Sponza shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("NormalMap SSAO Sponza shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def loadTexture2D(filePath, flipY, withMipmaps, repeatMode)
+{
+    if (filePath == nil || !path.exists(filePath)) return 0;
+
+    stbi_set_flip_vertically_on_load(flipY ? 1 : 0);
+    var (w, h, ch, pixels) = stbi_load(filePath, 4);
+    if (pixels == nil) return 0;
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (withMipmaps) glGenerateMipmap(GL_TEXTURE_2D);
+    if (withMipmaps) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    else glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def stringEndsWith(s, suffix)
+{
+    if (len(suffix) > len(s)) return false;
+    var start = len(s) - len(suffix);
+    for (var i = 0; i < len(suffix); i += 1)
+    {
+        if (s[start + i] != suffix[i]) return false;
+    }
+    return true;
+}
+
+
+def stringReplaceSuffix(s, suffix, replacement)
+{
+    if (!stringEndsWith(s, suffix)) return s;
+    var out = "";
+    var limit = len(s) - len(suffix);
+    for (var i = 0; i < limit; i += 1) out = out + s[i];
+    return out + replacement;
+}
+
+
+def inferNormalMapPath(model, texName)
+{
+    if (texName == nil || len(texName) == 0) return nil;
+    var bare = meshbinStripExt(texName);
+    var candidate = bare + "_ddn";
+    if (stringEndsWith(bare, "_diff"))
+        candidate = stringReplaceSuffix(bare, "_diff", "_ddn");
+    return model.resolveTexturePath(candidate);
+}
+
+
+def findCachedTexture(pathKey, loadedPaths, loadedIds)
+{
+    for (var i = 0; i < len(loadedPaths); i += 1)
+    {
+        if (loadedPaths[i] == pathKey) return loadedIds[i];
+    }
+    return -1;
+}
+
+
+class GBufferTarget
+{
+    var fbo;
+    var posTex;
+    var normalTex;
+    var albedoTex;
+    var depth;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.posTex = 0;
+        self.normalTex = 0;
+        self.albedoTex = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteRenderbuffers(self.depth);
+        if (self.posTex > 0) glDeleteTextures(self.posTex);
+        if (self.normalTex > 0) glDeleteTextures(self.normalTex);
+        if (self.albedoTex > 0) glDeleteTextures(self.albedoTex);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.posTex = 0;
+        self.normalTex = 0;
+        self.albedoTex = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+class ColorTarget
+{
+    var fbo;
+    var color;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.color = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.color > 0) glDeleteTextures(self.color);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.color = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+def makeGBuffer(width, height)
+{
+    var rt = GBufferTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.posTex = glGenTextures();
+    rt.normalTex = glGenTextures();
+    rt.albedoTex = glGenTextures();
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+
+    glBindTexture(GL_TEXTURE_2D, rt.posTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.posTex, 0);
+
+    glBindTexture(GL_TEXTURE_2D, rt.normalTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, rt.normalTex, 0);
+
+    glBindTexture(GL_TEXTURE_2D, rt.albedoTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, rt.albedoTex, 0);
+
+    rt.depth = glGenRenderbuffers();
+    glBindRenderbuffer(GL_RENDERBUFFER, rt.depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt.depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    glDrawBuffers(3, [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("NormalMap SSAO Sponza GBuffer incomplete: " + status);
+        rt.destroy();
+        return nil;
+    }
+
+    return rt;
+}
+
+
+def makeColorTarget(width, height)
+{
+    var rt = ColorTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.color = glGenTextures();
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.color, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("NormalMap SSAO Sponza target incomplete: " + status);
+        rt.destroy();
+        return nil;
+    }
+    return rt;
+}
+
+
+def drawFullscreenQuad(vao)
+{
+    glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+
+var meshPath = resolveAssetPath(
+    "assets/sponza/sponza.h3d",
+    "../assets/sponza/sponza.h3d",
+    "../../assets/sponza/sponza.h3d"
+);
+if (meshPath == nil)
+{
+    print("sponza.h3d not found");
+    return;
+}
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1680, 960, "BuGL - Normal Map SSAO Sponza");
+SetTargetFPS(60);
+
+if (!InitImGui())
+{
+    CloseWindow();
+    return;
+}
+
+var mesh = MeshBinModel();
+if (!mesh.load(meshPath))
+{
+    print("Failed to load meshbin: " + meshPath);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var rawRadius = max(mesh.sizeX, max(mesh.sizeY, mesh.sizeZ));
+if (rawRadius < 1.0) rawRadius = 300.0;
+var targetRadius = 420.0;
+mesh.scale = min(1.0, targetRadius / rawRadius);
+mesh.posX = -mesh.centerX * mesh.scale;
+mesh.posY = -mesh.centerY * mesh.scale;
+mesh.posZ = -mesh.centerZ * mesh.scale;
+
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+var sceneRadius = rawRadius * mesh.scale;
+if (sceneRadius < 40.0) sceneRadius = 40.0;
+
+var eyeX = focusX + sceneRadius * 0.8;
+var eyeY = focusY + sceneRadius * 0.35;
+var eyeZ = focusZ + sceneRadius * 0.8;
+var yaw = -90.0;
+var pitch = -18.0;
+var showUi = true;
+
+var materialNormalIds = [];
+var materialNormalPaths = [];
+var loadedNormalPaths = [];
+var loadedNormalTexIds = [];
+var loadedNormalCount = 0;
+
+for (var i = 0; i < len(mesh.materials); i += 1)
+{
+    var normalId = 0;
+    var normalPath = "";
+    var mat = mesh.materials[i];
+    if (len(mat.textureNames) > 0)
+    {
+        normalPath = inferNormalMapPath(mesh, mat.textureNames[0]);
+        if (normalPath != nil)
+        {
+            var cachedTex = findCachedTexture(normalPath, loadedNormalPaths, loadedNormalTexIds);
+            if (cachedTex < 0)
+            {
+                cachedTex = loadTexture2D(normalPath, true, true, true);
+                if (cachedTex > 0)
+                {
+                    loadedNormalPaths.push(normalPath);
+                    loadedNormalTexIds.push(cachedTex);
+                    loadedNormalCount += 1;
+                }
+            }
+            if (cachedTex > 0) normalId = cachedTex;
+        }
+    }
+    materialNormalIds.push(normalId);
+    materialNormalPaths.push(normalPath == nil ? "" : normalPath);
+}
+
+var gVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vViewPos;
+out vec3 vViewNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vec4 view = uView * world;
+    vViewPos = view.xyz;
+    vViewNormal = normalize(mat3(uView * uModel) * aNormal);
+    vUV = aUV;
+    gl_Position = uProj * view;
+}
+";
+
+var gFsSrc = @"
+#version 330 core
+layout(location = 0) out vec4 gPosition;
+layout(location = 1) out vec4 gNormal;
+layout(location = 2) out vec4 gAlbedo;
+
+in vec3 vViewPos;
+in vec3 vViewNormal;
+in vec2 vUV;
+
+uniform sampler2D uTex;
+uniform sampler2D uNormalTex;
+uniform int uHasTex;
+uniform int uHasNormalTex;
+uniform int uUseNormalMap;
+uniform float uNormalStrength;
+uniform vec3 uTint;
+
+mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv)
+{
+    vec3 dp1 = dFdx(p);
+    vec3 dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    return mat3(T * invmax, B * invmax, N);
+}
+
+void main()
+{
+    vec3 albedo = uHasTex != 0 ? texture(uTex, vUV).rgb : uTint;
+    vec3 N = normalize(vViewNormal);
+
+    if (uUseNormalMap != 0 && uHasNormalTex != 0)
+    {
+        vec3 mapN = texture(uNormalTex, vUV).xyz * 2.0 - 1.0;
+        mapN.xy *= uNormalStrength;
+        mapN = normalize(mapN);
+        mat3 TBN = cotangentFrame(N, vViewPos, vUV);
+        N = normalize(TBN * mapN);
+    }
+
+    gPosition = vec4(vViewPos, 1.0);
+    gNormal = vec4(N * 0.5 + 0.5, 1.0);
+    gAlbedo = vec4(albedo, 1.0);
+}
+";
+
+var qVsSrc = @"
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+out vec2 vUV;
+
+void main()
+{
+    vUV = aUV;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+";
+
+var ssaoFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D gPositionTex;
+uniform sampler2D gNormalTex;
+uniform mat4 uProj;
+uniform float uRadius;
+uniform float uBias;
+uniform float uPower;
+uniform vec2 uScreenSize;
+uniform vec3 uSamples[16];
+
+float hash12(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+void main()
+{
+    vec3 fragPos = texture(gPositionTex, vUV).xyz;
+    vec3 normal = texture(gNormalTex, vUV).xyz * 2.0 - 1.0;
+    if (length(normal) < 0.001)
+    {
+        FragColor = vec4(1.0);
+        return;
+    }
+
+    normal = normalize(normal);
+    float rnd = hash12(vUV * uScreenSize) * 6.2831853;
+    vec3 randVec = normalize(vec3(cos(rnd), sin(rnd), 0.0));
+    vec3 tangent = normalize(randVec - normal * dot(randVec, normal));
+    vec3 bitangent = cross(normal, tangent);
+    mat3 TBN = mat3(tangent, bitangent, normal);
+
+    float occ = 0.0;
+    for (int i = 0; i < 16; ++i)
+    {
+        vec3 samplePos = fragPos + (TBN * uSamples[i]) * uRadius;
+        vec4 offset = uProj * vec4(samplePos, 1.0);
+        offset.xyz /= max(offset.w, 0.0001);
+        offset.xyz = offset.xyz * 0.5 + 0.5;
+
+        if (offset.x < 0.0 || offset.x > 1.0 || offset.y < 0.0 || offset.y > 1.0)
+            continue;
+
+        float sampleDepth = texture(gPositionTex, offset.xy).z;
+        float rangeCheck = smoothstep(0.0, 1.0, uRadius / (abs(fragPos.z - sampleDepth) + 0.0001));
+        if (sampleDepth >= samplePos.z + uBias) occ += rangeCheck;
+    }
+
+    occ = 1.0 - (occ / 16.0);
+    occ = pow(clamp(occ, 0.0, 1.0), uPower);
+    FragColor = vec4(occ, occ, occ, 1.0);
+}
+";
+
+var blurFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+
+void main()
+{
+    float s = 0.0;
+    s += texture(uTex, vUV).r * 0.20;
+    s += texture(uTex, vUV + vec2( uTexel.x, 0.0)).r * 0.15;
+    s += texture(uTex, vUV + vec2(-uTexel.x, 0.0)).r * 0.15;
+    s += texture(uTex, vUV + vec2(0.0,  uTexel.y)).r * 0.15;
+    s += texture(uTex, vUV + vec2(0.0, -uTexel.y)).r * 0.15;
+    s += texture(uTex, vUV + uTexel).r * 0.10;
+    s += texture(uTex, vUV - uTexel).r * 0.10;
+    FragColor = vec4(s, s, s, 1.0);
+}
+";
+
+var lightFsSrc = @"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D gPositionTex;
+uniform sampler2D gNormalTex;
+uniform sampler2D gAlbedoTex;
+uniform sampler2D uSsaoTex;
+uniform vec3 uLightDir;
+uniform vec3 uAmbient;
+uniform vec3 uViewPos;
+uniform float uSpecularPower;
+uniform float uSpecularStrength;
+uniform float uSsaoStrength;
+uniform int uUseSsao;
+
+void main()
+{
+    vec3 viewPos = texture(gPositionTex, vUV).xyz;
+    vec3 normal = texture(gNormalTex, vUV).xyz * 2.0 - 1.0;
+    vec3 albedo = texture(gAlbedoTex, vUV).rgb;
+    if (length(normal) < 0.001)
+    {
+        discard;
+    }
+
+    normal = normalize(normal);
+    float ao = texture(uSsaoTex, vUV).r;
+    if (uUseSsao == 0) ao = 1.0;
+    ao = mix(1.0, ao, uSsaoStrength);
+
+    vec3 L = normalize(-uLightDir);
+    vec3 V = normalize(-viewPos);
+    vec3 H = normalize(L + V);
+    float ndl = max(dot(normal, L), 0.0);
+    float spec = pow(max(dot(normal, H), 0.0), uSpecularPower) * uSpecularStrength;
+
+    vec3 hemi = mix(vec3(0.08, 0.09, 0.11), vec3(0.22, 0.24, 0.28), clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
+    vec3 color = albedo * ((uAmbient + hemi * 0.32) * ao + vec3(ndl * 0.92));
+    color += vec3(spec);
+    color = pow(color, vec3(1.0 / 1.05));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var progGeom = linkProgram(gVsSrc, gFsSrc);
+var progSsao = linkProgram(qVsSrc, ssaoFsSrc);
+var progBlur = linkProgram(qVsSrc, blurFsSrc);
+var progLight = linkProgram(qVsSrc, lightFsSrc);
+if (progGeom <= 0 || progSsao <= 0 || progBlur <= 0 || progLight <= 0)
+{
+    if (progGeom > 0) glDeleteProgram(progGeom);
+    if (progSsao > 0) glDeleteProgram(progSsao);
+    if (progBlur > 0) glDeleteProgram(progBlur);
+    if (progLight > 0) glDeleteProgram(progLight);
+    for (var i = 0; i < len(loadedNormalTexIds); i += 1)
+        if (loadedNormalTexIds[i] > 0) glDeleteTextures(loadedNormalTexIds[i]);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var gModel = glGetUniformLocation(progGeom, "uModel");
+var gView = glGetUniformLocation(progGeom, "uView");
+var gProj = glGetUniformLocation(progGeom, "uProj");
+var gTex = glGetUniformLocation(progGeom, "uTex");
+var gNormalTex = glGetUniformLocation(progGeom, "uNormalTex");
+var gHasTex = glGetUniformLocation(progGeom, "uHasTex");
+var gHasNormalTex = glGetUniformLocation(progGeom, "uHasNormalTex");
+var gUseNormalMap = glGetUniformLocation(progGeom, "uUseNormalMap");
+var gNormalStrength = glGetUniformLocation(progGeom, "uNormalStrength");
+var gTint = glGetUniformLocation(progGeom, "uTint");
+
+var sPosTex = glGetUniformLocation(progSsao, "gPositionTex");
+var sNormalTex = glGetUniformLocation(progSsao, "gNormalTex");
+var sProj = glGetUniformLocation(progSsao, "uProj");
+var sRadius = glGetUniformLocation(progSsao, "uRadius");
+var sBias = glGetUniformLocation(progSsao, "uBias");
+var sPower = glGetUniformLocation(progSsao, "uPower");
+var sScreenSize = glGetUniformLocation(progSsao, "uScreenSize");
+var sSampleLocs = [];
+for (var i = 0; i < 16; i += 1)
+    sSampleLocs.push(glGetUniformLocation(progSsao, "uSamples[" + i + "]"));
+
+var bTex = glGetUniformLocation(progBlur, "uTex");
+var bTexel = glGetUniformLocation(progBlur, "uTexel");
+
+var lPosTex = glGetUniformLocation(progLight, "gPositionTex");
+var lNormalTex = glGetUniformLocation(progLight, "gNormalTex");
+var lAlbedoTex = glGetUniformLocation(progLight, "gAlbedoTex");
+var lSsaoTex = glGetUniformLocation(progLight, "uSsaoTex");
+var lLightDir = glGetUniformLocation(progLight, "uLightDir");
+var lAmbient = glGetUniformLocation(progLight, "uAmbient");
+var lViewPos = glGetUniformLocation(progLight, "uViewPos");
+var lSpecularPower = glGetUniformLocation(progLight, "uSpecularPower");
+var lSpecularStrength = glGetUniformLocation(progLight, "uSpecularStrength");
+var lSsaoStrength = glGetUniformLocation(progLight, "uSsaoStrength");
+var lUseSsao = glGetUniformLocation(progLight, "uUseSsao");
+
+var quadVerts = Float32Array(0);
+quadVerts.add(
+    -1.0,  1.0,  0.0, 1.0,
+     1.0,  1.0,  1.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0,  1.0,  0.0, 1.0,
+     1.0, -1.0,  1.0, 0.0,
+    -1.0, -1.0,  0.0, 0.0
+);
+var quadVAO = glGenVertexArrays();
+var quadVBO = glGenBuffers();
+glBindVertexArray(quadVAO);
+glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+glBufferData(GL_ARRAY_BUFFER, quadVerts.byteLength(), quadVerts, GL_STATIC_DRAW);
+glEnableVertexAttribArray(0);
+glVertexAttribPointer(0, 2, GL_FLOAT, false, 16, 0);
+glEnableVertexAttribArray(1);
+glVertexAttribPointer(1, 2, GL_FLOAT, false, 16, 8);
+glBindVertexArray(0);
+glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+var ssaoKernel = [
+    0.5381, 0.1856, 0.4319,
+    0.1379, 0.2486, 0.4430,
+    0.3371, 0.5679, 0.0057,
+   -0.6999,-0.0451, 0.0019,
+    0.0689,-0.1598, 0.8547,
+    0.0560, 0.0069, 0.1843,
+   -0.0146, 0.1402, 0.0762,
+    0.0100,-0.1924, 0.0344,
+   -0.3577,-0.5301, 0.4358,
+   -0.3169, 0.1063, 0.0158,
+    0.0103,-0.5869, 0.0046,
+   -0.0897,-0.4940, 0.3287,
+    0.7119,-0.0154, 0.0918,
+   -0.0533, 0.0596, 0.5411,
+    0.0352,-0.0631, 0.5460,
+   -0.4776, 0.2847, 0.0271
+];
+for (var i = 0; i < 16; i += 1)
+{
+    var sx = ssaoKernel[i * 3 + 0];
+    var sy = ssaoKernel[i * 3 + 1];
+    var sz = ssaoKernel[i * 3 + 2];
+    var scale = i / 16.0;
+    scale = 0.1 + 0.9 * scale * scale;
+    glUseProgram(progSsao);
+    if (sSampleLocs[i] >= 0) glUniform3f(sSampleLocs[i], sx * scale, sy * scale, sz * scale);
+}
+glUseProgram(0);
+
+var screenW = GetScreenWidth();
+var screenH = GetScreenHeight();
+var gbuffer = makeGBuffer(screenW, screenH);
+var ssaoRt = makeColorTarget(screenW, screenH);
+var ssaoBlurRt = makeColorTarget(screenW, screenH);
+if (gbuffer == nil || ssaoRt == nil || ssaoBlurRt == nil)
+{
+    if (gbuffer != nil) gbuffer.destroy();
+    if (ssaoRt != nil) ssaoRt.destroy();
+    if (ssaoBlurRt != nil) ssaoBlurRt.destroy();
+    glDeleteBuffers(quadVBO);
+    glDeleteVertexArrays(quadVAO);
+    glDeleteProgram(progGeom);
+    glDeleteProgram(progSsao);
+    glDeleteProgram(progBlur);
+    glDeleteProgram(progLight);
+    for (var i = 0; i < len(loadedNormalTexIds); i += 1)
+        if (loadedNormalTexIds[i] > 0) glDeleteTextures(loadedNormalTexIds[i]);
+    mesh.destroy();
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var hudBg = Color(0, 0, 0, 152);
+var hudFg = Color(245, 245, 245, 255);
+var hudInfo = Color(190, 220, 255, 255);
+var hudOk = Color(180, 255, 200, 255);
+
+var useNormalMap = true;
+var useSsao = true;
+var showNormalsOnly = false;
+var normalStrength = 1.0;
+var ssaoRadius = 22.0;
+var ssaoBias = 0.025;
+var ssaoPower = 1.3;
+var ssaoStrength = 1.0;
+var specularPower = 42.0;
+var specularStrength = 0.18;
+var ambientStrength = 0.08;
+var previewMaterial = 0;
+var lightYaw = -28.0;
+var lightPitch = -52.0;
+var previewMode = 0;
+
+var cam = Camera3D();
+SetCamera3DUp(cam, 0.0, 1.0, 0.0);
+SetCamera3DFovy(cam, 60.0);
+SetCamera3DProjection(cam, CAMERA_PERSPECTIVE);
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_N)) useNormalMap = !useNormalMap;
+    if (IsKeyPressed(KEY_O)) useSsao = !useSsao;
+    if (IsKeyPressed(KEY_M)) showNormalsOnly = !showNormalsOnly;
+    if (IsKeyPressed(KEY_F1)) previewMode = (previewMode + 1) % 4;
+    if (IsKeyPressed(KEY_R))
+    {
+        eyeX = focusX + sceneRadius * 0.8;
+        eyeY = focusY + sceneRadius * 0.35;
+        eyeZ = focusZ + sceneRadius * 0.8;
+        yaw = -90.0;
+        pitch = -18.0;
+    }
+
+    var nextScreenW = GetScreenWidth();
+    var nextScreenH = GetScreenHeight();
+    if (nextScreenW != screenW || nextScreenH != screenH)
+    {
+        var nextGBuffer = makeGBuffer(nextScreenW, nextScreenH);
+        var nextSsao = makeColorTarget(nextScreenW, nextScreenH);
+        var nextSsaoBlur = makeColorTarget(nextScreenW, nextScreenH);
+        if (nextGBuffer != nil && nextSsao != nil && nextSsaoBlur != nil)
+        {
+            gbuffer.destroy();
+            ssaoRt.destroy();
+            ssaoBlurRt.destroy();
+            gbuffer = nextGBuffer;
+            ssaoRt = nextSsao;
+            ssaoBlurRt = nextSsaoBlur;
+            screenW = nextScreenW;
+            screenH = nextScreenH;
+        }
+    }
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var fx = cos(pitchRad) * cos(yawRad);
+    var fy = sin(pitchRad);
+    var fz = cos(pitchRad) * sin(yawRad);
+    var fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl > 0.0001)
+    {
+        fx = fx / fl; fy = fy / fl; fz = fz / fl;
+    }
+
+    var rx = -fz;
+    var rz = fx;
+    var rl = sqrt(rx * rx + rz * rz);
+    if (rl > 0.0001) { rx = rx / rl; rz = rz / rl; }
+
+    var moveSpeed = sceneRadius * 0.35;
+    if (moveSpeed < 10.0) moveSpeed = 10.0;
+    if (IsKeyDown(KEY_LEFT_SHIFT)) moveSpeed = moveSpeed * 3.0;
+    var step = moveSpeed * dt;
+
+    if (IsKeyDown(KEY_W)) { eyeX += fx * step; eyeY += fy * step; eyeZ += fz * step; }
+    if (IsKeyDown(KEY_S)) { eyeX -= fx * step; eyeY -= fy * step; eyeZ -= fz * step; }
+    if (IsKeyDown(KEY_A)) { eyeX -= rx * step; eyeZ -= rz * step; }
+    if (IsKeyDown(KEY_D)) { eyeX += rx * step; eyeZ += rz * step; }
+    if (IsKeyDown(KEY_SPACE)) eyeY += step;
+    if (IsKeyDown(KEY_C)) eyeY -= step;
+
+    SetCamera3DPosition(cam, eyeX, eyeY, eyeZ);
+    SetCamera3DTarget(cam, eyeX + fx, eyeY + fy, eyeZ + fz);
+
+    var modelMat = mesh.makeModelMatrix();
+
+    rlDrawRenderBatchActive();
+    BeginMode3D(cam);
+    var view = rlGetMatrixModelview();
+    var proj = rlGetMatrixProjection();
+    EndMode3D();
+
+    MatrixWriteBuffer(modelMat, modelBuf);
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.fbo);
+    glViewport(0, 0, gbuffer.width, gbuffer.height);
+    glClearColor(0.0, 0.0, 0.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+    glUseProgram(progGeom);
+    if (gModel >= 0) glUniformMatrix4fv(gModel, 1, false, modelBuf);
+    if (gView >= 0) glUniformMatrix4fv(gView, 1, false, viewBuf);
+    if (gProj >= 0) glUniformMatrix4fv(gProj, 1, false, projBuf);
+    if (gTex >= 0) glUniform1i(gTex, 0);
+    if (gNormalTex >= 0) glUniform1i(gNormalTex, 1);
+    if (gUseNormalMap >= 0) glUniform1i(gUseNormalMap, useNormalMap ? 1 : 0);
+    if (gNormalStrength >= 0) glUniform1f(gNormalStrength, normalStrength);
+
+    for (var i = 0; i < len(mesh.buffers); i += 1)
+    {
+        var b = mesh.buffers[i];
+        var texId = 0;
+        var normalId = 0;
+        var tintR = 0.74; var tintG = 0.74; var tintB = 0.74;
+        if (b.materialIndex >= 0 && b.materialIndex < len(mesh.materials))
+        {
+            var mat = mesh.materials[b.materialIndex];
+            tintR = mat.diffuseR;
+            tintG = mat.diffuseG;
+            tintB = mat.diffuseB;
+            if (len(mat.textureIds) > 0) texId = mat.textureIds[0];
+            if (b.materialIndex < len(materialNormalIds)) normalId = materialNormalIds[b.materialIndex];
+        }
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, normalId);
+        if (gHasTex >= 0) glUniform1i(gHasTex, texId > 0 ? 1 : 0);
+        if (gHasNormalTex >= 0) glUniform1i(gHasNormalTex, normalId > 0 ? 1 : 0);
+        if (gTint >= 0) glUniform3f(gTint, tintR, tintG, tintB);
+        b.draw();
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glViewport(0, 0, screenW, screenH);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, ssaoRt.fbo);
+    glClearColor(1.0, 1.0, 1.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(progSsao);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.posTex);
+    if (sPosTex >= 0) glUniform1i(sPosTex, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, gbuffer.normalTex);
+    if (sNormalTex >= 0) glUniform1i(sNormalTex, 1);
+    if (sProj >= 0) glUniformMatrix4fv(sProj, 1, false, projBuf);
+    if (sRadius >= 0) glUniform1f(sRadius, ssaoRadius);
+    if (sBias >= 0) glUniform1f(sBias, ssaoBias);
+    if (sPower >= 0) glUniform1f(sPower, ssaoPower);
+    if (sScreenSize >= 0) glUniform2f(sScreenSize, screenW, screenH);
+    drawFullscreenQuad(quadVAO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, ssaoBlurRt.fbo);
+    glClearColor(1.0, 1.0, 1.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(progBlur);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, ssaoRt.color);
+    if (bTex >= 0) glUniform1i(bTex, 0);
+    if (bTexel >= 0) glUniform2f(bTexel, 1.0 / screenW, 1.0 / screenH);
+    drawFullscreenQuad(quadVAO);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    BeginDrawing();
+    ClearBackground(Color(28, 34, 42, 255));
+    rlDrawRenderBatchActive();
+
+    if (previewMode == 1)
+    {
+        glUseProgram(progBlur);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, gbuffer.normalTex);
+        if (bTex >= 0) glUniform1i(bTex, 0);
+        if (bTexel >= 0) glUniform2f(bTexel, 0.0, 0.0);
+        drawFullscreenQuad(quadVAO);
+    }
+    else if (previewMode == 2)
+    {
+        glUseProgram(progBlur);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, ssaoRt.color);
+        if (bTex >= 0) glUniform1i(bTex, 0);
+        if (bTexel >= 0) glUniform2f(bTexel, 0.0, 0.0);
+        drawFullscreenQuad(quadVAO);
+    }
+    else if (previewMode == 3)
+    {
+        glUseProgram(progBlur);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, ssaoBlurRt.color);
+        if (bTex >= 0) glUniform1i(bTex, 0);
+        if (bTexel >= 0) glUniform2f(bTexel, 0.0, 0.0);
+        drawFullscreenQuad(quadVAO);
+    }
+    else
+    {
+        var lightYawRad = lightYaw * PI / 180.0;
+        var lightPitchRad = lightPitch * PI / 180.0;
+        var lx = cos(lightPitchRad) * cos(lightYawRad);
+        var ly = sin(lightPitchRad);
+        var lz = cos(lightPitchRad) * sin(lightYawRad);
+        var ll = sqrt(lx * lx + ly * ly + lz * lz);
+        if (ll > 0.0001) { lx = lx / ll; ly = ly / ll; lz = lz / ll; }
+
+        glUseProgram(progLight);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, gbuffer.posTex);
+        if (lPosTex >= 0) glUniform1i(lPosTex, 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, gbuffer.normalTex);
+        if (lNormalTex >= 0) glUniform1i(lNormalTex, 1);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, gbuffer.albedoTex);
+        if (lAlbedoTex >= 0) glUniform1i(lAlbedoTex, 2);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, ssaoBlurRt.color);
+        if (lSsaoTex >= 0) glUniform1i(lSsaoTex, 3);
+        if (lLightDir >= 0) glUniform3f(lLightDir, lx, ly, lz);
+        if (lAmbient >= 0) glUniform3f(lAmbient, ambientStrength, ambientStrength + 0.01, ambientStrength + 0.02);
+        if (lViewPos >= 0) glUniform3f(lViewPos, eyeX, eyeY, eyeZ);
+        if (lSpecularPower >= 0) glUniform1f(lSpecularPower, specularPower);
+        if (lSpecularStrength >= 0) glUniform1f(lSpecularStrength, specularStrength);
+        if (lSsaoStrength >= 0) glUniform1f(lSsaoStrength, ssaoStrength);
+        if (lUseSsao >= 0) glUniform1i(lUseSsao, useSsao ? 1 : 0);
+        drawFullscreenQuad(quadVAO);
+    }
+
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+
+    DrawRectangle(18, 18, 1320, 122, hudBg);
+    DrawText("Normal Map + SSAO Sponza  RMB look | WASD move | SHIFT faster | TAB UI | N normal maps | O SSAO | F1 preview", 30, 30, 22, hudFg);
+    DrawText("Pipeline: geometry pass with normal maps -> SSAO -> blur -> fullscreen lighting compose.", 30, 62, 18, hudInfo);
+    DrawText("Loaded normal maps: " + str(loadedNormalCount) + " / " + str(len(mesh.materials)) + "  FPS: " + str(GetFPS()), 30, 92, 18, hudOk);
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = ImGui.Begin("Normal Map SSAO Sponza");
+        if (panel != nil && panel)
+        {
+            ImGui.Text("Preview mode: " + (previewMode == 0 ? "lit" : previewMode == 1 ? "normals" : previewMode == 2 ? "ssao raw" : "ssao blur"));
+            ImGui.Separator();
+
+            var (changedUseNormals, nextUseNormals) = ImGui.Checkbox("Use normal maps", useNormalMap);
+            if (changedUseNormals) useNormalMap = nextUseNormals;
+
+            var (changedUseSsao, nextUseSsao) = ImGui.Checkbox("Use SSAO", useSsao);
+            if (changedUseSsao) useSsao = nextUseSsao;
+
+            var (changedStrength, nextStrength) = ImGui.SliderFloat("Normal strength", normalStrength, 0.0, 3.0, "%.2f");
+            if (changedStrength) normalStrength = nextStrength;
+
+            var (changedRadius, nextRadius) = ImGui.SliderFloat("SSAO radius", ssaoRadius, 2.0, 48.0, "%.2f");
+            if (changedRadius) ssaoRadius = nextRadius;
+
+            var (changedBias, nextBias) = ImGui.SliderFloat("SSAO bias", ssaoBias, 0.001, 0.120, "%.3f");
+            if (changedBias) ssaoBias = nextBias;
+
+            var (changedPower, nextPower) = ImGui.SliderFloat("SSAO power", ssaoPower, 0.2, 4.0, "%.2f");
+            if (changedPower) ssaoPower = nextPower;
+
+            var (changedSsaoStrength, nextSsaoStrength) = ImGui.SliderFloat("SSAO strength", ssaoStrength, 0.0, 1.5, "%.2f");
+            if (changedSsaoStrength) ssaoStrength = nextSsaoStrength;
+
+            var (changedSpecPower, nextSpecPower) = ImGui.SliderFloat("Specular power", specularPower, 2.0, 128.0, "%.1f");
+            if (changedSpecPower) specularPower = nextSpecPower;
+
+            var (changedSpecStrength, nextSpecStrength) = ImGui.SliderFloat("Specular strength", specularStrength, 0.0, 1.0, "%.2f");
+            if (changedSpecStrength) specularStrength = nextSpecStrength;
+
+            var (changedAmbient, nextAmbient) = ImGui.SliderFloat("Ambient", ambientStrength, 0.0, 0.3, "%.2f");
+            if (changedAmbient) ambientStrength = nextAmbient;
+
+            var (changedLightYaw, nextLightYaw) = ImGui.SliderFloat("Light yaw", lightYaw, -180.0, 180.0, "%.1f");
+            if (changedLightYaw) lightYaw = nextLightYaw;
+            var (changedLightPitch, nextLightPitch) = ImGui.SliderFloat("Light pitch", lightPitch, -89.0, 0.0, "%.1f");
+            if (changedLightPitch) lightPitch = nextLightPitch;
+
+            ImGui.Separator();
+            ImGui.Text("GBuffer / SSAO");
+            ImGui.ImageButton("##gbuffer_albedo", gbuffer.albedoTex, 220, 124, 0.0, 1.0, 1.0, 0.0);
+            ImGui.SameLine();
+            ImGui.ImageButton("##ssao_raw", ssaoRt.color, 220, 124, 0.0, 1.0, 1.0, 0.0);
+            ImGui.SameLine();
+            ImGui.ImageButton("##ssao_blur", ssaoBlurRt.color, 220, 124, 0.0, 1.0, 1.0, 0.0);
+
+            if (len(mesh.materials) > 0)
+            {
+                var (changedMat, nextMat) = ImGui.SliderInt("Preview material", previewMaterial, 0, len(mesh.materials) - 1);
+                if (changedMat) previewMaterial = nextMat;
+                var previewMat = mesh.materials[previewMaterial];
+                var previewDiffuse = len(previewMat.textureIds) > 0 ? previewMat.textureIds[0] : 0;
+                var previewNormal = materialNormalIds[previewMaterial];
+                ImGui.Text("Material: " + previewMat.name);
+                if (len(previewMat.textureNames) > 0) ImGui.Text("Diffuse: " + previewMat.textureNames[0]);
+                if (len(materialNormalPaths[previewMaterial]) > 0) ImGui.Text("Normal: " + materialNormalPaths[previewMaterial]);
+                else ImGui.Text("Normal: none");
+                if (previewDiffuse > 0) ImGui.ImageButton("##preview_diff", previewDiffuse, 220, 220, 0.0, 1.0, 1.0, 0.0);
+                ImGui.SameLine();
+                if (previewNormal > 0) ImGui.ImageButton("##preview_normal", previewNormal, 220, 220, 0.0, 1.0, 1.0, 0.0);
+            }
+        }
+        ImGui.End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+for (var i = 0; i < len(loadedNormalTexIds); i += 1)
+{
+    if (loadedNormalTexIds[i] > 0) glDeleteTextures(loadedNormalTexIds[i]);
+}
+gbuffer.destroy();
+ssaoRt.destroy();
+ssaoBlurRt.destroy();
+glDeleteBuffers(quadVBO);
+glDeleteVertexArrays(quadVAO);
+glDeleteProgram(progGeom);
+glDeleteProgram(progSsao);
+glDeleteProgram(progBlur);
+glDeleteProgram(progLight);
+mesh.destroy();
+ShutdownImGui();
+CloseWindow();

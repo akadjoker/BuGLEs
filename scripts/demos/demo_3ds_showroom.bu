@@ -1,0 +1,1157 @@
+import math;
+using math;
+import path;
+using path;
+import OpenGl;
+using OpenGl;
+import GLM;
+using GLM;
+import ImGui;
+using ImGui;
+import STB;
+using STB;
+
+include "../libs/lib_3ds.bu";
+
+var SHOWROOM_SUBJECT = "car";   // "cube" or "car"
+var SHOWROOM_CAR_ROT_Y = 180.0;
+var SHOWROOM_CAR_SCALE_BIAS = 1.0;
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def cubemapFacePath(setName, suffix)
+{
+    var p = "assets/cubemaps/" + setName + "_" + suffix + ".jpg";
+    if (path.exists(p)) return p;
+    return nil;
+}
+
+
+def loadTexture2D(filePath, flipY, withMipmaps, repeatMode)
+{
+    if (filePath == nil || !path.exists(filePath)) return 0;
+
+    stbi_set_flip_vertically_on_load(flipY ? 1 : 0);
+    var (w, h, ch, pixels) = stbi_load(filePath, 4);
+    if (pixels == nil) return 0;
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (withMipmaps) glGenerateMipmap(GL_TEXTURE_2D);
+    if (withMipmaps) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    else glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def destroySkyboxCubemap(texId)
+{
+    if (texId > 0) glDeleteTextures(texId);
+}
+
+
+def destroySkyboxDebugFaces(texPack)
+{
+    if (texPack == nil) return;
+    for (var i = 0; i < len(texPack); i += 1)
+    {
+        if (texPack[i] > 0) glDeleteTextures(texPack[i]);
+    }
+}
+
+
+def loadSkyboxDebugFaces(setName)
+{
+    var rt = loadTexture2D(cubemapFacePath(setName, "rt"), false, true, false);
+    var lf = loadTexture2D(cubemapFacePath(setName, "lf"), false, true, false);
+    var up = loadTexture2D(cubemapFacePath(setName, "up"), false, true, false);
+    var dn = loadTexture2D(cubemapFacePath(setName, "dn"), false, true, false);
+    var fr = loadTexture2D(cubemapFacePath(setName, "fr"), false, true, false);
+    var bk = loadTexture2D(cubemapFacePath(setName, "bk"), false, true, false);
+    if (rt <= 0 || lf <= 0 || up <= 0 || dn <= 0 || fr <= 0 || bk <= 0)
+    {
+        destroySkyboxDebugFaces([rt, lf, up, dn, fr, bk]);
+        return nil;
+    }
+    return [rt, lf, up, dn, fr, bk];
+}
+
+
+def loadSkyboxCubemap(setName)
+{
+    var rtPath = cubemapFacePath(setName, "rt");
+    var lfPath = cubemapFacePath(setName, "lf");
+    var upPath = cubemapFacePath(setName, "up");
+    var dnPath = cubemapFacePath(setName, "dn");
+    var frPath = cubemapFacePath(setName, "fr");
+    var bkPath = cubemapFacePath(setName, "bk");
+    if (rtPath == nil || lfPath == nil || upPath == nil || dnPath == nil || frPath == nil || bkPath == nil)
+    {
+        print("Missing cubemap face(s) for set: " + setName);
+        return 0;
+    }
+
+    var facePaths = [rtPath, lfPath, upPath, dnPath, frPath, bkPath];
+    var faceTargets = [
+        GL_TEXTURE_CUBE_MAP_POSITIVE_X,
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+        GL_TEXTURE_CUBE_MAP_POSITIVE_Y,
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+        GL_TEXTURE_CUBE_MAP_POSITIVE_Z,
+        GL_TEXTURE_CUBE_MAP_NEGATIVE_Z
+    ];
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    for (var i = 0; i < 6; i += 1)
+    {
+        stbi_set_flip_vertically_on_load(0);
+        var (w, h, ch, pixels) = stbi_load(facePaths[i], 4);
+        if (pixels == nil)
+        {
+            glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+            destroySkyboxCubemap(tex);
+            print("Failed to load cubemap face: " + facePaths[i]);
+            return 0;
+        }
+        glTexImage2D(faceTargets[i], 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    }
+
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    return tex;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Showroom shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Showroom shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+class SceneTarget
+{
+    var fbo;
+    var color;
+    var depth;
+    var width;
+    var height;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteTextures(self.depth);
+        if (self.color > 0) glDeleteTextures(self.color);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.color = 0;
+        self.depth = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+
+def makeSceneTarget(width, height)
+{
+    var rt = SceneTarget();
+    rt.width = width;
+    rt.height = height;
+    rt.fbo = glGenFramebuffers();
+    rt.color = glGenTextures();
+    rt.depth = glGenTextures();
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindTexture(GL_TEXTURE_2D, rt.depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.color, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, rt.depth, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        print("Showroom target incomplete: " + status);
+        rt.destroy();
+        return nil;
+    }
+
+    return rt;
+}
+
+
+def resizeSceneTarget(rt, width, height)
+{
+    if (rt == nil) return nil;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    if (rt.width == width && rt.height == height) return rt;
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+
+    glBindTexture(GL_TEXTURE_2D, rt.depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nil);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    rt.width = width;
+    rt.height = height;
+    return rt;
+}
+
+
+def makeCubeGeometry()
+{
+    var verts = Float32Array(0);
+    verts.add(
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,   0.0, 0.0,
+         1.0, -1.0,  1.0,   0.0,  0.0,  1.0,   1.0, 0.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,   1.0, 1.0,
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,   0.0, 0.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,   1.0, 1.0,
+        -1.0,  1.0,  1.0,   0.0,  0.0,  1.0,   0.0, 1.0,
+
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,   1.0, 0.0,
+        -1.0,  1.0, -1.0,   0.0,  0.0, -1.0,   1.0, 1.0,
+        1.0,  1.0, -1.0,   0.0,  0.0, -1.0,   0.0, 1.0,
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,   1.0, 0.0,
+        1.0,  1.0, -1.0,   0.0,  0.0, -1.0,   0.0, 1.0,
+        1.0, -1.0, -1.0,   0.0,  0.0, -1.0,   0.0, 0.0
+    );
+    verts.add(
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,   0.0, 0.0,
+        -1.0, -1.0,  1.0,  -1.0,  0.0,  0.0,   1.0, 0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,   1.0, 1.0,
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,   0.0, 0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,   1.0, 1.0,
+        -1.0,  1.0, -1.0,  -1.0,  0.0,  0.0,   0.0, 1.0,
+
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,   1.0, 0.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,   0.0, 1.0,
+         1.0, -1.0,  1.0,   1.0,  0.0,  0.0,   0.0, 0.0,
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,   1.0, 0.0,
+         1.0,  1.0, -1.0,   1.0,  0.0,  0.0,   1.0, 1.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,   0.0, 1.0
+    );
+    verts.add(
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,   0.0, 1.0,
+        -1.0,  1.0,  1.0,   0.0,  1.0,  0.0,   0.0, 0.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,   1.0, 0.0,
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,   0.0, 1.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,   1.0, 0.0,
+         1.0,  1.0, -1.0,   0.0,  1.0,  0.0,   1.0, 1.0,
+
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,   1.0, 1.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0,   0.0, 0.0,
+        -1.0, -1.0,  1.0,   0.0, -1.0,  0.0,   1.0, 0.0,
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,   1.0, 1.0,
+        1.0, -1.0, -1.0,   0.0, -1.0,  0.0,   0.0, 1.0,
+        1.0, -1.0,  1.0,   0.0, -1.0,  0.0,   0.0, 0.0
+    );
+
+    var vao = glGenVertexArrays();
+    var vbo = glGenBuffers();
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, 32, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, false, 32, 12);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, false, 32, 24);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return [vao, vbo];
+}
+
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1680, 960, "BuGL - Proxy Showroom");
+SetTargetFPS(60);
+
+if (!InitImGui())
+{
+    CloseWindow();
+    return;
+}
+
+var cubeGeom = makeCubeGeometry();
+var cubeVAO = cubeGeom[0];
+var cubeVBO = cubeGeom[1];
+
+var objVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = normalize(mat3(uModel) * aNormal);
+    vUV = aUV;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var objFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform vec3 uTint;
+uniform vec3 uLightDir;
+uniform vec3 uAmbient;
+uniform vec3 uCameraPos;
+uniform float uFloorY;
+uniform float uReflectivity;
+uniform float uFresnelStrength;
+uniform float uSpecularBoost;
+uniform float uOrbGlow;
+uniform vec4 uOrbData0;
+uniform vec4 uOrbData1;
+uniform vec4 uOrbData2;
+uniform vec4 uOrbData3;
+uniform vec3 uOrbColor0;
+uniform vec3 uOrbColor1;
+uniform vec3 uOrbColor2;
+uniform vec3 uOrbColor3;
+uniform samplerCube uSkyCube;
+uniform sampler2D uFloorTex;
+uniform sampler2D uAlbedoTex;
+uniform int uHasTex;
+uniform int uUseFloorTex;
+uniform float uFloorExtent;
+uniform vec2 uFloorCenter;
+
+vec3 sampleSkybox(vec3 dir)
+{
+    return texture(uSkyCube, normalize(dir)).rgb;
+}
+
+bool intersectBox(vec3 ro, vec3 rd, vec4 boxData, out float tHit, out vec3 hitNormal)
+{
+    vec3 bmin = boxData.xyz - vec3(boxData.w);
+    vec3 bmax = boxData.xyz + vec3(boxData.w);
+
+    vec3 invDir = 1.0 / max(abs(rd), vec3(0.0001)) * sign(rd);
+    vec3 t0 = (bmin - ro) * invDir;
+    vec3 t1 = (bmax - ro) * invDir;
+    vec3 tsmaller = min(t0, t1);
+    vec3 tbigger = max(t0, t1);
+
+    float tNear = max(max(tsmaller.x, tsmaller.y), tsmaller.z);
+    float tFar = min(min(tbigger.x, tbigger.y), tbigger.z);
+    if (tFar < 0.0 || tNear > tFar) return false;
+
+    tHit = (tNear > 0.0001) ? tNear : tFar;
+    vec3 hitPos = ro + rd * tHit - boxData.xyz;
+    vec3 a = abs(hitPos);
+    if (a.x >= a.y && a.x >= a.z) hitNormal = vec3(sign(hitPos.x), 0.0, 0.0);
+    else if (a.y >= a.x && a.y >= a.z) hitNormal = vec3(0.0, sign(hitPos.y), 0.0);
+    else hitNormal = vec3(0.0, 0.0, sign(hitPos.z));
+    return true;
+}
+
+vec3 floorColorAt(vec3 p)
+{
+    vec3 c;
+    if (uUseFloorTex != 0)
+    {
+        vec2 uv = ((p.xz - uFloorCenter) / (uFloorExtent * 2.0)) + vec2(0.5);
+        c = texture(uFloorTex, uv).rgb;
+    }
+    else
+    {
+        float checker = mod(floor(p.x * 0.28) + floor(p.z * 0.28), 2.0);
+        vec3 a = vec3(0.13, 0.14, 0.16);
+        vec3 b = vec3(0.22, 0.23, 0.26);
+        c = mix(a, b, checker);
+    }
+    float ring = exp(-abs(length(p.xz) - 7.0) * 0.14) * 0.11;
+    c += vec3(ring * 0.55, ring * 0.58, ring * 0.62);
+    return c;
+}
+
+vec3 sampleEnvironment(vec3 ro, vec3 rd)
+{
+    float bestT = 1e20;
+    vec3 bestColor = sampleSkybox(normalize(rd));
+    vec4 orbData[4] = vec4[4](uOrbData0, uOrbData1, uOrbData2, uOrbData3);
+    vec3 orbColor[4] = vec3[4](uOrbColor0, uOrbColor1, uOrbColor2, uOrbColor3);
+
+    for (int i = 0; i < 4; ++i)
+    {
+        float tHit = 0.0;
+        vec3 hitNormal = vec3(0.0);
+        if (intersectBox(ro, rd, orbData[i], tHit, hitNormal))
+        {
+            if (tHit < bestT)
+            {
+                bestT = tHit;
+                float rim = pow(1.0 - max(dot(hitNormal, -rd), 0.0), 4.0);
+                bestColor = orbColor[i] * (0.48 + uOrbGlow) + vec3(rim * 0.5);
+            }
+        }
+    }
+
+    if (rd.y < -0.0001)
+    {
+        float tPlane = (uFloorY - ro.y) / rd.y;
+        if (tPlane > 0.0001 && tPlane < bestT)
+        {
+            vec3 hit = ro + rd * tPlane;
+            bestColor = floorColorAt(hit);
+        }
+    }
+
+    return bestColor;
+}
+
+void main()
+{
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uCameraPos - vWorldPos);
+    vec3 L = normalize(-uLightDir);
+    vec3 H = normalize(L + V);
+
+    float ndl = max(dot(N, L), 0.0);
+    float spec = pow(max(dot(N, H), 0.0), 64.0) * uSpecularBoost;
+    vec3 albedo = uTint;
+    if (uUseFloorTex != 0)
+    {
+        vec2 uv = ((vWorldPos.xz - uFloorCenter) / (uFloorExtent * 2.0)) + vec2(0.5);
+        albedo = texture(uFloorTex, uv).rgb;
+    }
+    else if (uHasTex != 0)
+    {
+        albedo = texture(uAlbedoTex, vUV).rgb;
+    }
+    vec3 lit = albedo * (uAmbient + vec3(ndl)) + vec3(spec);
+
+    vec3 R = normalize(reflect(-V, N));
+    vec3 env = sampleEnvironment(vWorldPos + N * 0.03, R);
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 5.0) * uFresnelStrength;
+    vec3 color = mix(lit, env, clamp(uReflectivity + fres, 0.0, 1.0));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+var skyVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var skyFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+out vec4 FragColor;
+
+uniform vec3 uCameraPos;
+uniform samplerCube uSkyCube;
+
+vec3 sampleSkybox(vec3 dir)
+{
+    return texture(uSkyCube, normalize(dir)).rgb;
+}
+
+void main()
+{
+    vec3 dir = normalize(vWorldPos - uCameraPos);
+    FragColor = vec4(sampleSkybox(dir), 1.0);
+}
+";
+
+var objProg = linkProgram(objVsSrc, objFsSrc);
+var skyProg = linkProgram(skyVsSrc, skyFsSrc);
+if (objProg <= 0 || skyProg <= 0)
+{
+    if (objProg > 0) glDeleteProgram(objProg);
+    if (skyProg > 0) glDeleteProgram(skyProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var previewRt = makeSceneTarget(640, 360);
+if (previewRt == nil)
+{
+    glDeleteProgram(objProg);
+    glDeleteProgram(skyProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var uObjModel = glGetUniformLocation(objProg, "uModel");
+var uObjView = glGetUniformLocation(objProg, "uView");
+var uObjProj = glGetUniformLocation(objProg, "uProj");
+var uObjTint = glGetUniformLocation(objProg, "uTint");
+var uObjLightDir = glGetUniformLocation(objProg, "uLightDir");
+var uObjAmbient = glGetUniformLocation(objProg, "uAmbient");
+var uObjCameraPos = glGetUniformLocation(objProg, "uCameraPos");
+var uObjFloorY = glGetUniformLocation(objProg, "uFloorY");
+var uObjReflectivity = glGetUniformLocation(objProg, "uReflectivity");
+var uObjFresnel = glGetUniformLocation(objProg, "uFresnelStrength");
+var uObjSpecular = glGetUniformLocation(objProg, "uSpecularBoost");
+var uObjOrbGlow = glGetUniformLocation(objProg, "uOrbGlow");
+var uObjOrbData0 = glGetUniformLocation(objProg, "uOrbData0");
+var uObjOrbData1 = glGetUniformLocation(objProg, "uOrbData1");
+var uObjOrbData2 = glGetUniformLocation(objProg, "uOrbData2");
+var uObjOrbData3 = glGetUniformLocation(objProg, "uOrbData3");
+var uObjOrbColor0 = glGetUniformLocation(objProg, "uOrbColor0");
+var uObjOrbColor1 = glGetUniformLocation(objProg, "uOrbColor1");
+var uObjOrbColor2 = glGetUniformLocation(objProg, "uOrbColor2");
+var uObjOrbColor3 = glGetUniformLocation(objProg, "uOrbColor3");
+var uObjSkyCube = glGetUniformLocation(objProg, "uSkyCube");
+var uObjFloorTex = glGetUniformLocation(objProg, "uFloorTex");
+var uObjAlbedoTex = glGetUniformLocation(objProg, "uAlbedoTex");
+var uObjHasTex = glGetUniformLocation(objProg, "uHasTex");
+var uObjUseFloorTex = glGetUniformLocation(objProg, "uUseFloorTex");
+var uObjFloorExtent = glGetUniformLocation(objProg, "uFloorExtent");
+var uObjFloorCenter = glGetUniformLocation(objProg, "uFloorCenter");
+
+var uSkyModel = glGetUniformLocation(skyProg, "uModel");
+var uSkyView = glGetUniformLocation(skyProg, "uView");
+var uSkyProj = glGetUniformLocation(skyProg, "uProj");
+var uSkyCameraPos = glGetUniformLocation(skyProg, "uCameraPos");
+var uSkyCube = glGetUniformLocation(skyProg, "uSkyCube");
+
+glUseProgram(objProg);
+if (uObjSkyCube >= 0) glUniform1i(uObjSkyCube, 0);
+if (uObjFloorTex >= 0) glUniform1i(uObjFloorTex, 1);
+if (uObjAlbedoTex >= 0) glUniform1i(uObjAlbedoTex, 2);
+
+glUseProgram(skyProg);
+if (uSkyCube >= 0) glUniform1i(uSkyCube, 0);
+glUseProgram(0);
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+var focusLift = 1.1;
+var sceneRadius = 6.0;
+var floorY = -1.25;
+var proxyX = 0.0;
+var proxyY = 1.15;
+var proxyZ = 0.0;
+var proxyScaleX = 2.15;
+var proxyScaleY = 2.15;
+var proxyScaleZ = 2.15;
+
+var eyeX = 0.0;
+var eyeY = 5.5;
+var eyeZ = 11.0;
+var yaw = -120.0;
+var pitch = -14.0;
+var camDistance = 18.0;
+
+var showGrid = false;
+var showOrbs = true;
+var showUi = true;
+var orbitSpeed = 0.62;
+var reflectivity = 0.42;
+var fresnelStrength = 0.86;
+var specularBoost = 0.22;
+var ambientStrength = 0.24;
+var orbGlow = 0.18;
+var lightDirX = -0.45;
+var lightDirY = -1.0;
+var lightDirZ = -0.15;
+
+var orbPhase = [0.0, 1.5, 3.1, 4.5];
+var orbRadius = [sceneRadius * 0.70, sceneRadius * 0.94, sceneRadius * 1.08, sceneRadius * 0.82];
+var orbHeight = [floorY + 2.0, floorY + 2.6, floorY + 2.2, floorY + 2.9];
+var orbSize = [0.55, 0.68, 0.60, 0.48];
+var orbColorR = [1.00, 0.35, 0.22, 0.60];
+var orbColorG = [0.55, 0.82, 0.66, 0.78];
+var orbColorB = [0.24, 1.00, 1.00, 0.96];
+var orbPosX = [0.0, 0.0, 0.0, 0.0];
+var orbPosY = [0.0, 0.0, 0.0, 0.0];
+var orbPosZ = [0.0, 0.0, 0.0, 0.0];
+var skySetNames = ["morning", "early_morning", "cloudy_noon", "evening", "stormy"];
+var skyFaceNames = ["+X rt", "-X lf", "+Y up", "-Y dn", "+Z fr", "-Z bk"];
+var skySetIndex = 0;
+var floorHalfExtent = 18.0;
+var subjectMode = SHOWROOM_SUBJECT;
+var carModel = nil;
+var carLoaded = false;
+var carScale = 1.0;
+var skyCubemap = loadSkyboxCubemap(skySetNames[skySetIndex]);
+if (skyCubemap <= 0)
+{
+    previewRt.destroy();
+    glDeleteProgram(objProg);
+    glDeleteProgram(skyProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+var skyDebugFaces = loadSkyboxDebugFaces(skySetNames[skySetIndex]);
+if (skyDebugFaces == nil)
+{
+    previewRt.destroy();
+    destroySkyboxCubemap(skyCubemap);
+    glDeleteProgram(objProg);
+    glDeleteProgram(skyProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+
+var floorTex = loadTexture2D("assets/powerplant/textures/tank_top.png", true, true, false);
+if (floorTex <= 0)
+{
+    previewRt.destroy();
+    destroySkyboxCubemap(skyCubemap);
+    destroySkyboxDebugFaces(skyDebugFaces);
+    glDeleteProgram(objProg);
+    glDeleteProgram(skyProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+if (subjectMode == "car")
+{
+    var modelPath = resolveAssetPath(
+        "assets/3ds/bmw/model.3ds"
+        "/media/projectos/projects/cpp/minirender/bin/assets/3ds/bmw/model.3ds",
+        "/media/projectos/projects/cpp/minirender/bin/assets/3ds/bmw/player.3ds",
+    );
+
+    if (modelPath != nil)
+    {
+        carModel = ThreeDSModel();
+        if (carModel.load(modelPath))
+        {
+            carLoaded = true;
+            var carBounds = max(carModel.sizeX, max(carModel.sizeY, carModel.sizeZ));
+            if (carBounds > 0.0001)
+            {
+                carScale = (proxyScaleX * 2.0 / carBounds) * SHOWROOM_CAR_SCALE_BIAS;
+            }
+            else
+            {
+                carScale = SHOWROOM_CAR_SCALE_BIAS;
+            }
+            carModel.scale = carScale;
+            carModel.rotY = SHOWROOM_CAR_ROT_Y;
+        }
+        else
+        {
+            print("Showroom: failed to load car model, falling back to cube.");
+            subjectMode = "cube";
+        }
+    }
+    else
+    {
+        print("Showroom: car asset not found, falling back to cube.");
+        subjectMode = "cube";
+    }
+}
+
+
+def writeModelMatrix(tx, ty, tz, sx, sy, sz)
+{
+    var m = MatrixScale(sx, sy, sz);
+    m = MatrixMultiply(m, MatrixTranslate(tx, ty, tz));
+    MatrixWriteBuffer(m, modelBuf);
+}
+
+
+def drawCubeNode(tx, ty, tz, sx, sy, sz, tintR, tintG, tintB, refl, spec)
+{
+    writeModelMatrix(tx, ty, tz, sx, sy, sz);
+    glUniformMatrix4fv(uObjModel, 1, false, modelBuf);
+    glUniform3f(uObjTint, tintR, tintG, tintB);
+    glUniform1f(uObjReflectivity, refl);
+    glUniform1f(uObjSpecular, spec);
+    glUniform1i(uObjHasTex, 0);
+    glUniform1i(uObjUseFloorTex, 0);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+}
+
+
+def drawFloorNode(tx, ty, tz, sx, sy, sz, refl, spec)
+{
+    writeModelMatrix(tx, ty, tz, sx, sy, sz);
+    glUniformMatrix4fv(uObjModel, 1, false, modelBuf);
+    glUniform3f(uObjTint, 1.0, 1.0, 1.0);
+    glUniform1f(uObjReflectivity, refl);
+    glUniform1f(uObjSpecular, spec);
+    glUniform1i(uObjHasTex, 0);
+    glUniform1i(uObjUseFloorTex, 1);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glUniform1i(uObjUseFloorTex, 0);
+}
+
+
+def drawCarModelNode()
+{
+    if (!carLoaded || carModel == nil) return;
+
+    carModel.scale = carScale;
+    carModel.rotY = SHOWROOM_CAR_ROT_Y;
+    carModel.posX = proxyX - carModel.centerX * carScale;
+    carModel.posY = floorY - carModel.minY * carScale + 0.02;
+    carModel.posZ = proxyZ - carModel.centerZ * carScale;
+
+    var carMat = carModel.makeModelMatrix();
+    MatrixWriteBuffer(carMat, modelBuf);
+    glUniformMatrix4fv(uObjModel, 1, false, modelBuf);
+    glUniform1f(uObjReflectivity, reflectivity);
+    glUniform1f(uObjSpecular, specularBoost);
+    glUniform1i(uObjUseFloorTex, 0);
+
+    for (var i = 0; i < len(carModel.surfaces); i += 1)
+    {
+        var surface = carModel.surfaces[i];
+        var texId = 0;
+        var tintR = 0.82; var tintG = 0.84; var tintB = 0.88;
+
+        if (surface.materialIndex >= 0 && surface.materialIndex < len(carModel.materials))
+        {
+            var mat = carModel.materials[surface.materialIndex];
+            texId = mat.texId;
+            tintR = mat.diffuseR;
+            tintG = mat.diffuseG;
+            tintB = mat.diffuseB;
+        }
+
+        glUniform3f(uObjTint, tintR, tintG, tintB);
+        glUniform1i(uObjHasTex, texId > 0 ? 1 : 0);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, texId);
+        glActiveTexture(GL_TEXTURE0);
+        surface.draw();
+    }
+
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+
+def renderShowroom(view, proj)
+{
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glClearColor(0.10, 0.11, 0.14, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glDepthMask(false);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(skyProg);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, skyCubemap);
+    writeModelMatrix(eyeX, eyeY, eyeZ, sceneRadius * 18.0, sceneRadius * 18.0, sceneRadius * 18.0);
+    glUniformMatrix4fv(uSkyModel, 1, false, modelBuf);
+    glUniformMatrix4fv(uSkyView, 1, false, viewBuf);
+    glUniformMatrix4fv(uSkyProj, 1, false, projBuf);
+    glUniform3f(uSkyCameraPos, eyeX, eyeY, eyeZ);
+    glBindVertexArray(cubeVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+
+    glDepthMask(true);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glUseProgram(objProg);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, skyCubemap);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, floorTex);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glUniformMatrix4fv(uObjView, 1, false, viewBuf);
+    glUniformMatrix4fv(uObjProj, 1, false, projBuf);
+    glUniform3f(uObjLightDir, lightDirX, lightDirY, lightDirZ);
+    glUniform3f(uObjAmbient, ambientStrength, ambientStrength, ambientStrength + 0.02);
+    glUniform3f(uObjCameraPos, eyeX, eyeY, eyeZ);
+    glUniform1f(uObjFloorY, floorY);
+    glUniform1i(uObjHasTex, 0);
+    glUniform1i(uObjUseFloorTex, 0);
+    glUniform1f(uObjFloorExtent, floorHalfExtent);
+    glUniform2f(uObjFloorCenter, focusX, focusZ);
+    glUniform1f(uObjFresnel, fresnelStrength);
+    glUniform1f(uObjOrbGlow, orbGlow);
+    glUniform4f(uObjOrbData0, orbPosX[0], orbPosY[0], orbPosZ[0], orbSize[0]);
+    glUniform4f(uObjOrbData1, orbPosX[1], orbPosY[1], orbPosZ[1], orbSize[1]);
+    glUniform4f(uObjOrbData2, orbPosX[2], orbPosY[2], orbPosZ[2], orbSize[2]);
+    glUniform4f(uObjOrbData3, orbPosX[3], orbPosY[3], orbPosZ[3], orbSize[3]);
+    glUniform3f(uObjOrbColor0, orbColorR[0], orbColorG[0], orbColorB[0]);
+    glUniform3f(uObjOrbColor1, orbColorR[1], orbColorG[1], orbColorB[1]);
+    glUniform3f(uObjOrbColor2, orbColorR[2], orbColorG[2], orbColorB[2]);
+    glUniform3f(uObjOrbColor3, orbColorR[3], orbColorG[3], orbColorB[3]);
+
+    glBindVertexArray(cubeVAO);
+    drawFloorNode(focusX, floorY - 0.04, focusZ, floorHalfExtent, 0.08, floorHalfExtent, 0.04, 0.05);
+    if (subjectMode == "car" && carLoaded)
+    {
+        drawCarModelNode();
+        glBindVertexArray(cubeVAO);
+    }
+    else
+        drawCubeNode(proxyX, proxyY, proxyZ, proxyScaleX, proxyScaleY, proxyScaleZ, 0.92, 0.94, 0.98, reflectivity, specularBoost);
+
+    if (showOrbs)
+    {
+        for (var i = 0; i < 4; i += 1)
+        {
+            drawCubeNode(
+                orbPosX[i], orbPosY[i], orbPosZ[i],
+                orbSize[i], orbSize[i], orbSize[i],
+                orbColorR[i], orbColorG[i], orbColorB[i],
+                0.18, 0.10
+            );
+        }
+    }
+
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    glUseProgram(0);
+}
+
+var screenW = GetScreenWidth();
+var screenH = max(GetScreenHeight(), 1);
+var camNear = 0.02;
+var camFar = 20000.0;
+var proj = MatrixPerspective(55.0 * PI / 180.0, screenW / screenH, camNear, camFar);
+
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var dirX = cos(pitchRad) * cos(yawRad);
+    var dirY = sin(pitchRad);
+    var dirZ = cos(pitchRad) * sin(yawRad);
+    var dirLen = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+    if (dirLen > 0.0001)
+    {
+        dirX = dirX / dirLen;
+        dirY = dirY / dirLen;
+        dirZ = dirZ / dirLen;
+    }
+
+    var rightX = dirZ;
+    var rightZ = -dirX;
+    var rightLen = sqrt(rightX * rightX + rightZ * rightZ);
+    if (rightLen > 0.0001)
+    {
+        rightX = rightX / rightLen;
+        rightZ = rightZ / rightLen;
+    }
+
+    if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
+    {
+        var panScale = max(sceneRadius * 0.0028, 0.008) * camDistance;
+        focusX = focusX - rightX * mdx * panScale;
+        focusZ = focusZ - rightZ * mdx * panScale;
+        focusY = focusY + mdy * panScale;
+        proxyX = focusX;
+        proxyZ = focusZ;
+    }
+
+    camDistance = camDistance - GetMouseWheelMove() * max(sceneRadius * 0.12, 0.6);
+    if (camDistance < sceneRadius * 0.65) camDistance = sceneRadius * 0.65;
+    if (camDistance > sceneRadius * 5.2) camDistance = sceneRadius * 5.2;
+
+    if (IsKeyPressed(KEY_G)) showGrid = !showGrid;
+    if (IsKeyPressed(KEY_O)) showOrbs = !showOrbs;
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_R))
+    {
+        focusX = 0.0;
+        focusY = 0.0;
+        focusZ = 0.0;
+        proxyX = 0.0;
+        proxyZ = 0.0;
+        yaw = -120.0;
+        pitch = -14.0;
+        camDistance = 18.0;
+    }
+
+    eyeX = focusX + dirX * camDistance;
+    eyeY = focusY + focusLift + dirY * camDistance;
+    eyeZ = focusZ + dirZ * camDistance;
+
+    var timeSec = GetTime();
+    for (var i = 0; i < 4; i += 1)
+    {
+        var ang = timeSec * orbitSpeed * (0.8 + i * 0.11) + orbPhase[i];
+        orbPosX[i] = focusX + cos(ang) * orbRadius[i];
+        orbPosY[i] = orbHeight[i] + sin(ang * 1.7 + i) * orbSize[i] * 0.18;
+        orbPosZ[i] = focusZ + sin(ang) * orbRadius[i];
+    }
+
+    var view = MatrixLookAt(Vector3(eyeX, eyeY, eyeZ), Vector3(focusX, focusY + focusLift, focusZ), Vector3(0.0, 1.0, 0.0));
+   
+    BeginDrawing();
+
+    previewRt = resizeSceneTarget(previewRt, 640, 360);
+    glBindFramebuffer(GL_FRAMEBUFFER, previewRt.fbo);
+    glViewport(0, 0, previewRt.width, previewRt.height);
+    var previewProj = MatrixPerspective(55.0 * PI / 180.0, previewRt.width / max(previewRt.height, 1), camNear, camFar);
+    renderShowroom(view, previewProj);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, screenW, screenH);
+    renderShowroom(view, proj);
+
+    DrawRectangle(18, 18, 920, 122, Color(0, 0, 0, 152));
+    DrawText("Proxy Showroom  RMB orbit | MMB pan | Mouse wheel zoom | TAB UI | O orbit solids | R reset", 30, 30, 22, Color(245, 245, 245, 255));
+    DrawText("OpenGL-first lab: proxy reflections come from skybox + floor texture, not from the preview RT yet.", 30, 62, 18, Color(190, 220, 255, 255));
+    DrawText("Mode: " + subjectMode + "  Sky: " + skySetNames[skySetIndex] + "  Preview RT: " + str(previewRt.width) + "x" + str(previewRt.height) + "  FPS: " + str(GetFPS()), 30, 92, 18, Color(180, 255, 200, 255));
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = ImGui.Begin("Showroom RT Lab");
+        if (panel != nil && panel)
+        {
+            ImGui.Text("Proxy mode until the BMW loader/render path is stable.");
+            ImGui.Text("The main scene and the preview both use the same OpenGL pipeline.");
+            ImGui.Text("Current proxy reflection inputs: skybox cubemap + floor texture + analytic orbit cubes.");
+            ImGui.Text("The SceneTarget preview below is debug only; it is not sampled by the proxy shader yet.");
+            ImGui.Text("Subject mode: " + subjectMode + (carLoaded ? " (BMW loaded)" : ""));
+            ImGui.Separator();
+
+            var (changedSky, nextSky) = ImGui.Combo("Sky set", skySetIndex, "morning", "early_morning", "cloudy_noon", "evening", "stormy");
+            if (changedSky && nextSky != skySetIndex)
+            {
+                var nextCube = loadSkyboxCubemap(skySetNames[nextSky]);
+                var nextFaces = loadSkyboxDebugFaces(skySetNames[nextSky]);
+                if (nextCube > 0 && nextFaces != nil)
+                {
+                    destroySkyboxCubemap(skyCubemap);
+                    destroySkyboxDebugFaces(skyDebugFaces);
+                    skyCubemap = nextCube;
+                    skyDebugFaces = nextFaces;
+                    skySetIndex = nextSky;
+                }
+                else if (nextCube > 0)
+                {
+                    destroySkyboxCubemap(nextCube);
+                }
+            }
+
+            var (changedReflect, nextReflect) = ImGui.SliderFloat("Reflectivity", reflectivity, 0.0, 1.0, "%.2f");
+            if (changedReflect) reflectivity = nextReflect;
+
+            var (changedFresnel, nextFresnel) = ImGui.SliderFloat("Fresnel", fresnelStrength, 0.0, 2.0, "%.2f");
+            if (changedFresnel) fresnelStrength = nextFresnel;
+
+            var (changedSpec, nextSpec) = ImGui.SliderFloat("Specular", specularBoost, 0.0, 1.0, "%.2f");
+            if (changedSpec) specularBoost = nextSpec;
+
+            var (changedAmbient, nextAmbient) = ImGui.SliderFloat("Ambient", ambientStrength, 0.02, 0.65, "%.2f");
+            if (changedAmbient) ambientStrength = nextAmbient;
+
+            var (changedGlow, nextGlow) = ImGui.SliderFloat("Orb glow", orbGlow, 0.0, 1.0, "%.2f");
+            if (changedGlow) orbGlow = nextGlow;
+
+            var (changedSpeed, nextSpeed) = ImGui.SliderFloat("Orbit speed", orbitSpeed, 0.0, 2.4, "%.2f");
+            if (changedSpeed) orbitSpeed = nextSpeed;
+
+            var (changedSize, nextSize) = ImGui.SliderFloat("Proxy cube", proxyScaleX, 0.8, 3.8, "%.2f");
+            if (changedSize)
+            {
+                proxyScaleX = nextSize;
+                proxyScaleY = nextSize;
+                proxyScaleZ = nextSize;
+            }
+
+            var (changedOrbs, nextOrbs) = ImGui.Checkbox("Show orbit solids", showOrbs);
+            if (changedOrbs) showOrbs = nextOrbs;
+
+            ImGui.Separator();
+            ImGui.Text("Camera");
+            ImGui.Text("distance: " + str(int(camDistance * 100.0) / 100.0));
+            ImGui.Text("eye: " + str(int(eyeX * 100.0) / 100.0) + ", " + str(int(eyeY * 100.0) / 100.0) + ", " + str(int(eyeZ * 100.0) / 100.0));
+
+            ImGui.Separator();
+            ImGui.Text("Debug render target");
+            ImGui.ImageButton("##scene_rt_color", previewRt.color, 320, 180, 0.0, 1.0, 1.0, 0.0);
+            ImGui.Text("scene texId: " + str(previewRt.color));
+
+            ImGui.Separator();
+            ImGui.Text("Proxy reflection inputs");
+            ImGui.ImageButton("##floor_tex", floorTex, 320, 180, 0.0, 1.0, 1.0, 0.0);
+            ImGui.SameLine();
+            ImGui.Text("This floor pattern is what you are seeing reflected on the proxy.");
+            ImGui.Text("floor texId: " + str(floorTex));
+
+            ImGui.Separator();
+            ImGui.Text("Skybox faces feeding the proxy");
+            for (var i = 0; i < 6; i += 1)
+            {
+                if (i == 3) ImGui.NewLine();
+                ImGui.ImageButton("##sky_face_" + str(i), skyDebugFaces[i], 96, 96, 0.0, 1.0, 1.0, 0.0);
+                if (i != 2 && i != 5) ImGui.SameLine();
+            }
+            ImGui.Text(skyFaceNames[0] + " | " + skyFaceNames[1] + " | " + skyFaceNames[2]);
+            ImGui.Text(skyFaceNames[3] + " | " + skyFaceNames[4] + " | " + skyFaceNames[5]);
+        }
+        ImGui.End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+previewRt.destroy();
+if (carModel != nil) carModel.destroy();
+destroySkyboxCubemap(skyCubemap);
+destroySkyboxDebugFaces(skyDebugFaces);
+if (floorTex > 0) glDeleteTextures(floorTex);
+glDeleteProgram(objProg);
+glDeleteProgram(skyProg);
+glDeleteBuffers(cubeVBO);
+glDeleteVertexArrays(cubeVAO);
+ShutdownImGui();
+CloseWindow();

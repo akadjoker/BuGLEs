@@ -1,0 +1,155 @@
+import math;
+using math;
+
+
+def imgNmClamp(v, lo, hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+
+def imgNmWrapIndex(v, size)
+{
+    if (size <= 0) return 0;
+    while (v < 0) v = v + size;
+    while (v >= size) v = v - size;
+    return v;
+}
+
+
+def imgNmSampleHeight(data, width, height, channels, x, y, wrapEdges)
+{
+    var sx = x;
+    var sy = y;
+
+    if (wrapEdges)
+    {
+        sx = imgNmWrapIndex(sx, width);
+        sy = imgNmWrapIndex(sy, height);
+    }
+    else
+    {
+        sx = imgNmClamp(sx, 0, width - 1);
+        sy = imgNmClamp(sy, 0, height - 1);
+    }
+
+    var idx = (sy * width + sx) * channels;
+    if (channels <= 0) return 0.0;
+    if (channels == 1) return data[idx];
+
+    var r = data[idx + 0];
+    var g = data[idx + 1];
+    var b = data[idx + 2];
+    return r * 0.299 + g * 0.587 + b * 0.114;
+}
+
+
+def imageGenerateNormalMap(width, height, channels, data, strength, wrapEdges)
+{
+    var out = [];
+    out.reserve(width * height * 3);
+
+    for (var y = 0; y < height; y += 1)
+    {
+        for (var x = 0; x < width; x += 1)
+        {
+            var tl = imgNmSampleHeight(data, width, height, channels, x - 1, y - 1, wrapEdges);
+            var tc = imgNmSampleHeight(data, width, height, channels, x + 0, y - 1, wrapEdges);
+            var tr = imgNmSampleHeight(data, width, height, channels, x + 1, y - 1, wrapEdges);
+            var ml = imgNmSampleHeight(data, width, height, channels, x - 1, y + 0, wrapEdges);
+            var mr = imgNmSampleHeight(data, width, height, channels, x + 1, y + 0, wrapEdges);
+            var bl = imgNmSampleHeight(data, width, height, channels, x - 1, y + 1, wrapEdges);
+            var bc = imgNmSampleHeight(data, width, height, channels, x + 0, y + 1, wrapEdges);
+            var br = imgNmSampleHeight(data, width, height, channels, x + 1, y + 1, wrapEdges);
+
+            var dx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+            var dy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+
+            var nx = -dx * strength;
+            var ny = -dy * strength;
+            var nz = 1.0;
+            var nl = sqrt(nx * nx + ny * ny + nz * nz);
+            if (nl < 0.00001) nl = 1.0;
+            nx = nx / nl;
+            ny = ny / nl;
+            nz = nz / nl;
+
+            out.push(nx * 0.5 + 0.5);
+            out.push(ny * 0.5 + 0.5);
+            out.push(nz * 0.5 + 0.5);
+        }
+    }
+
+    return (3, out);
+}
+
+
+def imgNmSampleHeightBytes(pixels, width, height, channels, x, y, wrapEdges)
+{
+    var sx = x;
+    var sy = y;
+
+    if (wrapEdges)
+    {
+        sx = imgNmWrapIndex(sx, width);
+        sy = imgNmWrapIndex(sy, height);
+    }
+    else
+    {
+        sx = imgNmClamp(sx, 0, width - 1);
+        sy = imgNmClamp(sy, 0, height - 1);
+    }
+
+    var idx = (sy * width + sx) * channels;
+    if (channels <= 0) return 0.0;
+    if (channels == 1) return pixels[idx] / 255.0;
+
+    var r = pixels[idx + 0] / 255.0;
+    var g = pixels[idx + 1] / 255.0;
+    var b = pixels[idx + 2] / 255.0;
+    return r * 0.299 + g * 0.587 + b * 0.114;
+}
+
+
+def imageGenerateNormalMapBytes(width, height, channels, pixels, strength, wrapEdges)
+{
+    var out = @(width * height * 4, TYPE_UINT8);
+    var p = 0;
+
+    for (var y = 0; y < height; y += 1)
+    {
+        for (var x = 0; x < width; x += 1)
+        {
+            var tl = imgNmSampleHeightBytes(pixels, width, height, channels, x - 1, y - 1, wrapEdges);
+            var tc = imgNmSampleHeightBytes(pixels, width, height, channels, x + 0, y - 1, wrapEdges);
+            var tr = imgNmSampleHeightBytes(pixels, width, height, channels, x + 1, y - 1, wrapEdges);
+            var ml = imgNmSampleHeightBytes(pixels, width, height, channels, x - 1, y + 0, wrapEdges);
+            var mr = imgNmSampleHeightBytes(pixels, width, height, channels, x + 1, y + 0, wrapEdges);
+            var bl = imgNmSampleHeightBytes(pixels, width, height, channels, x - 1, y + 1, wrapEdges);
+            var bc = imgNmSampleHeightBytes(pixels, width, height, channels, x + 0, y + 1, wrapEdges);
+            var br = imgNmSampleHeightBytes(pixels, width, height, channels, x + 1, y + 1, wrapEdges);
+
+            var dx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+            var dy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+
+            var nx = -dx * strength;
+            var ny = -dy * strength;
+            var nz = 1.0;
+            var nl = sqrt(nx * nx + ny * ny + nz * nz);
+            if (nl < 0.00001) nl = 1.0;
+            nx = nx / nl;
+            ny = ny / nl;
+            nz = nz / nl;
+
+            out[p + 0] = int((nx * 0.5 + 0.5) * 255.0);
+            out[p + 1] = int((ny * 0.5 + 0.5) * 255.0);
+            out[p + 2] = int((nz * 0.5 + 0.5) * 255.0);
+            out[p + 3] = 255;
+            p += 4;
+        }
+    }
+
+    return (4, out);
+}

@@ -1,0 +1,42 @@
+import path;
+using path;
+import nn;
+
+include "../libs/lib_image_normalmap.bu";
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+var inputPath = resolveAssetPath(
+    "assets/sponza/textures/spnza_bricks_a_diff.tga",
+    "../assets/sponza/textures/spnza_bricks_a_diff.tga",
+    "../../assets/sponza/textures/spnza_bricks_a_diff.tga"
+);
+
+if (inputPath == nil)
+{
+    print("Input texture not found\n");
+    return;
+}
+
+var outputPath = "/tmp/spnza_bricks_a_generated_normal.png";
+var strength = 4.0;
+var wrapEdges = false;
+
+print("Generating normal map from: " + inputPath + "\n");
+var (w, h, ch, data) = nn.loadImage(inputPath);
+print("Loaded: " + w + "x" + h + " channels=" + ch + "\n");
+
+var (outCh, outData) = imageGenerateNormalMap(w, h, ch, data, strength, wrapEdges);
+var ok = nn.saveImage(outputPath, w, h, outCh, outData);
+
+print("Saved: " + ok + "\n");
+print("Output: " + outputPath + "\n");
+print("Strength: " + strength + " wrapEdges=" + wrapEdges + "\n");

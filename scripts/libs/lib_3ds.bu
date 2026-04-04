@@ -1,0 +1,1570 @@
+// ================================================================
+// lib_3ds.bu -- Autodesk 3DS static mesh loader
+//
+// Usage:
+//   include "lib_3ds.bu";
+//   var model = ThreeDSModel();
+//   if (model.load("scene.3ds")) model.draw();
+//
+// Notes:
+//   - Loads static meshes, materials, UVs and textures
+//   - Keyframe chunks are detected but not animated
+// ================================================================
+
+import file;
+import path;
+using path;
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import STB;
+using STB;
+import GLM;
+using GLM;
+
+var THREEDS_PRIMARY          = 0x4D4D;
+var THREEDS_OBJECTINFO       = 0x3D3D;
+var THREEDS_VERSION          = 0x0002;
+var THREEDS_MATERIAL         = 0xAFFF;
+var THREEDS_OBJECT           = 0x4000;
+var THREEDS_MATNAME          = 0xA000;
+var THREEDS_MATDIFFUSE       = 0xA020;
+var THREEDS_MATOPACITY       = 0xA050;
+var THREEDS_MATMAP           = 0xA200;
+var THREEDS_MATMAPFILE       = 0xA300;
+var THREEDS_OBJECT_MESH      = 0x4100;
+var THREEDS_OBJECT_VERTICES  = 0x4110;
+var THREEDS_OBJECT_FACES     = 0x4120;
+var THREEDS_OBJECT_MATERIAL  = 0x4130;
+var THREEDS_OBJECT_UV        = 0x4140;
+var THREEDS_TRI_TRANSFORMATION = 0x4160;
+var THREEDS_KEYFRAME         = 0xB000;
+var THREEDS_OBJECT_NODE          = 0xB002;
+var THREEDS_KEYFRAME_MESH_INFO   = 0xB002;
+var THREEDS_OBJECT_HIERARCHY     = 0xB010;
+var THREEDS_OBJECT_INSTANCE_NAME = 0xB011;
+var THREEDS_KEYFRAME_START_END   = 0xB008;
+var THREEDS_PIVOT                = 0xB013;
+var THREEDS_POSITION_TRACK_TAG   = 0xB020;
+var THREEDS_ROTATION_TRACK_TAG   = 0xB021;
+var THREEDS_SCALE_TRACK_TAG      = 0xB022;
+var THREEDS_OBJECT_ID            = 0xB030;
+var THREEDS_COLOR_RGB24      = 0x0011;
+var THREEDS_COLOR_FLOAT      = 0x0010;
+var THREEDS_COLOR_LIN24      = 0x0012;
+var THREEDS_COLOR_LINFLOAT   = 0x0013;
+var THREEDS_PERCENT_INT      = 0x0030;
+var THREEDS_PERCENT_FLOAT    = 0x0031;
+
+
+def threedSReadU16(buf)
+{
+    var v = buf.readShort();
+    if (v < 0) v = v + 65536;
+    return v;
+}
+
+
+def threedSReadU32(buf)
+{
+    var v = buf.readInt();
+    if (v < 0) v = v + 4294967296.0;
+    return v;
+}
+
+
+def threedSReadCString(buf)
+{
+    var s = "";
+    while (buf.tell() < buf.length())
+    {
+        var b = buf.readByte();
+        if (b == 0) break;
+        s = s + char(b);
+    }
+    return s;
+}
+
+
+def threedSStripExt(name)
+{
+    if (name == nil || name == "") return name;
+    var lastDot = -1;
+    for (var i = 0; i < len(name); i += 1)
+        if (name[i] == ".") lastDot = i;
+    if (lastDot < 0) return name;
+    var out = "";
+    for (var i = 0; i < lastDot; i += 1) out = out + name[i];
+    return out;
+}
+
+
+def threedSCross(ax, ay, az, bx, by, bz)
+{
+    return [
+        ay * bz - az * by,
+        az * bx - ax * bz,
+        ax * by - ay * bx
+    ];
+}
+
+
+def threedSNormalize3(x, y, z)
+{
+    var d = sqrt(x * x + y * y + z * z);
+    if (d <= 0.000001) return [0.0, 1.0, 0.0];
+    return [x / d, y / d, z / d];
+}
+
+
+def threedSRoundSmall(number)
+{
+    if (number > 0.0 && number < 0.001) return 0.0;
+    if (number < 0.0 && number > -0.001) return 0.0;
+    return number;
+}
+
+
+def threedSAbs(number)
+{
+    if (number == nil) return 0.0;
+    if (number < 0.0) return -number;
+    return number;
+}
+
+
+def threedSIdentityMatrix()
+{
+    return [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    ];
+}
+
+
+def threedSMatrixTranslate(x, y, z)
+{
+    return [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        x, y, z, 1.0
+    ];
+}
+
+
+def threedSMatrixScale(x, y, z)
+{
+    return [
+        x,   0.0, 0.0, 0.0,
+        0.0, y,   0.0, 0.0,
+        0.0, 0.0, z,   0.0,
+        0.0, 0.0, 0.0, 1.0
+    ];
+}
+
+
+def threedSMatrixMultiply(a, b)
+{
+    var result = [];
+    for (var row = 0; row < 4; row += 1)
+    {
+        for (var col = 0; col < 4; col += 1)
+        {
+            var value =
+                a[row * 4 + 0] * b[0 * 4 + col] +
+                a[row * 4 + 1] * b[1 * 4 + col] +
+                a[row * 4 + 2] * b[2 * 4 + col] +
+                a[row * 4 + 3] * b[3 * 4 + col];
+            result.push(value);
+        }
+    }
+    return result;
+}
+
+
+def threedSMatrixDeterminant(m)
+{
+    var a00 = m[0];  var a01 = m[1];  var a02 = m[2];  var a03 = m[3];
+    var a10 = m[4];  var a11 = m[5];  var a12 = m[6];  var a13 = m[7];
+    var a20 = m[8];  var a21 = m[9];  var a22 = m[10]; var a23 = m[11];
+    var a30 = m[12]; var a31 = m[13]; var a32 = m[14]; var a33 = m[15];
+
+    var b00 = a00 * a11 - a01 * a10;
+    var b01 = a00 * a12 - a02 * a10;
+    var b02 = a00 * a13 - a03 * a10;
+    var b03 = a01 * a12 - a02 * a11;
+    var b04 = a01 * a13 - a03 * a11;
+    var b05 = a02 * a13 - a03 * a12;
+    var b06 = a20 * a31 - a21 * a30;
+    var b07 = a20 * a32 - a22 * a30;
+    var b08 = a20 * a33 - a23 * a30;
+    var b09 = a21 * a32 - a22 * a31;
+    var b10 = a21 * a33 - a23 * a31;
+    var b11 = a22 * a33 - a23 * a32;
+
+    return b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+}
+
+
+def threedSMatrixInvert(m)
+{
+    var a00 = m[0];  var a01 = m[1];  var a02 = m[2];  var a03 = m[3];
+    var a10 = m[4];  var a11 = m[5];  var a12 = m[6];  var a13 = m[7];
+    var a20 = m[8];  var a21 = m[9];  var a22 = m[10]; var a23 = m[11];
+    var a30 = m[12]; var a31 = m[13]; var a32 = m[14]; var a33 = m[15];
+
+    var b00 = a00 * a11 - a01 * a10;
+    var b01 = a00 * a12 - a02 * a10;
+    var b02 = a00 * a13 - a03 * a10;
+    var b03 = a01 * a12 - a02 * a11;
+    var b04 = a01 * a13 - a03 * a11;
+    var b05 = a02 * a13 - a03 * a12;
+    var b06 = a20 * a31 - a21 * a30;
+    var b07 = a20 * a32 - a22 * a30;
+    var b08 = a20 * a33 - a23 * a30;
+    var b09 = a21 * a32 - a22 * a31;
+    var b10 = a21 * a33 - a23 * a31;
+    var b11 = a22 * a33 - a23 * a32;
+
+    var determinant = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+    if (determinant > -0.000000001 && determinant < 0.000000001) return nil;
+
+    return [
+        (a11 * b11 - a12 * b10 + a13 * b09) / determinant,
+        (a02 * b10 - a01 * b11 - a03 * b09) / determinant,
+        (a31 * b05 - a32 * b04 + a33 * b03) / determinant,
+        (a22 * b04 - a21 * b05 - a23 * b03) / determinant,
+        (a12 * b08 - a10 * b11 - a13 * b07) / determinant,
+        (a00 * b11 - a02 * b08 + a03 * b07) / determinant,
+        (a32 * b02 - a30 * b05 - a33 * b01) / determinant,
+        (a20 * b05 - a22 * b02 + a23 * b01) / determinant,
+        (a10 * b10 - a11 * b08 + a13 * b06) / determinant,
+        (a01 * b08 - a00 * b10 - a03 * b06) / determinant,
+        (a30 * b04 - a31 * b02 + a33 * b00) / determinant,
+        (a21 * b02 - a20 * b04 - a23 * b00) / determinant,
+        (a11 * b07 - a10 * b09 - a12 * b06) / determinant,
+        (a00 * b09 - a01 * b07 + a02 * b06) / determinant,
+        (a31 * b01 - a30 * b03 - a32 * b00) / determinant,
+        (a20 * b03 - a21 * b01 + a22 * b00) / determinant
+    ];
+}
+
+
+def threedSTransformPoint(m, x, y, z)
+{
+    return [
+        x * m[0] + y * m[4] + z * m[8]  + m[12],
+        x * m[1] + y * m[5] + z * m[9]  + m[13],
+        x * m[2] + y * m[6] + z * m[10] + m[14]
+    ];
+}
+
+
+def threedSQuaternionFromAxisAngle(ax, ay, az, angleRad)
+{
+    var length = sqrt(ax * ax + ay * ay + az * az);
+    if (length <= 0.000001) return [0.0, 0.0, 0.0, 1.0];
+
+    var omega = angleRad * -0.5;
+    var si = sin(omega) / length;
+    return [
+        si * ax,
+        si * ay,
+        si * az,
+        cos(omega)
+    ];
+}
+
+
+def threedSComposeTRS(tx, ty, tz, qx, qy, qz, qw, sx, sy, sz)
+{
+    var x2 = qx + qx;
+    var y2 = qy + qy;
+    var z2 = qz + qz;
+    var xx = qx * x2;
+    var xy = qx * y2;
+    var xz = qx * z2;
+    var yy = qy * y2;
+    var yz = qy * z2;
+    var zz = qz * z2;
+    var wx = qw * x2;
+    var wy = qw * y2;
+    var wz = qw * z2;
+
+    return [
+        (1.0 - (yy + zz)) * sx, (xy + wz) * sx,         (xz - wy) * sx,         0.0,
+        (xy - wz) * sy,         (1.0 - (xx + zz)) * sy, (yz + wx) * sy,         0.0,
+        (xz + wy) * sz,         (yz - wx) * sz,         (1.0 - (xx + yy)) * sz, 0.0,
+        tx,                     ty,                     tz,                     1.0
+    ];
+}
+
+
+def threedSReadTransformMatrix(buf)
+{
+    var matrix = [];
+    for (var row = 0; row < 4; row += 1)
+    {
+        for (var col = 0; col < 3; col += 1) matrix.push(buf.readFloat());
+        if (row < 3) matrix.push(0.0);
+        else matrix.push(1.0);
+    }
+    return matrix;
+}
+
+
+def threedSLoadTexture2D(texPath)
+{
+    stbi_set_flip_vertically_on_load(0);
+    var (w, h, channels, pixels) = stbi_load(texPath, 4);
+    if (pixels == nil || w == nil || h == nil) return 0;
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+class ThreeDSMaterial
+{
+    var name;
+    var fileName;
+    var diffuseR, diffuseG, diffuseB;
+    var opacity;
+    var texId;
+
+    def init()
+    {
+        self.name = "";
+        self.fileName = "";
+        self.diffuseR = 1.0;
+        self.diffuseG = 1.0;
+        self.diffuseB = 1.0;
+        self.opacity = 1.0;
+        self.texId = 0;
+    }
+}
+
+
+class ThreeDSTempObject
+{
+    var name;
+    var positions;
+    var texcoords;
+    var faces;
+    var normals;
+    var materialNames;
+    var materialFaces;
+    var meshMatrix;
+    var meshHasMatrix;
+
+    def init(objectName)
+    {
+        self.name = objectName;
+        self.positions = [];
+        self.texcoords = [];
+        self.faces = [];
+        self.normals = [];
+        self.materialNames = [];
+        self.materialFaces = [];
+        self.meshMatrix = nil;
+        self.meshHasMatrix = false;
+    }
+
+    def vertexCount()
+    {
+        return int(len(self.positions) / 3);
+    }
+
+    def faceCount()
+    {
+        return int(len(self.faces) / 3);
+    }
+}
+
+
+class ThreeDSNodeTransform
+{
+    var name;
+    var id;
+    var parentId;
+    var flags;
+    var instanceName;
+    var pivotX, pivotY, pivotZ;
+    var posX, posY, posZ;
+    var scaleX, scaleY, scaleZ;
+    var rotAxisX, rotAxisY, rotAxisZ;
+    var rotAngleRad;
+    var worldMatrix;
+    var worldReady;
+    var worldVisiting;
+
+    def init(nodeName)
+    {
+        self.name = nodeName;
+        self.id = -1;
+        self.parentId = 65535;
+        self.flags = 0;
+        self.instanceName = "";
+        self.pivotX = 0.0; self.pivotY = 0.0; self.pivotZ = 0.0;
+        self.posX = 0.0; self.posY = 0.0; self.posZ = 0.0;
+        self.scaleX = 1.0; self.scaleY = 1.0; self.scaleZ = 1.0;
+        self.rotAxisX = 0.0; self.rotAxisY = 1.0; self.rotAxisZ = 0.0;
+        self.rotAngleRad = 0.0;
+        self.worldMatrix = nil;
+        self.worldReady = false;
+        self.worldVisiting = false;
+    }
+}
+
+
+class ThreeDSSurface
+{
+    var objectName;
+    var materialName;
+    var materialIndex;
+    var positions;
+    var normals;
+    var texcoords;
+    var indices;
+    var vao, vbo, ebo;
+    var vertexCount;
+    var indexCount;
+    var minX, minY, minZ;
+    var maxX, maxY, maxZ;
+
+    def init()
+    {
+        self.objectName = "";
+        self.materialName = "";
+        self.materialIndex = -1;
+        self.positions = [];
+        self.normals = [];
+        self.texcoords = [];
+        self.indices = [];
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.vertexCount = 0;
+        self.indexCount = 0;
+        self.resetBounds();
+    }
+
+    def resetBounds()
+    {
+        self.minX =  1000000000.0; self.minY =  1000000000.0; self.minZ =  1000000000.0;
+        self.maxX = -1000000000.0; self.maxY = -1000000000.0; self.maxZ = -1000000000.0;
+    }
+
+    def addBound(x, y, z)
+    {
+        if (x < self.minX) self.minX = x;
+        if (y < self.minY) self.minY = y;
+        if (z < self.minZ) self.minZ = z;
+        if (x > self.maxX) self.maxX = x;
+        if (y > self.maxY) self.maxY = y;
+        if (z > self.maxZ) self.maxZ = z;
+    }
+
+    def destroy()
+    {
+        if (self.ebo > 0) glDeleteBuffers(self.ebo);
+        if (self.vbo > 0) glDeleteBuffers(self.vbo);
+        if (self.vao > 0) glDeleteVertexArrays(self.vao);
+        self.vao = 0;
+        self.vbo = 0;
+        self.ebo = 0;
+        self.vertexCount = 0;
+        self.indexCount = 0;
+    }
+
+    def upload()
+    {
+        self.destroy();
+        self.vertexCount = int(len(self.positions) / 3);
+        self.indexCount = len(self.indices);
+        if (self.vertexCount <= 0 || self.indexCount <= 0) return false;
+
+        var verts = Float32Array(0);
+        verts.reserve(self.vertexCount * 8);
+        for (var i = 0; i < self.vertexCount; i += 1)
+        {
+            var p = i * 3;
+            var t = i * 2;
+            verts.add(
+                self.positions[p + 0], self.positions[p + 1], self.positions[p + 2],
+                self.normals[p + 0], self.normals[p + 1], self.normals[p + 2],
+                self.texcoords[t + 0], self.texcoords[t + 1]
+            );
+        }
+
+        var idx = Uint32Array(0);
+        for (var i = 0; i < self.indexCount; i += 1) idx.add(self.indices[i]);
+
+        self.vao = glGenVertexArrays();
+        self.vbo = glGenBuffers();
+        self.ebo = glGenBuffers();
+
+        glBindVertexArray(self.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.byteLength(), idx, GL_STATIC_DRAW);
+
+        var stride = 8 * 4;
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, stride, 0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, false, stride, 3 * 4);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, false, stride, 6 * 4);
+
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        return true;
+    }
+
+    def draw()
+    {
+        if (self.vao <= 0 || self.indexCount <= 0) return;
+        glBindVertexArray(self.vao);
+        glDrawElements(GL_TRIANGLES, self.indexCount, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+    }
+}
+
+
+class ThreeDSModel
+{
+    var sourcePath;
+    var baseDir;
+    var version;
+    var hasKeyframeData;
+    var materials;
+    var objectNames;
+    var surfaces;
+    var tempObjects;
+    var nodeTransforms;
+    var texCachePaths;
+    var texCacheIds;
+    var posX, posY, posZ;
+    var rotX, rotY, rotZ;
+    var scale;
+    var ready;
+    var gpuEnabled;
+    var debugLoad;
+    var minX, minY, minZ;
+    var maxX, maxY, maxZ;
+    var centerX, centerY, centerZ;
+    var sizeX, sizeY, sizeZ;
+
+    def init()
+    {
+        self.sourcePath = "";
+        self.baseDir = "";
+        self.version = 0;
+        self.hasKeyframeData = false;
+        self.materials = [];
+        self.objectNames = [];
+        self.surfaces = [];
+        self.tempObjects = [];
+        self.nodeTransforms = [];
+        self.texCachePaths = [];
+        self.texCacheIds = [];
+        self.posX = 0.0; self.posY = 0.0; self.posZ = 0.0;
+        self.rotX = 0.0; self.rotY = 0.0; self.rotZ = 0.0;
+        self.scale = 1.0;
+        self.ready = false;
+        self.gpuEnabled = true;
+        self.debugLoad = false;
+        self.resetBounds();
+    }
+
+    def resetBounds()
+    {
+        self.minX =  1000000000.0; self.minY =  1000000000.0; self.minZ =  1000000000.0;
+        self.maxX = -1000000000.0; self.maxY = -1000000000.0; self.maxZ = -1000000000.0;
+        self.centerX = 0.0; self.centerY = 0.0; self.centerZ = 0.0;
+        self.sizeX = 0.0; self.sizeY = 0.0; self.sizeZ = 0.0;
+    }
+
+    def addBound(x, y, z)
+    {
+        if (x < self.minX) self.minX = x;
+        if (y < self.minY) self.minY = y;
+        if (z < self.minZ) self.minZ = z;
+        if (x > self.maxX) self.maxX = x;
+        if (y > self.maxY) self.maxY = y;
+        if (z > self.maxZ) self.maxZ = z;
+    }
+
+    def finalizeBounds()
+    {
+        if (self.minX > self.maxX) return;
+        self.centerX = (self.minX + self.maxX) * 0.5;
+        self.centerY = (self.minY + self.maxY) * 0.5;
+        self.centerZ = (self.minZ + self.maxZ) * 0.5;
+        self.sizeX = self.maxX - self.minX;
+        self.sizeY = self.maxY - self.minY;
+        self.sizeZ = self.maxZ - self.minZ;
+    }
+
+    def destroy()
+    {
+        for (var i = 0; i < len(self.surfaces); i += 1) self.surfaces[i].destroy();
+        for (var i = 0; i < len(self.texCacheIds); i += 1)
+            if (self.texCacheIds[i] > 0) glDeleteTextures(self.texCacheIds[i]);
+        self.materials = [];
+        self.objectNames = [];
+        self.surfaces = [];
+        self.tempObjects = [];
+        self.nodeTransforms = [];
+        self.texCachePaths = [];
+        self.texCacheIds = [];
+        self.ready = false;
+        self.gpuEnabled = true;
+        self.debugLoad = false;
+        self.version = 0;
+        self.hasKeyframeData = false;
+        self.resetBounds();
+    }
+
+    def materialCount()
+    {
+        return len(self.materials);
+    }
+
+    def objectCount()
+    {
+        return len(self.objectNames);
+    }
+
+    def surfaceCount()
+    {
+        return len(self.surfaces);
+    }
+
+    def loadTextureCached(texPath)
+    {
+        if (texPath == nil || texPath == "") return 0;
+        for (var i = 0; i < len(self.texCachePaths); i += 1)
+            if (self.texCachePaths[i] == texPath) return self.texCacheIds[i];
+        var texId = threedSLoadTexture2D(texPath);
+        if (texId > 0)
+        {
+            self.texCachePaths.push(texPath);
+            self.texCacheIds.push(texId);
+        }
+        return texId;
+    }
+
+    def resolveTexturePath(name)
+    {
+        if (name == nil || name == "") return nil;
+        if (path.exists(name)) return name;
+
+        var exact = self.baseDir + name;
+        if (path.exists(exact)) return exact;
+
+        var fname = path.filename(name);
+        var bare = threedSStripExt(fname);
+        var direct = self.baseDir + fname;
+        if (path.exists(direct)) return direct;
+
+        var texDir = self.baseDir + "textures/" + fname;
+        if (path.exists(texDir)) return texDir;
+
+        var exts = [".png", ".jpg", ".jpeg", ".bmp", ".tga", ".dds"];
+        for (var i = 0; i < len(exts); i += 1)
+        {
+            var p = self.baseDir + bare + exts[i];
+            if (path.exists(p)) return p;
+            p = self.baseDir + "textures/" + bare + exts[i];
+            if (path.exists(p)) return p;
+        }
+        return nil;
+    }
+
+    def findMaterialIndex(name)
+    {
+        for (var i = 0; i < len(self.materials); i += 1)
+            if (self.materials[i].name == name) return i;
+        return -1;
+    }
+
+    def findNodeTransform(name)
+    {
+        for (var i = 0; i < len(self.nodeTransforms); i += 1)
+            if (self.nodeTransforms[i].name == name) return self.nodeTransforms[i];
+        return nil;
+    }
+
+    def findNodeTransformById(nodeId)
+    {
+        for (var i = 0; i < len(self.nodeTransforms); i += 1)
+            if (self.nodeTransforms[i].id == nodeId) return self.nodeTransforms[i];
+        return nil;
+    }
+
+    def findTempObject(name)
+    {
+        for (var i = 0; i < len(self.tempObjects); i += 1)
+            if (self.tempObjects[i].name == name) return self.tempObjects[i];
+        return nil;
+    }
+
+    def findOrCreateNodeTransform(name)
+    {
+        var tf = self.findNodeTransform(name);
+        if (tf != nil) return tf;
+        tf = ThreeDSNodeTransform(name);
+        self.nodeTransforms.push(tf);
+        return tf;
+    }
+
+    def resetNodeWorldMatrices()
+    {
+        for (var i = 0; i < len(self.nodeTransforms); i += 1)
+        {
+            self.nodeTransforms[i].worldMatrix = nil;
+            self.nodeTransforms[i].worldReady = false;
+            self.nodeTransforms[i].worldVisiting = false;
+        }
+    }
+
+    def buildLocalNodeMatrix(tf, isMeshNode)
+    {
+        var quat = threedSQuaternionFromAxisAngle(
+            tf.rotAxisX,
+            tf.rotAxisY,
+            tf.rotAxisZ,
+            tf.rotAngleRad
+        );
+
+        var matrix = threedSComposeTRS(
+            tf.posX, tf.posY, tf.posZ,
+            quat[0], quat[1], quat[2], quat[3],
+            tf.scaleX, tf.scaleY, tf.scaleZ
+        );
+
+        if (isMeshNode)
+        {
+            var pivotMatrix = threedSMatrixTranslate(-tf.pivotX, -tf.pivotY, -tf.pivotZ);
+            matrix = threedSMatrixMultiply(pivotMatrix, matrix);
+        }
+        return matrix;
+    }
+
+    def buildWorldNodeMatrix(tf)
+    {
+        if (tf == nil) return threedSIdentityMatrix();
+        if (tf.worldReady && tf.worldMatrix != nil) return tf.worldMatrix;
+        if (tf.worldVisiting) return self.buildLocalNodeMatrix(tf, self.findTempObject(tf.name) != nil);
+
+        tf.worldVisiting = true;
+        var local = self.buildLocalNodeMatrix(tf, self.findTempObject(tf.name) != nil);
+        var parent = self.findNodeTransformById(tf.parentId);
+        if (parent != nil && parent != tf)
+            tf.worldMatrix = threedSMatrixMultiply(local, self.buildWorldNodeMatrix(parent));
+        else
+            tf.worldMatrix = local;
+        tf.worldVisiting = false;
+        tf.worldReady = true;
+        return tf.worldMatrix;
+    }
+
+    def makeModelMatrix()
+    {
+        var degToRad = PI / 180.0;
+        var m = MatrixScale(self.scale, self.scale, self.scale);
+        m = MatrixMultiply(m, MatrixRotateZ(self.rotZ * degToRad));
+        m = MatrixMultiply(m, MatrixRotateY(self.rotY * degToRad));
+        m = MatrixMultiply(m, MatrixRotateX(self.rotX * degToRad));
+        m = MatrixMultiply(m, MatrixTranslate(self.posX, self.posY, self.posZ));
+        return m;
+    }
+
+    def draw()
+    {
+        if (!self.ready) return;
+        for (var i = 0; i < len(self.surfaces); i += 1)
+        {
+            var surface = self.surfaces[i];
+            var texId = 0;
+            if (surface.materialIndex >= 0 && surface.materialIndex < len(self.materials))
+                texId = self.materials[surface.materialIndex].texId;
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, texId);
+            surface.draw();
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    def load(filePath)
+    {
+        return self.loadInternal(filePath, true);
+    }
+
+    def loadHeadless(filePath)
+    {
+        return self.loadInternal(filePath, false);
+    }
+
+    def loadInternal(filePath, enableGpu)
+    {
+        self.destroy();
+        self.sourcePath = filePath;
+        self.baseDir = path.dirname(filePath) + "/";
+        self.gpuEnabled = enableGpu;
+        if (self.debugLoad) print("3DS load start: " + filePath + " gpu=" + str(enableGpu));
+
+        var handle = file.open(filePath, "r");
+        if (handle == nil || handle <= 0)
+        {
+            print("3DS: failed to open: " + filePath);
+            return false;
+        }
+
+        var buf = file.read_all(handle);
+        file.close(handle);
+        if (buf == nil || buf.length() < 6)
+        {
+            print("3DS: read_all failed: " + filePath);
+            return false;
+        }
+
+        buf.seek(0);
+        var rootId = threedSReadU16(buf);
+        var rootLen = threedSReadU32(buf);
+        if (rootId != THREEDS_PRIMARY)
+        {
+            print("3DS: invalid primary chunk: " + rootId);
+            return false;
+        }
+
+        var rootEnd = int(rootLen);
+        if (rootEnd > buf.length()) rootEnd = buf.length();
+        self.readMainChunk(buf, rootEnd);
+        if (self.debugLoad) print("3DS readMainChunk done mats=" + str(len(self.materials)) + " tempObjs=" + str(len(self.tempObjects)) + " keyNodes=" + str(len(self.nodeTransforms)));
+
+        if (self.gpuEnabled)
+            for (var i = 0; i < len(self.materials); i += 1)
+            {
+                var texPath = self.resolveTexturePath(self.materials[i].fileName);
+                self.materials[i].texId = self.loadTextureCached(texPath);
+            }
+
+        self.finalizeAllObjects();
+        if (self.debugLoad) print("3DS finalizeAllObjects done surfaces=" + str(len(self.surfaces)));
+
+        self.finalizeBounds();
+        self.ready = len(self.surfaces) > 0;
+        if (self.debugLoad) print("3DS load end ready=" + str(self.ready));
+        return self.ready;
+    }
+
+    def readMainChunk(buf, endPos)
+    {
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_VERSION)
+            {
+                if (buf.tell() + 4 <= chunkEnd) self.version = threedSReadU32(buf);
+            }
+            elif (chunkId == THREEDS_OBJECTINFO)
+            {
+                self.readObjectInfoChunk(buf, chunkEnd);
+            }
+            elif (chunkId == THREEDS_KEYFRAME)
+            {
+                self.hasKeyframeData = true;
+                self.readKeyframeChunk(buf, chunkEnd);
+            }
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readObjectInfoChunk(buf, endPos)
+    {
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_MATERIAL)
+            {
+                var mat = ThreeDSMaterial();
+                self.readMaterialChunk(buf, chunkEnd, mat);
+                self.materials.push(mat);
+            }
+            elif (chunkId == THREEDS_OBJECT)
+            {
+                var objName = threedSReadCString(buf);
+                var obj = ThreeDSTempObject(objName);
+                self.readObjectChunk(buf, chunkEnd, obj);
+                self.tempObjects.push(obj);
+            }
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readMaterialChunk(buf, endPos, mat)
+    {
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_MATNAME)
+                mat.name = threedSReadCString(buf);
+            elif (chunkId == THREEDS_MATDIFFUSE)
+                self.readColorChunk(buf, chunkEnd, mat);
+            elif (chunkId == THREEDS_MATOPACITY)
+                self.readPercentageChunk(buf, chunkEnd, mat);
+            elif (chunkId == THREEDS_MATMAP)
+                self.readMaterialMapChunk(buf, chunkEnd, mat);
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readColorChunk(buf, endPos, mat)
+    {
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_COLOR_RGB24 || chunkId == THREEDS_COLOR_LIN24)
+            {
+                if (buf.tell() + 3 <= chunkEnd)
+                {
+                    mat.diffuseR = buf.readByte() / 255.0;
+                    mat.diffuseG = buf.readByte() / 255.0;
+                    mat.diffuseB = buf.readByte() / 255.0;
+                }
+            }
+            elif (chunkId == THREEDS_COLOR_FLOAT || chunkId == THREEDS_COLOR_LINFLOAT)
+            {
+                if (buf.tell() + 12 <= chunkEnd)
+                {
+                    mat.diffuseR = buf.readFloat();
+                    mat.diffuseG = buf.readFloat();
+                    mat.diffuseB = buf.readFloat();
+                }
+            }
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readPercentageChunk(buf, endPos, mat)
+    {
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_PERCENT_INT)
+            {
+                if (buf.tell() + 2 <= chunkEnd)
+                {
+                    var transparency = threedSReadU16(buf) / 100.0;
+                    mat.opacity = 1.0 - transparency;
+                }
+            }
+            elif (chunkId == THREEDS_PERCENT_FLOAT)
+            {
+                if (buf.tell() + 4 <= chunkEnd)
+                {
+                    var transparency = buf.readFloat();
+                    mat.opacity = 1.0 - transparency;
+                }
+            }
+
+            if (mat.opacity < 0.0) mat.opacity = 0.0;
+            if (mat.opacity > 1.0) mat.opacity = 1.0;
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readMaterialMapChunk(buf, endPos, mat)
+    {
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_MATMAPFILE)
+                mat.fileName = threedSReadCString(buf);
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readObjectChunk(buf, endPos, obj)
+    {
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_OBJECT_MESH)
+                self.readMeshChunk(buf, chunkEnd, obj);
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readMeshChunk(buf, endPos, obj)
+    {
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_OBJECT_VERTICES)
+                self.readVerticesChunk(buf, obj);
+            elif (chunkId == THREEDS_OBJECT_FACES)
+                self.readFacesChunk(buf, chunkEnd, obj);
+            elif (chunkId == THREEDS_OBJECT_MATERIAL)
+                self.readObjectMaterialChunk(buf, obj);
+            elif (chunkId == THREEDS_OBJECT_UV)
+                self.readUVChunk(buf, obj);
+            elif (chunkId == THREEDS_TRI_TRANSFORMATION)
+            {
+                obj.meshMatrix = threedSReadTransformMatrix(buf);
+                obj.meshHasMatrix = true;
+            }
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readVerticesChunk(buf, obj)
+    {
+        var count = threedSReadU16(buf);
+        for (var i = 0; i < count; i += 1)
+        {
+            var x = buf.readFloat();
+            var y = buf.readFloat();
+            var z = buf.readFloat();
+            obj.positions.push(x);
+            obj.positions.push(y);
+            obj.positions.push(z);
+        }
+    }
+
+    def readFacesChunk(buf, endPos, obj)
+    {
+        var count = threedSReadU16(buf);
+        for (var i = 0; i < count; i += 1)
+        {
+            obj.faces.push(threedSReadU16(buf));
+            obj.faces.push(threedSReadU16(buf));
+            obj.faces.push(threedSReadU16(buf));
+            threedSReadU16(buf);
+        }
+
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_OBJECT_MATERIAL)
+                self.readObjectMaterialChunk(buf, obj);
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readUVChunk(buf, obj)
+    {
+        var count = threedSReadU16(buf);
+        for (var i = 0; i < count; i += 1)
+        {
+            obj.texcoords.push(buf.readFloat());
+            obj.texcoords.push(buf.readFloat());
+        }
+    }
+
+    def readObjectMaterialChunk(buf, obj)
+    {
+        var matName = threedSReadCString(buf);
+        var count = threedSReadU16(buf);
+        var faceRefs = [];
+        for (var i = 0; i < count; i += 1) faceRefs.push(threedSReadU16(buf));
+        obj.materialNames.push(matName);
+        obj.materialFaces.push(faceRefs);
+    }
+
+    def readKeyframeChunk(buf, endPos)
+    {
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_OBJECT_NODE)
+                self.readObjectNodeChunk(buf, chunkEnd);
+            elif (chunkId == THREEDS_KEYFRAME_MESH_INFO)
+                self.readKeyframeChunk(buf, chunkEnd);
+            elif (chunkId == THREEDS_KEYFRAME_START_END)
+            {
+                // static loader: frame range intentionally ignored
+            }
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+    }
+
+    def readObjectNodeChunk(buf, endPos)
+    {
+        var tf = ThreeDSNodeTransform("");
+
+        while (buf.tell() < endPos)
+        {
+            if (buf.tell() + 6 > endPos) break;
+            var chunkId = threedSReadU16(buf);
+            var chunkLen = threedSReadU32(buf);
+            var chunkEnd = int(buf.tell() + chunkLen - 6);
+            if (chunkEnd > endPos) chunkEnd = endPos;
+
+            if (chunkId == THREEDS_OBJECT_HIERARCHY)
+            {
+                tf.name = threedSReadCString(buf);
+                if (buf.tell() + 4 <= chunkEnd) tf.flags = threedSReadU32(buf);
+                if (buf.tell() + 2 <= chunkEnd) tf.parentId = threedSReadU16(buf);
+            }
+            elif (chunkId == THREEDS_OBJECT_INSTANCE_NAME)
+            {
+                tf.instanceName = threedSReadCString(buf);
+            }
+            elif (chunkId == THREEDS_OBJECT_ID)
+            {
+                if (buf.tell() + 2 <= chunkEnd) tf.id = threedSReadU16(buf);
+            }
+            elif (chunkId == THREEDS_PIVOT)
+            {
+                self.readPivotChunk(buf, tf);
+            }
+            elif (chunkId == THREEDS_POSITION_TRACK_TAG)
+            {
+                self.readPositionTrackChunk(buf, chunkEnd, tf);
+            }
+            elif (chunkId == THREEDS_ROTATION_TRACK_TAG)
+            {
+                self.readRotationTrackChunk(buf, chunkEnd, tf);
+            }
+            elif (chunkId == THREEDS_SCALE_TRACK_TAG)
+            {
+                self.readScaleTrackChunk(buf, chunkEnd, tf);
+            }
+
+            if (buf.tell() < chunkEnd) buf.seek(chunkEnd);
+        }
+
+        self.nodeTransforms.push(tf);
+    }
+
+    def readPivotChunk(buf, tf)
+    {
+        tf.pivotX = buf.readFloat();
+        tf.pivotY = buf.readFloat();
+        tf.pivotZ = buf.readFloat();
+    }
+
+    def readPositionTrackChunk(buf, endPos, tf)
+    {
+        if (buf.tell() + 10 > endPos) return;
+        buf.seek(buf.tell() + 10);
+        if (buf.tell() + 4 > endPos) return;
+        var keyCount = buf.readInt();
+        if (keyCount > 0 && buf.tell() + 18 <= endPos)
+        {
+            buf.readInt();
+            var flags = threedSReadU16(buf);
+            if (flags != 0 && buf.tell() + 4 <= endPos) buf.readFloat();
+            if (buf.tell() + 12 <= endPos)
+            {
+                tf.posX = buf.readFloat();
+                tf.posY = buf.readFloat();
+                tf.posZ = buf.readFloat();
+            }
+        }
+    }
+
+    def readRotationTrackChunk(buf, endPos, tf)
+    {
+        if (buf.tell() + 10 > endPos) return;
+        buf.seek(buf.tell() + 10);
+        if (buf.tell() + 4 > endPos) return;
+        var keyCount = buf.readInt();
+        if (keyCount > 0 && buf.tell() + 22 <= endPos)
+        {
+            buf.readInt();
+            var flags = threedSReadU16(buf);
+            if (flags != 0 && buf.tell() + 4 <= endPos) buf.readFloat();
+            var angleRad = buf.readFloat();
+            var ax = threedSRoundSmall(buf.readFloat());
+            var ay = threedSRoundSmall(buf.readFloat());
+            var az = threedSRoundSmall(buf.readFloat());
+
+            var n = threedSNormalize3(ax, ay, az);
+            tf.rotAxisX = n[0];
+            tf.rotAxisY = n[1];
+            tf.rotAxisZ = n[2];
+            tf.rotAngleRad = angleRad;
+        }
+    }
+
+    def readScaleTrackChunk(buf, endPos, tf)
+    {
+        if (buf.tell() + 10 > endPos) return;
+        buf.seek(buf.tell() + 10);
+        if (buf.tell() + 4 > endPos) return;
+        var keyCount = buf.readInt();
+        if (keyCount > 0 && buf.tell() + 18 <= endPos)
+        {
+            buf.readInt();
+            var flags = threedSReadU16(buf);
+            if (flags != 0 && buf.tell() + 4 <= endPos) buf.readFloat();
+            if (buf.tell() + 12 <= endPos)
+            {
+                tf.scaleX = buf.readFloat();
+                tf.scaleY = buf.readFloat();
+                tf.scaleZ = buf.readFloat();
+            }
+        }
+    }
+
+    def finalizeAllObjects()
+    {
+        self.resetNodeWorldMatrices();
+        for (var i = 0; i < len(self.tempObjects); i += 1)
+        {
+            if (self.debugLoad && (i < 5 || (i % 25) == 0))
+                print("3DS finalize object #" + str(i) + " name=" + self.tempObjects[i].name);
+            self.applyMeshMatrixTransform(self.tempObjects[i]);
+            self.applyStaticNodeTransform(self.tempObjects[i]);
+            self.convertObjectToEngineCoords(self.tempObjects[i]);
+            self.finalizeObject(self.tempObjects[i]);
+        }
+        self.tempObjects = [];
+    }
+
+    def convertObjectToEngineCoords(obj)
+    {
+        for (var i = 0; i < obj.vertexCount(); i += 1)
+        {
+            var p = i * 3;
+            var x = obj.positions[p + 0];
+            var y = obj.positions[p + 1];
+            var z = obj.positions[p + 2];
+
+            obj.positions[p + 0] = x;
+            obj.positions[p + 1] = z;
+            obj.positions[p + 2] = -y;
+        }
+    }
+
+    def flipObjectFaceWinding(obj)
+    {
+        for (var i = 0; i + 2 < len(obj.faces); i += 3)
+        {
+            var temp = obj.faces[i + 1];
+            obj.faces[i + 1] = obj.faces[i + 2];
+            obj.faces[i + 2] = temp;
+        }
+    }
+
+    def applyMeshMatrixTransform(obj)
+    {
+        if (!obj.meshHasMatrix || obj.meshMatrix == nil) return;
+
+        var meshMatrix = obj.meshMatrix;
+        var determinant = threedSMatrixDeterminant(meshMatrix);
+        if (determinant < 0.0)
+        {
+            meshMatrix = threedSMatrixMultiply(threedSMatrixScale(-1.0, 1.0, 1.0), meshMatrix);
+            self.flipObjectFaceWinding(obj);
+        }
+
+        var invMeshMatrix = threedSMatrixInvert(meshMatrix);
+        if (invMeshMatrix == nil) return;
+
+        for (var i = 0; i < obj.vertexCount(); i += 1)
+        {
+            var p = i * 3;
+            var out = threedSTransformPoint(
+                invMeshMatrix,
+                obj.positions[p + 0],
+                obj.positions[p + 1],
+                obj.positions[p + 2]
+            );
+            obj.positions[p + 0] = out[0];
+            obj.positions[p + 1] = out[1];
+            obj.positions[p + 2] = out[2];
+        }
+    }
+
+    def applyStaticNodeTransform(obj)
+    {
+        var tf = self.findNodeTransform(obj.name);
+        if (tf == nil) return;
+
+        var worldMatrix = self.buildWorldNodeMatrix(tf);
+
+        for (var i = 0; i < obj.vertexCount(); i += 1)
+        {
+            var p = i * 3;
+            var out = threedSTransformPoint(
+                worldMatrix,
+                obj.positions[p + 0],
+                obj.positions[p + 1],
+                obj.positions[p + 2]
+            );
+            obj.positions[p + 0] = out[0];
+            obj.positions[p + 1] = out[1];
+            obj.positions[p + 2] = out[2];
+        }
+    }
+
+    def finalizeObject(obj)
+    {
+        self.objectNames.push(obj.name);
+        if (obj.faceCount() <= 0 || obj.vertexCount() <= 0) return;
+
+        self.computeObjectNormals(obj);
+
+        var faceUsed = [];
+        var faceId = -1;
+        for (var i = 0; i < obj.faceCount(); i += 1) faceUsed.push(false);
+
+        for (var i = 0; i < len(obj.materialNames); i += 1)
+        {
+            var refs = obj.materialFaces[i];
+            if (refs == nil || len(refs) <= 0) continue;
+            var matName = obj.materialNames[i];
+            var matIndex = self.findMaterialIndex(matName);
+            self.buildSurfaceFromFaces(obj, refs, matIndex, matName);
+
+            for (var fi = 0; fi < len(refs); fi += 1)
+            {
+                faceId = refs[fi];
+                if (faceId >= 0 && faceId < len(faceUsed)) faceUsed[faceId] = true;
+            }
+        }
+
+        var remaining = [];
+        for (var i = 0; i < len(faceUsed); i += 1)
+            if (!faceUsed[i]) remaining.push(i);
+
+        if (len(remaining) > 0)
+        {
+            var matName = "";
+            var matIndex = -1;
+            if (len(obj.materialNames) == 1)
+            {
+                matName = obj.materialNames[0];
+                matIndex = self.findMaterialIndex(matName);
+            }
+            self.buildSurfaceFromFaces(obj, remaining, matIndex, matName);
+        }
+    }
+
+    def computeObjectNormals(obj)
+    {
+        obj.normals = [];
+        for (var i = 0; i < obj.vertexCount(); i += 1)
+        {
+            obj.normals.push(0.0);
+            obj.normals.push(0.0);
+            obj.normals.push(0.0);
+        }
+
+        for (var i = 0; i < len(obj.faces); i += 3)
+        {
+            var i0 = obj.faces[i + 0];
+            var i1 = obj.faces[i + 1];
+            var i2 = obj.faces[i + 2];
+            if (i0 < 0 || i1 < 0 || i2 < 0) continue;
+            if (i0 >= obj.vertexCount() || i1 >= obj.vertexCount() || i2 >= obj.vertexCount()) continue;
+
+            var p0 = i0 * 3;
+            var p1 = i1 * 3;
+            var p2 = i2 * 3;
+
+            var x0 = obj.positions[p0 + 0]; var y0 = obj.positions[p0 + 1]; var z0 = obj.positions[p0 + 2];
+            var x1 = obj.positions[p1 + 0]; var y1 = obj.positions[p1 + 1]; var z1 = obj.positions[p1 + 2];
+            var x2 = obj.positions[p2 + 0]; var y2 = obj.positions[p2 + 1]; var z2 = obj.positions[p2 + 2];
+
+            var ax = x0 - x2; var ay = y0 - y2; var az = z0 - z2;
+            var bx = x2 - x1; var by = y2 - y1; var bz = z2 - z1;
+            var cross = threedSCross(ax, ay, az, bx, by, bz);
+            var nx = cross[0];
+            var ny = cross[1];
+            var nz = cross[2];
+
+            obj.normals[p0 + 0] = obj.normals[p0 + 0] + nx;
+            obj.normals[p0 + 1] = obj.normals[p0 + 1] + ny;
+            obj.normals[p0 + 2] = obj.normals[p0 + 2] + nz;
+
+            obj.normals[p1 + 0] = obj.normals[p1 + 0] + nx;
+            obj.normals[p1 + 1] = obj.normals[p1 + 1] + ny;
+            obj.normals[p1 + 2] = obj.normals[p1 + 2] + nz;
+
+            obj.normals[p2 + 0] = obj.normals[p2 + 0] + nx;
+            obj.normals[p2 + 1] = obj.normals[p2 + 1] + ny;
+            obj.normals[p2 + 2] = obj.normals[p2 + 2] + nz;
+        }
+
+        for (var i = 0; i < obj.vertexCount(); i += 1)
+        {
+            var p = i * 3;
+            var norm = threedSNormalize3(
+                -obj.normals[p + 0],
+                -obj.normals[p + 1],
+                -obj.normals[p + 2]
+            );
+            obj.normals[p + 0] = norm[0];
+            obj.normals[p + 1] = norm[1];
+            obj.normals[p + 2] = norm[2];
+        }
+    }
+
+    def buildSurfaceFromFaces(obj, faceRefs, materialIndex, materialName)
+    {
+        var surf = ThreeDSSurface();
+        surf.objectName = obj.name;
+        surf.materialIndex = materialIndex;
+        surf.materialName = materialName;
+
+        var remap = [];
+        for (var i = 0; i < obj.vertexCount(); i += 1) remap.push(-1);
+        var faceId = -1;
+        var srcIndex = -1;
+        var dstIndex = -1;
+        var p = 0;
+        var t = 0;
+
+        for (var i = 0; i < len(faceRefs); i += 1)
+        {
+            faceId = faceRefs[i];
+            if (faceId < 0 || faceId >= obj.faceCount()) continue;
+
+            var tri = [];
+            var base = faceId * 3;
+            for (var k = 0; k < 3; k += 1)
+            {
+                srcIndex = obj.faces[base + k];
+                if (srcIndex < 0 || srcIndex >= obj.vertexCount()) continue;
+
+                dstIndex = remap[srcIndex];
+                if (dstIndex < 0)
+                {
+                    dstIndex = int(len(surf.positions) / 3);
+                    remap[srcIndex] = dstIndex;
+
+                    p = srcIndex * 3;
+                    t = srcIndex * 2;
+                    surf.positions.push(obj.positions[p + 0]);
+                    surf.positions.push(obj.positions[p + 1]);
+                    surf.positions.push(obj.positions[p + 2]);
+                    surf.normals.push(obj.normals[p + 0]);
+                    surf.normals.push(obj.normals[p + 1]);
+                    surf.normals.push(obj.normals[p + 2]);
+
+                    if (t + 1 < len(obj.texcoords))
+                    {
+                        surf.texcoords.push(obj.texcoords[t + 0]);
+                        surf.texcoords.push(obj.texcoords[t + 1]);
+                    }
+                    else
+                    {
+                        surf.texcoords.push(0.0);
+                        surf.texcoords.push(0.0);
+                    }
+
+                    surf.addBound(
+                        obj.positions[p + 0],
+                        obj.positions[p + 1],
+                        obj.positions[p + 2]
+                    );
+                }
+                tri.push(dstIndex);
+            }
+
+            if (len(tri) == 3)
+            {
+                surf.indices.push(tri[0]);
+                surf.indices.push(tri[1]);
+                surf.indices.push(tri[2]);
+            }
+        }
+
+        if (self.gpuEnabled && surf.upload())
+        {
+            self.surfaces.push(surf);
+            self.addBound(surf.minX, surf.minY, surf.minZ);
+            self.addBound(surf.maxX, surf.maxY, surf.maxZ);
+        }
+        elif (!self.gpuEnabled && len(surf.positions) > 0 && len(surf.indices) > 0)
+        {
+            surf.vertexCount = int(len(surf.positions) / 3);
+            surf.indexCount = len(surf.indices);
+            self.surfaces.push(surf);
+            self.addBound(surf.minX, surf.minY, surf.minZ);
+            self.addBound(surf.maxX, surf.maxY, surf.maxZ);
+        }
+    }
+}

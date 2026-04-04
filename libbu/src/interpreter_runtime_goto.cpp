@@ -1451,7 +1451,7 @@ op_loop:
 
 op_call:
 {
-    uint8 argCount = READ_BYTE();
+    uint16 argCount = READ_SHORT();
 
     STORE_FRAME();
 
@@ -2006,9 +2006,9 @@ op_exit:
 
 op_print:
 {
-    uint8_t argCount = READ_BYTE();
+    uint16_t argCount = READ_SHORT();
     Value *args = fiber->stackTop - argCount;
-    for (uint8_t i = 0; i < argCount; i++)
+    for (uint16_t i = 0; i < argCount; i++)
     {
         printValue(args[i]);
         // if (i < argCount - 1)
@@ -2544,7 +2544,7 @@ set_property_error:
 op_invoke:
 {
     Value nameValue = READ_CONSTANT();
-    uint8_t argCount = READ_BYTE();
+    uint16_t argCount = READ_SHORT();
 
     if (!nameValue.isString())
     {
@@ -4718,7 +4718,7 @@ op_super_invoke:
 {
     uint8_t ownerClassId = READ_BYTE();
     uint16_t nameIdx = READ_SHORT();
-    uint8_t argCount = READ_BYTE();
+    uint16_t argCount = READ_SHORT();
 
     Value nameValue = func->chunk->constants[nameIdx];
     String *methodName = nameValue.asString();
@@ -5933,7 +5933,7 @@ op_close_upvalue:
 
 op_return_n:
 {
-    uint8_t count = READ_BYTE();
+    uint16_t count = READ_SHORT();
     Value *results = fiber->stackTop - count;
     // Logical pop of N return values in O(1), keeping contiguous source.
     fiber->stackTop = results;
@@ -6144,7 +6144,7 @@ op_tostring:
 
 op_concat_n:
 {
-    uint8_t count = READ_BYTE();
+    uint16_t count = READ_SHORT();
     if (count == 0)
     {
         PUSH(makeString(""));
@@ -6154,7 +6154,7 @@ op_concat_n:
     Value *base = fiber->stackTop - count;
     size_t totalLen = 0;
 
-    for (uint8_t i = 0; i < count; i++)
+    for (uint16_t i = 0; i < count; i++)
     {
         if (!base[i].isString())
         {

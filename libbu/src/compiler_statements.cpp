@@ -183,7 +183,7 @@ void Compiler::statement()
 
 void Compiler::printStatement()
 {
-    uint8_t argCount = 0;
+    uint16_t argCount = 0;
 
     consume(TOKEN_LPAREN, "Expect '('");
 
@@ -196,9 +196,9 @@ void Compiler::printStatement()
                 return;
             argCount++;
 
-            if (argCount > 255)
+            if (argCount > 65535)
             {
-                error("Cannot have more than 255 arguments");
+                error("Cannot have more than 65535 arguments");
             }
         } while (match(TOKEN_COMMA));
     }
@@ -207,7 +207,8 @@ void Compiler::printStatement()
 
     consume(TOKEN_SEMICOLON, "Expect ';'");
 
-    emitBytes(OP_PRINT, argCount);
+    emitByte(OP_PRINT);
+    emitShort(argCount);
 }
 
 void Compiler::expressionStatement()
@@ -435,13 +436,14 @@ void Compiler::variable(bool canAssign)
             Value ref = vm_->makeModuleRef(m.moduleId, m.id);
             emitConstant(ref);
 
-            uint8 argCount = 0;
+            uint16 argCount = 0;
             if (match(TOKEN_LPAREN))
                 argCount = argumentList();
             else
                 argCount = genericArgumentList();
 
-            emitBytes(OP_CALL, argCount);
+            emitByte(OP_CALL);
+            emitShort(argCount);
             return;
         }
         else
@@ -498,13 +500,14 @@ void Compiler::variable(bool canAssign)
                 Value ref = vm_->makeModuleRef(moduleId, funcId);
                 emitConstant(ref);
 
-                uint8 argCount = 0;
+                uint16 argCount = 0;
                 if (match(TOKEN_LPAREN))
                     argCount = argumentList();
                 else
                     argCount = genericArgumentList();
 
-                emitBytes(OP_CALL, argCount);
+                emitByte(OP_CALL);
+                emitShort(argCount);
                 return; //  Sucesso!
             }
 
@@ -1431,9 +1434,9 @@ void Compiler::returnStatement()
                 if (hadError)
                     return;
                 count++;
-                if (count > 255)
+                if (count > 65535)
                 {
-                    error("Cannot return more than 255 values");
+                    error("Cannot return more than 65535 values");
                     return;
                 }
             } while (match(TOKEN_COMMA));
@@ -1452,7 +1455,8 @@ void Compiler::returnStatement()
         }
         else
         {
-            emitBytes(OP_RETURN_N, count);
+            emitByte(OP_RETURN_N);
+            emitShort((uint16)count);
         }
     }
     else
@@ -1473,9 +1477,9 @@ void Compiler::returnStatement()
     function->hasReturn = true;
 }
 
-uint8 Compiler::argumentList()
+uint16 Compiler::argumentList()
 {
-    uint8 argCount = 0;
+    uint16 argCount = 0;
 
     if (!check(TOKEN_RPAREN))
     {
@@ -1485,9 +1489,9 @@ uint8 Compiler::argumentList()
                 break;
             expression();
 
-            if (argCount == 255)
+            if (argCount == 65535)
             {
-                error("Can't have more than 255 arguments");
+                error("Can't have more than 65535 arguments");
             }
             argCount++;
         } while (match(TOKEN_COMMA));
@@ -1505,7 +1509,7 @@ bool Compiler::checkGenericCallSyntax()
         && peek(2).type == TOKEN_LPAREN;
 }
 
-uint8 Compiler::genericArgumentList()
+uint16 Compiler::genericArgumentList()
 {
     if (check(TOKEN_LESS))
     {
@@ -1525,7 +1529,7 @@ uint8 Compiler::genericArgumentList()
     consume(TOKEN_GREATER, "Expect '>' after type name");
     consume(TOKEN_LPAREN, "Expect '(' after generic type");
 
-    uint8 argCount = 1;
+    uint16 argCount = 1;
     if (!check(TOKEN_RPAREN))
     {
         do
@@ -1533,9 +1537,9 @@ uint8 Compiler::genericArgumentList()
             if (hadError)
                 break;
             expression();
-            if (argCount == 255)
+            if (argCount == 65535)
             {
-                error("Can't have more than 255 arguments");
+                error("Can't have more than 65535 arguments");
             }
             argCount++;
         } while (match(TOKEN_COMMA));
@@ -1553,16 +1557,16 @@ void Compiler::call(bool canAssign)
     {
         error("Function calls nested too deeply");
 
-        uint8 argCount = 0;
+        uint16 argCount = 0;
         if (!check(TOKEN_RPAREN))
         {
             do
             {
                 expression();
                 argCount++;
-                if (argCount > 255)
+                if (argCount > 65535)
                 {
-                    error("Can't have more than 255 arguments");
+                    error("Can't have more than 65535 arguments");
                     break;
                 }
             } while (match(TOKEN_COMMA));
@@ -1572,8 +1576,9 @@ void Compiler::call(bool canAssign)
     }
 
     callDepth++;
-    uint8 argCount = argumentList();
-    emitBytes(OP_CALL, argCount);
+    uint16 argCount = argumentList();
+    emitByte(OP_CALL);
+    emitShort(argCount);
     callDepth--;
 }
 
@@ -1797,9 +1802,9 @@ void Compiler::compileFunction(Function *func, bool isProcess)
         do
         {
             func->arity++;
-            if (func->arity > 255)
+            if (func->arity > 65535)
             {
-                error("Can't have more than 255 parameters");
+                error("Can't have more than 65535 parameters");
                 break;
             }
 
@@ -2389,7 +2394,7 @@ void Compiler::dot(bool canAssign)
     //  METHOD CALL
     if (check(TOKEN_LPAREN) || checkGenericCallSyntax())
     {
-        uint8_t argCount = 0;
+        uint16_t argCount = 0;
         if (match(TOKEN_LPAREN))
             argCount = argumentList();
         else
@@ -2397,13 +2402,13 @@ void Compiler::dot(bool canAssign)
         if (propName.lexeme == "push" && argCount == 1)
         {
             emitByte(OP_ARRAY_PUSH);
-            emitByte(argCount);
+            emitByte(1);
         }
         else
         {
             emitByte(OP_INVOKE);
             emitShort(nameIdx);
-            emitByte(argCount);
+            emitShort(argCount);
         }
     }
     // SIMPLE ASSIGNMENT
@@ -2887,12 +2892,12 @@ void Compiler::super(bool canAssign)
     emitBytes(OP_GET_LOCAL, 0);
 
     // DEPOIS ARGUMENTOS!
-    uint8_t argCount = argumentList();
+    uint16_t argCount = argumentList();
 
     emitByte(OP_SUPER_INVOKE);
     emitByte(currentClass->index);
     emitShort(nameIdx);
-    emitByte(argCount);
+    emitShort(argCount);
 }
 
 void Compiler::classDeclaration()
@@ -3179,9 +3184,9 @@ void Compiler::method(ClassDef *classDef)
         do
         {
             func->arity++;
-            if (func->arity > 255)
+            if (func->arity > 65535)
             {
-                error("Can't have more than 255 parameters");
+                error("Can't have more than 65535 parameters");
                 break;
             }
 

@@ -1163,7 +1163,7 @@ ProcessResult Interpreter::run_process(Process *process)
 
         case OP_CALL:
         {
-            uint8 argCount = READ_BYTE();
+            uint16 argCount = READ_SHORT();
 
             STORE_FRAME();
 
@@ -1628,7 +1628,7 @@ ProcessResult Interpreter::run_process(Process *process)
 
         case OP_RETURN_N:
         {
-            uint8_t count = READ_BYTE();
+            uint16_t count = READ_SHORT();
             Value *results = fiber->stackTop - count;
             // Logical pop of N return values in O(1), keeping contiguous source.
             fiber->stackTop = results;
@@ -1822,12 +1822,12 @@ ProcessResult Interpreter::run_process(Process *process)
 
         case OP_PRINT:
         {
-            uint8_t argCount = READ_BYTE();
+            uint16_t argCount = READ_SHORT();
 
             // Pop argumentos na ordem reversa (último empilhado = último impresso)
             Value *args = fiber->stackTop - argCount;
 
-            for (uint8_t i = 0; i < argCount; i++)
+            for (uint16_t i = 0; i < argCount; i++)
             {
                 printValue(args[i]);
                 // if (i < argCount - 1)
@@ -2370,7 +2370,7 @@ ProcessResult Interpreter::run_process(Process *process)
         case OP_INVOKE:
         {
             Value nameValue = READ_CONSTANT();
-            uint8_t argCount = READ_BYTE();
+            uint16_t argCount = READ_SHORT();
 
             if (!nameValue.isString())
             {
@@ -4540,7 +4540,7 @@ ProcessResult Interpreter::run_process(Process *process)
         {
             uint8_t ownerClassId = READ_BYTE();
             uint16_t nameIdx = READ_SHORT();
-            uint8_t argCount = READ_BYTE();
+            uint16_t argCount = READ_SHORT();
 
             Value nameValue = func->chunk->constants[nameIdx];
             String *methodName = nameValue.asString();
@@ -5800,7 +5800,7 @@ ProcessResult Interpreter::run_process(Process *process)
 
         case OP_CONCAT_N:
         {
-            uint8_t count = READ_BYTE();
+            uint16_t count = READ_SHORT();
             if (count == 0)
             {
                 PUSH(makeString(""));
@@ -5810,7 +5810,7 @@ ProcessResult Interpreter::run_process(Process *process)
             Value *base = fiber->stackTop - count;
             size_t totalLen = 0;
 
-            for (uint8_t i = 0; i < count; i++)
+            for (uint16_t i = 0; i < count; i++)
             {
                 if (!base[i].isString())
                 {

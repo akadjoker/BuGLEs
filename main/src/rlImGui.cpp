@@ -177,10 +177,10 @@ static void RenderImDrawData(ImDrawData* drawData)
     int fbHeight = (int)(drawData->DisplaySize.y * drawData->FramebufferScale.y);
     if (fbWidth <= 0 || fbHeight <= 0) return;
 
-    // Flush any pending raylib geometry
-    rlDrawRenderBatchActive();
+    // // Flush any pending raylib geometry
+    // rlDrawRenderBatchActive();
 
-    // ── Save and configure GPU state ──
+    // // ── Save and configure GPU state ──
     rlDisableBackfaceCulling();
     rlDisableDepthTest();
     rlDisableDepthMask();
@@ -275,20 +275,20 @@ static void RenderImDrawData(ImDrawData* drawData)
         }
     }
 
-    // ── Restore state ──
-    rlSetTexture(0);
+    // // ── Restore state ──
+    // rlSetTexture(0);
     rlDisableScissorTest();
     rlEnableBackfaceCulling();
     rlEnableDepthTest();
     rlEnableDepthMask();
 
-    // Restore matrices
+    // // Restore matrices
     rlMatrixMode(RL_MODELVIEW);
     rlPopMatrix();
     rlMatrixMode(RL_PROJECTION);
     rlPopMatrix();
 
-    rlDrawRenderBatchActive();
+    // rlDrawRenderBatchActive();
 }
 
 // ---------------------------------------------------------------------------

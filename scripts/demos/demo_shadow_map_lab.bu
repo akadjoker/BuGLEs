@@ -1,0 +1,980 @@
+import math;
+using math;
+import path;
+using path;
+import OpenGl;
+using OpenGl;
+import GLM;
+using GLM;
+import ImGui;
+using ImGui;
+import STB;
+using STB;
+
+include "../libs/lib_3ds.bu";
+
+var LAB_SUBJECT = "car";   // "cube" or "car"
+var LAB_SHADOW_SIZE = 1024;
+var LAB_CAR_ROT_Y = 180.0;
+var LAB_CAR_SCALE_BIAS = 1.0;
+
+var LAB_CAMERA_FOV_RAD = 55.0 * PI / 180.0;
+var LAB_CAMERA_NEAR = 0.02;
+var LAB_CAMERA_FAR = 20000.0;
+var LAB_FLOOR_UV_SCALE = 0.18;
+
+var hudBg = Color(0, 0, 0, 152);
+var hudFg = Color(245, 245, 245, 255);
+var hudInfo = Color(190, 220, 255, 255);
+var hudOk = Color(180, 255, 200, 255);
+
+
+def resolveAssetPath(a, b, c)
+{
+    if (path.exists(a)) return a;
+    if (path.exists(b)) return b;
+    if (path.exists(c)) return c;
+    return nil;
+}
+
+
+def loadTexture2D(filePath, flipY, withMipmaps, repeatMode)
+{
+    if (filePath == nil || !path.exists(filePath)) return 0;
+
+    stbi_set_flip_vertically_on_load(flipY ? 1 : 0);
+    var (w, h, ch, pixels) = stbi_load(filePath, 4);
+    if (pixels == nil) return 0;
+
+    var tex = glGenTextures();
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (withMipmaps) glGenerateMipmap(GL_TEXTURE_2D);
+    if (withMipmaps) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    else glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeatMode ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Shadow lab shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Shadow lab shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+class ShadowTarget
+{
+    var fbo;
+    var depth;
+    var color;
+    var size;
+
+    def init()
+    {
+        self.fbo = 0;
+        self.depth = 0;
+        self.color = 0;
+        self.size = 0;
+    }
+
+    def destroy()
+    {
+        if (self.depth > 0) glDeleteTextures(self.depth);
+        if (self.color > 0) glDeleteTextures(self.color);
+        if (self.fbo > 0) glDeleteFramebuffers(self.fbo);
+        self.fbo = 0;
+        self.depth = 0;
+        self.color = 0;
+        self.size = 0;
+    }
+}
+
+
+def makeShadowTarget(size)
+{
+    var rt = ShadowTarget();
+    rt.size = size;
+    rt.fbo = glGenFramebuffers();
+    rt.depth = glGenTextures();
+    rt.color = glGenTextures();
+
+    glBindTexture(GL_TEXTURE_2D, rt.depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size, size, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindTexture(GL_TEXTURE_2D, rt.color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, rt.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, rt.depth, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.color, 0);
+    glDrawBuffers(1, [GL_COLOR_ATTACHMENT0]);
+    var status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        rt.destroy();
+        return nil;
+    }
+    return rt;
+}
+
+
+def makeCubeGeometry()
+{
+    var verts = Float32Array([
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,   0.0, 0.0,
+         1.0, -1.0,  1.0,   0.0,  0.0,  1.0,   1.0, 0.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,   1.0, 1.0,
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,   0.0, 0.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,   1.0, 1.0,
+        -1.0,  1.0,  1.0,   0.0,  0.0,  1.0,   0.0, 1.0,
+
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,   1.0, 0.0,
+        -1.0,  1.0, -1.0,   0.0,  0.0, -1.0,   1.0, 1.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,   0.0, 1.0,
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,   1.0, 0.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,   0.0, 1.0,
+         1.0, -1.0, -1.0,   0.0,  0.0, -1.0,   0.0, 0.0,
+
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,   0.0, 0.0,
+        -1.0, -1.0,  1.0,  -1.0,  0.0,  0.0,   1.0, 0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,   1.0, 1.0,
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,   0.0, 0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,   1.0, 1.0,
+        -1.0,  1.0, -1.0,  -1.0,  0.0,  0.0,   0.0, 1.0,
+
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,   1.0, 0.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,   0.0, 1.0,
+         1.0, -1.0,  1.0,   1.0,  0.0,  0.0,   0.0, 0.0,
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,   1.0, 0.0,
+         1.0,  1.0, -1.0,   1.0,  0.0,  0.0,   1.0, 1.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,   0.0, 1.0,
+
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,   0.0, 1.0,
+        -1.0,  1.0,  1.0,   0.0,  1.0,  0.0,   0.0, 0.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,   1.0, 0.0,
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,   0.0, 1.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,   1.0, 0.0,
+         1.0,  1.0, -1.0,   0.0,  1.0,  0.0,   1.0, 1.0,
+
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,   1.0, 1.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0,   0.0, 0.0,
+        -1.0, -1.0,  1.0,   0.0, -1.0,  0.0,   1.0, 0.0,
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,   1.0, 1.0,
+         1.0, -1.0, -1.0,   0.0, -1.0,  0.0,   0.0, 1.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0,   0.0, 0.0]
+    );
+
+    var vao = glGenVertexArrays();
+    var vbo = glGenBuffers();
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, 32, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, false, 32, 12);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, false, 32, 24);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return [vao, vbo];
+}
+
+
+def prepareOverlay2D(screenW, screenH)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glUseProgram(0);
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glDepthMask(true);
+    glViewport(0, 0, screenW, max(screenH, 1));
+}
+
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1680, 960, "BuGL - Shadow Map Lab");
+SetTargetFPS(60);
+
+if (!InitImGui())
+{
+    CloseWindow();
+    return;
+}
+
+var cubeGeom = makeCubeGeometry();
+var cubeVAO = cubeGeom[0];
+var cubeVBO = cubeGeom[1];
+
+var depthVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+
+uniform mat4 uModel;
+uniform mat4 uLightView;
+uniform mat4 uLightProj;
+
+void main()
+{
+    gl_Position = uLightProj * uLightView * uModel * vec4(aPos, 1.0);
+}
+";
+
+var depthFsSrc = @"
+#version 330 core
+out vec4 FragColor;
+
+void main()
+{
+    float d = gl_FragCoord.z;
+    float preview = pow(clamp(1.0 - d, 0.0, 1.0), 3.4);
+    FragColor = vec4(vec3(preview), 1.0);
+}
+";
+
+var sceneVsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform mat4 uLightView;
+uniform mat4 uLightProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vUV;
+out vec4 vShadowPos;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = normalize(mat3(uModel) * aNormal);
+    vUV = aUV;
+    vShadowPos = uLightProj * uLightView * world;
+    gl_Position = uProj * uView * world;
+}
+";
+
+var sceneFsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+in vec4 vShadowPos;
+out vec4 FragColor;
+
+uniform vec3 uTint;
+uniform vec3 uLightDir;
+uniform vec3 uAmbient;
+uniform vec3 uViewPos;
+uniform sampler2D uFloorTex;
+uniform sampler2D uShadowMap;
+uniform sampler2D uAlbedoTex;
+uniform vec2 uShadowTexelSize;
+uniform vec2 uFloorCenter;
+uniform float uFloorExtent;
+uniform float uFloorUVScale;
+uniform float uOpacity;
+uniform float uShadowStrength;
+uniform float uBiasMin;
+uniform float uBiasMax;
+uniform int uHasTex;
+uniform int uUseFloorTex;
+
+float sampleShadow(vec3 N, vec3 L)
+{
+    vec3 projCoords = vShadowPos.xyz / max(vShadowPos.w, 0.00001);
+    projCoords = projCoords * 0.5 + 0.5;
+    if (projCoords.z > 1.0) return 0.0;
+    if (projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0) return 0.0;
+
+    float ndl = max(dot(N, L), 0.0);
+    float bias = max(uBiasMax * (1.0 - ndl), uBiasMin);
+    float shadow = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            vec2 offset = vec2(float(x), float(y)) * uShadowTexelSize;
+            float closest = texture(uShadowMap, projCoords.xy + offset).r;
+            shadow += (projCoords.z - bias) > closest ? 1.0 : 0.0;
+        }
+    }
+    shadow /= 9.0;
+    return shadow * uShadowStrength;
+}
+
+void main()
+{
+    vec3 albedo = uTint;
+    float alpha = uOpacity;
+    if (uUseFloorTex != 0)
+    {
+        vec2 uv = (vWorldPos.xz - uFloorCenter) * uFloorUVScale + vec2(0.5);
+        albedo = texture(uFloorTex, uv).rgb;
+    }
+    else if (uHasTex != 0)
+    {
+        vec4 texel = texture(uAlbedoTex, vUV);
+        albedo = texel.rgb;
+        alpha = alpha * texel.a;
+    }
+
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-uLightDir);
+    vec3 V = normalize(uViewPos - vWorldPos);
+    vec3 H = normalize(L + V);
+
+    float ndl = max(dot(N, L), 0.0);
+    float shadow = sampleShadow(N, L);
+    float spec = pow(max(dot(N, H), 0.0), 36.0) * 0.18 * (1.0 - shadow);
+    float hemiMix = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 hemi = mix(vec3(0.05, 0.06, 0.08), vec3(0.20, 0.21, 0.25), hemiMix);
+
+    vec3 color = albedo * (uAmbient + hemi * 0.65 + vec3(ndl * (1.0 - shadow))) + vec3(spec);
+    color = mix(color, color * 0.82, shadow * 0.45);
+    FragColor = vec4(color, alpha);
+}
+";
+
+var depthProg = linkProgram(depthVsSrc, depthFsSrc);
+var sceneProg = linkProgram(sceneVsSrc, sceneFsSrc);
+if (depthProg <= 0 || sceneProg <= 0)
+{
+    if (depthProg > 0) glDeleteProgram(depthProg);
+    if (sceneProg > 0) glDeleteProgram(sceneProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+var shadowRt = makeShadowTarget(LAB_SHADOW_SIZE);
+var floorTex = loadTexture2D("assets/powerplant/textures/tank_top.png", true, true, true);
+if (shadowRt == nil)
+{
+    glDeleteProgram(depthProg);
+    glDeleteProgram(sceneProg);
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    if (floorTex > 0) glDeleteTextures(floorTex);
+    ShutdownImGui();
+    CloseWindow();
+    return;
+}
+
+glEnable(GL_DEPTH_TEST);
+glEnable(GL_CULL_FACE);
+glCullFace(GL_BACK);
+glClearColor(0.16, 0.18, 0.22, 1.0);
+
+var dModel = glGetUniformLocation(depthProg, "uModel");
+var dLightView = glGetUniformLocation(depthProg, "uLightView");
+var dLightProj = glGetUniformLocation(depthProg, "uLightProj");
+
+var sModel = glGetUniformLocation(sceneProg, "uModel");
+var sView = glGetUniformLocation(sceneProg, "uView");
+var sProj = glGetUniformLocation(sceneProg, "uProj");
+var sLightView = glGetUniformLocation(sceneProg, "uLightView");
+var sLightProj = glGetUniformLocation(sceneProg, "uLightProj");
+var sTint = glGetUniformLocation(sceneProg, "uTint");
+var sLightDir = glGetUniformLocation(sceneProg, "uLightDir");
+var sAmbient = glGetUniformLocation(sceneProg, "uAmbient");
+var sViewPos = glGetUniformLocation(sceneProg, "uViewPos");
+var sFloorTex = glGetUniformLocation(sceneProg, "uFloorTex");
+var sShadowMap = glGetUniformLocation(sceneProg, "uShadowMap");
+var sAlbedoTex = glGetUniformLocation(sceneProg, "uAlbedoTex");
+var sShadowTexelSize = glGetUniformLocation(sceneProg, "uShadowTexelSize");
+var sFloorCenter = glGetUniformLocation(sceneProg, "uFloorCenter");
+var sFloorExtent = glGetUniformLocation(sceneProg, "uFloorExtent");
+var sFloorUVScale = glGetUniformLocation(sceneProg, "uFloorUVScale");
+var sOpacity = glGetUniformLocation(sceneProg, "uOpacity");
+var sShadowStrength = glGetUniformLocation(sceneProg, "uShadowStrength");
+var sBiasMin = glGetUniformLocation(sceneProg, "uBiasMin");
+var sBiasMax = glGetUniformLocation(sceneProg, "uBiasMax");
+var sHasTex = glGetUniformLocation(sceneProg, "uHasTex");
+var sUseFloorTex = glGetUniformLocation(sceneProg, "uUseFloorTex");
+
+glUseProgram(sceneProg);
+if (sFloorTex >= 0) glUniform1i(sFloorTex, 0);
+if (sShadowMap >= 0) glUniform1i(sShadowMap, 1);
+if (sAlbedoTex >= 0) glUniform1i(sAlbedoTex, 2);
+glUseProgram(0);
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+var lightViewBuf = @(16, TYPE_FLOAT);
+var lightProjBuf = @(16, TYPE_FLOAT);
+var screenProj = MatrixIdentity();
+var cachedScreenW = 0;
+var cachedScreenH = 0;
+
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+var focusLift = 1.1;
+var floorY = -1.25;
+var floorHalfExtent = 18.0;
+var sceneRadius = 6.0;
+var subjectX = 0.0;
+var subjectY = 1.15;
+var subjectZ = 0.0;
+var subjectScale = 2.15;
+var subjectMode = LAB_SUBJECT;
+var carModel = nil;
+var carLoaded = false;
+var carScale = 1.0;
+
+if (subjectMode == "car")
+{
+    var modelPath = resolveAssetPath(
+        "assets/3ds/bmw/model.3ds","",""
+    );
+
+    if (modelPath != nil)
+    {
+        carModel = ThreeDSModel();
+        if (carModel.load(modelPath))
+        {
+            carLoaded = true;
+            var carBounds = max(carModel.sizeX, max(carModel.sizeY, carModel.sizeZ));
+            if (carBounds > 0.0001) carScale = (subjectScale * 2.0 / carBounds) * LAB_CAR_SCALE_BIAS;
+            else carScale = LAB_CAR_SCALE_BIAS;
+            carModel.scale = carScale;
+            carModel.rotY = LAB_CAR_ROT_Y;
+        }
+        else
+        {
+            print("Shadow lab: failed to load car model, falling back to cube.");
+            subjectMode = "cube";
+        }
+    }
+    else
+    {
+        print("Shadow lab: car asset not found, falling back to cube.");
+        subjectMode = "cube";
+    }
+}
+
+var eyeX = 0.0;
+var eyeY = 5.5;
+var eyeZ = 11.0;
+var yaw = -120.0;
+var pitch = -14.0;
+var camDistance = 18.0;
+
+var showUi = true;
+var showAccent = true;
+var orbitSpeed = 0.62;
+var ambientStrength = 0.10;
+var shadowStrength = 1.00;
+var biasMin = 0.00045;
+var biasMax = 0.0045;
+var lightYaw = -42.0;
+var lightPitch = -43.0;
+var lightDistance = 14.5;
+var lightSpan = 9.5;
+
+var accentPhase = [0.0, 2.1, 4.2];
+var accentRadius = [4.0, 6.0, 5.0];
+var accentHeight = [floorY + 1.1, floorY + 1.6, floorY + 1.3];
+var accentSize = [0.70, 0.95, 0.62];
+var accentR = [0.95, 0.30, 0.22];
+var accentG = [0.50, 0.82, 0.92];
+var accentB = [0.25, 1.00, 0.50];
+var accentX = [0.0, 0.0, 0.0];
+var accentY = [0.0, 0.0, 0.0];
+var accentZ = [0.0, 0.0, 0.0];
+
+
+def writeModelMatrix(tx, ty, tz, sx, sy, sz, rotYRad)
+{
+    var m = MatrixScale(sx, sy, sz);
+    m = MatrixMultiply(m, MatrixRotateY(rotYRad));
+    m = MatrixMultiply(m, MatrixTranslate(tx, ty, tz));
+    MatrixWriteBuffer(m, modelBuf);
+}
+
+
+def setLightMatrices(lightView, lightProj)
+{
+    MatrixWriteBuffer(lightView, lightViewBuf);
+    MatrixWriteBuffer(lightProj, lightProjBuf);
+}
+
+
+def drawCubeDepth(tx, ty, tz, sx, sy, sz, rotYRad)
+{
+    writeModelMatrix(tx, ty, tz, sx, sy, sz, rotYRad);
+    glUniformMatrix4fv(dModel, 1, false, modelBuf);
+    glBindVertexArray(cubeVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glBindVertexArray(0);
+}
+
+
+def drawCubeScene(tx, ty, tz, sx, sy, sz, rotYRad, tintR, tintG, tintB, useFloorTex)
+{
+    writeModelMatrix(tx, ty, tz, sx, sy, sz, rotYRad);
+    glUniformMatrix4fv(sModel, 1, false, modelBuf);
+    glUniform3f(sTint, tintR, tintG, tintB);
+    glUniform1i(sHasTex, 0);
+    glUniform1i(sUseFloorTex, useFloorTex ? 1 : 0);
+    glUniform1f(sOpacity, 1.0);
+    glBindVertexArray(cubeVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glBindVertexArray(0);
+}
+
+
+def drawCarDepthAt(carPosX, carPosY, carPosZ)
+{
+    if (!carLoaded || carModel == nil) return;
+
+    carModel.scale = carScale;
+    carModel.rotY = LAB_CAR_ROT_Y;
+    carModel.posX = carPosX - carModel.centerX * carScale;
+    carModel.posY = carPosY - carModel.minY * carScale + 0.02;
+    carModel.posZ = carPosZ - carModel.centerZ * carScale;
+
+    var carMat = carModel.makeModelMatrix();
+    MatrixWriteBuffer(carMat, modelBuf);
+    glUniformMatrix4fv(dModel, 1, false, modelBuf);
+
+    for (var i = 0; i < len(carModel.surfaces); i += 1)
+    {
+        var surface = carModel.surfaces[i];
+        var opacity = 1.0;
+        if (surface.materialIndex >= 0 && surface.materialIndex < len(carModel.materials))
+            opacity = carModel.materials[surface.materialIndex].opacity;
+        if (opacity < 0.999) continue;
+        surface.draw();
+    }
+}
+
+
+def drawCarSceneAt(carPosX, carPosY, carPosZ)
+{
+    if (!carLoaded || carModel == nil) return;
+
+    carModel.scale = carScale;
+    carModel.rotY = LAB_CAR_ROT_Y;
+    carModel.posX = carPosX - carModel.centerX * carScale;
+    carModel.posY = carPosY - carModel.minY * carScale + 0.02;
+    carModel.posZ = carPosZ - carModel.centerZ * carScale;
+
+    var carMat = carModel.makeModelMatrix();
+    MatrixWriteBuffer(carMat, modelBuf);
+    glUniformMatrix4fv(sModel, 1, false, modelBuf);
+
+    for (var pass = 0; pass < 2; pass += 1)
+    {
+        if (pass == 1)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(false);
+        }
+
+        for (var i = 0; i < len(carModel.surfaces); i += 1)
+        {
+            var surface = carModel.surfaces[i];
+            var texId = 0;
+            var tintR = 0.82; var tintG = 0.84; var tintB = 0.88;
+            var opacity = 1.0;
+            if (surface.materialIndex >= 0 && surface.materialIndex < len(carModel.materials))
+            {
+                var mat = carModel.materials[surface.materialIndex];
+                texId = mat.texId;
+                tintR = mat.diffuseR;
+                tintG = mat.diffuseG;
+                tintB = mat.diffuseB;
+                opacity = mat.opacity;
+            }
+
+            var isTransparent = opacity < 0.999;
+            if (pass == 0 && isTransparent) continue;
+            if (pass == 1 && !isTransparent) continue;
+
+            glUniform3f(sTint, tintR, tintG, tintB);
+            glUniform1i(sHasTex, texId > 0 ? 1 : 0);
+            glUniform1i(sUseFloorTex, 0);
+            glUniform1f(sOpacity, opacity);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, texId);
+            glActiveTexture(GL_TEXTURE0);
+            surface.draw();
+        }
+
+        if (pass == 1)
+        {
+            glDepthMask(true);
+            glDisable(GL_BLEND);
+        }
+    }
+
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+
+def renderShadowPass(lightView, lightProj)
+{
+    setLightMatrices(lightView, lightProj);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowRt.fbo);
+    glViewport(0, 0, shadowRt.size, shadowRt.size);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    
+   
+    glUseProgram(depthProg);
+    glUniformMatrix4fv(dLightView, 1, false, lightViewBuf);
+    glUniformMatrix4fv(dLightProj, 1, false, lightProjBuf);
+
+    drawCubeDepth(focusX, floorY - 0.04, focusZ, floorHalfExtent, 0.08, floorHalfExtent, 0.0);
+    if (subjectMode == "car" && carLoaded) drawCarDepthAt(subjectX, floorY, subjectZ);
+    else drawCubeDepth(subjectX, subjectY, subjectZ, subjectScale, subjectScale, subjectScale, 0.0);
+
+    if (showAccent)
+    {
+        for (var i = 0; i < 3; i += 1)
+            drawCubeDepth(accentX[i], accentY[i], accentZ[i], accentSize[i], accentSize[i], accentSize[i], GetTime() * (0.35 + i * 0.12));
+    }
+
+    glUseProgram(0);
+ 
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+
+def renderScenePass(view, proj, lightView, lightProj, camX, camY, camZ, lightDirX, lightDirY, lightDirZ)
+{
+    MatrixWriteBuffer(view, viewBuf);
+    MatrixWriteBuffer(proj, projBuf);
+    setLightMatrices(lightView, lightProj);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, max(GetScreenWidth(), 1), max(GetScreenHeight(), 1));
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glCullFace(GL_BACK);
+
+    glUseProgram(sceneProg);
+    glUniformMatrix4fv(sView, 1, false, viewBuf);
+    glUniformMatrix4fv(sProj, 1, false, projBuf);
+    glUniformMatrix4fv(sLightView, 1, false, lightViewBuf);
+    glUniformMatrix4fv(sLightProj, 1, false, lightProjBuf);
+    glUniform3f(sLightDir, lightDirX, lightDirY, lightDirZ);
+    glUniform3f(sAmbient, ambientStrength, ambientStrength, ambientStrength + 0.02);
+    glUniform3f(sViewPos, camX, camY, camZ);
+    glUniform2f(sFloorCenter, focusX, focusZ);
+    glUniform1f(sFloorExtent, floorHalfExtent);
+    glUniform1f(sFloorUVScale, LAB_FLOOR_UV_SCALE);
+    glUniform1f(sShadowStrength, shadowStrength);
+    glUniform1f(sBiasMin, biasMin);
+    glUniform1f(sBiasMax, biasMax);
+    glUniform2f(sShadowTexelSize, 1.0 / shadowRt.size, 1.0 / shadowRt.size);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, floorTex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, shadowRt.depth);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+
+    drawCubeScene(focusX, floorY - 0.04, focusZ, floorHalfExtent, 0.08, floorHalfExtent, 0.0, 1.0, 1.0, 1.0, floorTex > 0);
+    if (subjectMode == "car" && carLoaded) drawCarSceneAt(subjectX, floorY, subjectZ);
+    else drawCubeScene(subjectX, subjectY, subjectZ, subjectScale, subjectScale, subjectScale, 0.0, 0.88, 0.92, 0.98, false);
+
+    if (showAccent)
+    {
+        for (var i = 0; i < 3; i += 1)
+        {
+            drawCubeScene(
+                accentX[i], accentY[i], accentZ[i],
+                accentSize[i], accentSize[i], accentSize[i],
+                GetTime() * (0.35 + i * 0.12),
+                accentR[i], accentG[i], accentB[i],
+                false
+            );
+        }
+    }
+
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+}
+
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var dirX = cos(pitchRad) * cos(yawRad);
+    var dirY = sin(pitchRad);
+    var dirZ = cos(pitchRad) * sin(yawRad);
+    var dirLen = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+    if (dirLen > 0.0001)
+    {
+        dirX = dirX / dirLen;
+        dirY = dirY / dirLen;
+        dirZ = dirZ / dirLen;
+    }
+
+    var rightX = dirZ;
+    var rightZ = -dirX;
+    var rightLen = sqrt(rightX * rightX + rightZ * rightZ);
+    if (rightLen > 0.0001)
+    {
+        rightX = rightX / rightLen;
+        rightZ = rightZ / rightLen;
+    }
+
+    if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
+    {
+        var panScale = max(sceneRadius * 0.0028, 0.008) * camDistance;
+        focusX = focusX - rightX * mdx * panScale;
+        focusZ = focusZ - rightZ * mdx * panScale;
+        focusY = focusY + mdy * panScale;
+        subjectX = focusX;
+        subjectZ = focusZ;
+    }
+
+    camDistance = camDistance - GetMouseWheelMove() * max(sceneRadius * 0.12, 0.6);
+    if (camDistance < sceneRadius * 0.65) camDistance = sceneRadius * 0.65;
+    if (camDistance > sceneRadius * 5.2) camDistance = sceneRadius * 5.2;
+
+    if (IsKeyPressed(KEY_TAB)) showUi = !showUi;
+    if (IsKeyPressed(KEY_O)) showAccent = !showAccent;
+    if (IsKeyPressed(KEY_R))
+    {
+        focusX = 0.0;
+        focusY = 0.0;
+        focusZ = 0.0;
+        subjectX = 0.0;
+        subjectZ = 0.0;
+        yaw = -120.0;
+        pitch = -14.0;
+        camDistance = 18.0;
+        lightYaw = -32.0;
+        lightPitch = -58.0;
+    }
+
+    eyeX = focusX + dirX * camDistance;
+    eyeY = focusY + focusLift + dirY * camDistance;
+    eyeZ = focusZ + dirZ * camDistance;
+
+    var timeSec = GetTime();
+    for (var i = 0; i < 3; i += 1)
+    {
+        var ang = timeSec * orbitSpeed * (0.8 + i * 0.18) + accentPhase[i];
+        accentX[i] = focusX + cos(ang) * accentRadius[i];
+        accentY[i] = accentHeight[i] + sin(ang * 1.7 + i) * accentSize[i] * 0.18;
+        accentZ[i] = focusZ + sin(ang) * accentRadius[i];
+    }
+
+    var lightYawRad = lightYaw * PI / 180.0;
+    var lightPitchRad = lightPitch * PI / 180.0;
+    var lightDirX = cos(lightPitchRad) * cos(lightYawRad);
+    var lightDirY = sin(lightPitchRad);
+    var lightDirZ = cos(lightPitchRad) * sin(lightYawRad);
+    var lightDirLen = sqrt(lightDirX * lightDirX + lightDirY * lightDirY + lightDirZ * lightDirZ);
+    if (lightDirLen < 0.0001) lightDirLen = 1.0;
+    lightDirX = lightDirX / lightDirLen;
+    lightDirY = lightDirY / lightDirLen;
+    lightDirZ = lightDirZ / lightDirLen;
+
+    var upX = 0.0;
+    var upY = 1.0;
+    var upZ = 0.0;
+    var lightAbsY = lightDirY;
+    if (lightAbsY < 0.0) lightAbsY = -lightAbsY;
+    if (lightAbsY > 0.98)
+    {
+        upY = 0.0;
+        upZ = 1.0;
+    }
+
+    var lightEyeX = subjectX - lightDirX * lightDistance;
+    var lightEyeY = subjectY + 1.0 - lightDirY * lightDistance;
+    var lightEyeZ = subjectZ - lightDirZ * lightDistance;
+    var lightView = MatrixLookAt(
+        Vector3(lightEyeX, lightEyeY, lightEyeZ),
+        Vector3(subjectX, subjectY, subjectZ),
+        Vector3(upX, upY, upZ)
+    );
+    var lightProj = MatrixOrtho(-lightSpan, lightSpan, -lightSpan, lightSpan, 0.5, lightDistance * 3.2);
+
+    var view = MatrixLookAt(Vector3(eyeX, eyeY, eyeZ), Vector3(focusX, focusY + focusLift, focusZ), Vector3(0.0, 1.0, 0.0));
+    var screenW = GetScreenWidth();
+    var screenH = max(GetScreenHeight(), 1);
+    if (cachedScreenW != screenW || cachedScreenH != screenH)
+    {
+        screenProj = MatrixPerspective(LAB_CAMERA_FOV_RAD, screenW / screenH, LAB_CAMERA_NEAR, LAB_CAMERA_FAR);
+        cachedScreenW = screenW;
+        cachedScreenH = screenH;
+    }
+
+    glEnable(GL_CULL_FACE);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glCullFace(GL_BACK);
+    
+    
+    renderShadowPass(lightView, lightProj);
+
+    
+    
+    
+    BeginDrawing();
+    renderScenePass(view, screenProj, lightView, lightProj, eyeX, eyeY, eyeZ, lightDirX, lightDirY, lightDirZ);
+
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+
+    prepareOverlay2D(screenW, screenH);
+    DrawRectangle(18, 18, 980, 122, hudBg);
+    DrawText("Shadow Map Lab  RMB orbit | MMB pan | Wheel zoom | O accent cubes | R reset | TAB UI", 30, 30, 22, hudFg);
+    DrawText("Separate lab: 1 depth pass from the light + 1 lit scene pass using the depth texture.", 30, 62, 18, hudInfo);
+    DrawText("Subject: " + subjectMode + "  Shadow: " + str(shadowRt.size) + "x" + str(shadowRt.size) + "  FPS: " + str(GetFPS()), 30, 92, 18, hudOk);
+
+    if (showUi)
+    {
+        BeginImGui();
+        var panel = ImGui.Begin("Shadow Map Lab");
+        if (panel != nil && panel)
+        {
+            ImGui.Text("This demo keeps the shadow map isolated from the env probe work.");
+            ImGui.Text("Preview below is the light pass debug color, not the scene color.");
+            ImGui.Text("Subject mode: " + subjectMode + (carLoaded ? " (BMW loaded)" : ""));
+            ImGui.Separator();
+
+            var (changedAmbient, nextAmbient) = ImGui.SliderFloat("Ambient", ambientStrength, 0.02, 0.65, "%.2f");
+            if (changedAmbient) ambientStrength = nextAmbient;
+
+            var (changedShadowStrength, nextShadowStrength) = ImGui.SliderFloat("Shadow strength", shadowStrength, 0.0, 1.0, "%.2f");
+            if (changedShadowStrength) shadowStrength = nextShadowStrength;
+
+            var (changedBiasMin, nextBiasMin) = ImGui.SliderFloat("Bias min", biasMin, 0.0001, 0.01, "%.4f");
+            if (changedBiasMin) biasMin = nextBiasMin;
+
+            var (changedBiasMax, nextBiasMax) = ImGui.SliderFloat("Bias max", biasMax, 0.0005, 0.03, "%.4f");
+            if (changedBiasMax) biasMax = nextBiasMax;
+
+            var (changedSpan, nextSpan) = ImGui.SliderFloat("Light span", lightSpan, 6.0, 28.0, "%.2f");
+            if (changedSpan) lightSpan = nextSpan;
+
+            var (changedDistance, nextDistance) = ImGui.SliderFloat("Light distance", lightDistance, 8.0, 32.0, "%.2f");
+            if (changedDistance) lightDistance = nextDistance;
+
+            var (changedYaw, nextYaw) = ImGui.SliderFloat("Light yaw", lightYaw, -180.0, 180.0, "%.1f");
+            if (changedYaw) lightYaw = nextYaw;
+
+            var (changedPitch, nextPitch) = ImGui.SliderFloat("Light pitch", lightPitch, -89.0, -5.0, "%.1f");
+            if (changedPitch) lightPitch = nextPitch;
+
+            var (changedAccent, nextAccent) = ImGui.Checkbox("Show accent cubes", showAccent);
+            if (changedAccent) showAccent = nextAccent;
+
+            var (changedOrbit, nextOrbit) = ImGui.SliderFloat("Orbit speed", orbitSpeed, 0.0, 2.4, "%.2f");
+            if (changedOrbit) orbitSpeed = nextOrbit;
+
+            ImGui.Separator();
+            ImGui.Text("Shadow pass preview");
+            ImGui.ImageButton("##shadow_debug", shadowRt.color, 320, 320, 0.0, 1.0, 1.0, 0.0);
+            ImGui.Text("debug texId: " + str(shadowRt.color) + "  depth texId: " + str(shadowRt.depth));
+        }
+        ImGui.End();
+        EndImGui();
+    }
+
+    EndDrawing();
+}
+
+shadowRt.destroy();
+if (carModel != nil) carModel.destroy();
+if (floorTex > 0) glDeleteTextures(floorTex);
+glDeleteProgram(depthProg);
+glDeleteProgram(sceneProg);
+glDeleteBuffers(cubeVBO);
+glDeleteVertexArrays(cubeVAO);
+ShutdownImGui();
+CloseWindow();

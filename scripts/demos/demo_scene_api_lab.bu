@@ -1,0 +1,425 @@
+import math;
+using math;
+import OpenGl;
+using OpenGl;
+import GLM;
+using GLM;
+
+var LAB_CAMERA_FOV_RAD = 55.0 * PI / 180.0;
+var LAB_CAMERA_NEAR = 0.02;
+var LAB_CAMERA_FAR = 2000.0;
+
+var hudBg = Color(0, 0, 0, 150);
+var hudFg = Color(245, 245, 245, 255);
+var hudInfo = Color(190, 220, 255, 255);
+
+
+def compileShader(stype, src)
+{
+    var s = glCreateShader(stype);
+    glShaderSource(s, src);
+    glCompileShader(s);
+    if (glGetShaderiv(s, GL_COMPILE_STATUS) == 0)
+    {
+        print("Scene API shader compile error: " + glGetShaderInfoLog(s));
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+
+def linkProgram(vsSrc, fsSrc)
+{
+    var vs = compileShader(GL_VERTEX_SHADER, vsSrc);
+    if (vs <= 0) return 0;
+    var fs = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    if (fs <= 0)
+    {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    var p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (glGetProgramiv(p, GL_LINK_STATUS) == 0)
+    {
+        print("Scene API shader link error: " + glGetProgramInfoLog(p));
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+
+def makeCubeGeometry()
+{
+    var verts = Float32Array([
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,
+         1.0, -1.0,  1.0,   0.0,  0.0,  1.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,
+        -1.0, -1.0,  1.0,   0.0,  0.0,  1.0,
+         1.0,  1.0,  1.0,   0.0,  0.0,  1.0,
+        -1.0,  1.0,  1.0,   0.0,  0.0,  1.0,
+
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,
+        -1.0,  1.0, -1.0,   0.0,  0.0, -1.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,
+        -1.0, -1.0, -1.0,   0.0,  0.0, -1.0,
+         1.0,  1.0, -1.0,   0.0,  0.0, -1.0,
+         1.0, -1.0, -1.0,   0.0,  0.0, -1.0,
+
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,
+        -1.0, -1.0,  1.0,  -1.0,  0.0,  0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,
+        -1.0, -1.0, -1.0,  -1.0,  0.0,  0.0,
+        -1.0,  1.0,  1.0,  -1.0,  0.0,  0.0,
+        -1.0,  1.0, -1.0,  -1.0,  0.0,  0.0,
+
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,
+         1.0, -1.0,  1.0,   1.0,  0.0,  0.0,
+         1.0, -1.0, -1.0,   1.0,  0.0,  0.0,
+         1.0,  1.0, -1.0,   1.0,  0.0,  0.0,
+         1.0,  1.0,  1.0,   1.0,  0.0,  0.0,
+
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,
+        -1.0,  1.0,  1.0,   0.0,  1.0,  0.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,
+        -1.0,  1.0, -1.0,   0.0,  1.0,  0.0,
+         1.0,  1.0,  1.0,   0.0,  1.0,  0.0,
+         1.0,  1.0, -1.0,   0.0,  1.0,  0.0,
+
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0,
+        -1.0, -1.0,  1.0,   0.0, -1.0,  0.0,
+        -1.0, -1.0, -1.0,   0.0, -1.0,  0.0,
+         1.0, -1.0, -1.0,   0.0, -1.0,  0.0,
+         1.0, -1.0,  1.0,   0.0, -1.0,  0.0]
+    );
+
+    var vao = glGenVertexArrays();
+    var vbo = glGenBuffers();
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.byteLength(), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, 24, 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, false, 24, 12);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return [vao, vbo];
+}
+
+
+class ToyMaterial
+{
+    var tintR;
+    var tintG;
+    var tintB;
+    var ambient;
+
+    def init()
+    {
+        self.tintR = 0.82;
+        self.tintG = 0.84;
+        self.tintB = 0.88;
+        self.ambient = 0.18;
+    }
+}
+
+
+class ToyNode
+{
+    var posX;
+    var posY;
+    var posZ;
+    var scaleX;
+    var scaleY;
+    var scaleZ;
+    var rotY;
+    var spinY;
+    var material;
+
+    def init()
+    {
+        self.posX = 0.0;
+        self.posY = 0.0;
+        self.posZ = 0.0;
+        self.scaleX = 1.0;
+        self.scaleY = 1.0;
+        self.scaleZ = 1.0;
+        self.rotY = 0.0;
+        self.spinY = 0.0;
+        self.material = ToyMaterial();
+    }
+
+    def update(dt)
+    {
+        self.rotY = self.rotY + self.spinY * dt;
+    }
+
+    def writeModel(buf)
+    {
+        var m = MatrixScale(self.scaleX, self.scaleY, self.scaleZ);
+        m = MatrixMultiply(m, MatrixRotateY(self.rotY));
+        m = MatrixMultiply(m, MatrixTranslate(self.posX, self.posY, self.posZ));
+        MatrixWriteBuffer(m, buf);
+    }
+}
+
+
+class ToyScene
+{
+    var nodes;
+    var lightDirX;
+    var lightDirY;
+    var lightDirZ;
+
+    def init()
+    {
+        self.nodes = [];
+        self.lightDirX = -0.45;
+        self.lightDirY = -1.0;
+        self.lightDirZ = -0.20;
+    }
+
+    def addNode(node)
+    {
+        self.nodes.push(node);
+        return node;
+    }
+
+    def addCube(px, py, pz, sx, sy, sz, r, g, b, spinY)
+    {
+        var node = ToyNode();
+        node.posX = px;
+        node.posY = py;
+        node.posZ = pz;
+        node.scaleX = sx;
+        node.scaleY = sy;
+        node.scaleZ = sz;
+        node.spinY = spinY;
+        node.material.tintR = r;
+        node.material.tintG = g;
+        node.material.tintB = b;
+        self.addNode(node);
+        return node;
+    }
+
+    def update(dt)
+    {
+        for (var i = 0; i < len(self.nodes); i += 1)
+            self.nodes[i].update(dt);
+    }
+
+    def render(view, proj, modelBuf, viewBuf, projBuf, locModel, locView, locProj, locTint, locLightDir, locAmbient, cubeVAO)
+    {
+        MatrixWriteBuffer(view, viewBuf);
+        MatrixWriteBuffer(proj, projBuf);
+
+        glUniformMatrix4fv(locView, 1, false, viewBuf);
+        glUniformMatrix4fv(locProj, 1, false, projBuf);
+        glUniform3f(locLightDir, self.lightDirX, self.lightDirY, self.lightDirZ);
+        glBindVertexArray(cubeVAO);
+
+        for (var i = 0; i < len(self.nodes); i += 1)
+        {
+            var node = self.nodes[i];
+            node.writeModel(modelBuf);
+            glUniformMatrix4fv(locModel, 1, false, modelBuf);
+            glUniform3f(locTint, node.material.tintR, node.material.tintG, node.material.tintB);
+            glUniform1f(locAmbient, node.material.ambient);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
+        }
+
+        glBindVertexArray(0);
+    }
+}
+
+
+var vsSrc = @"
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+
+void main()
+{
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vWorldPos = world.xyz;
+    vNormal = normalize(mat3(uModel) * aNormal);
+    gl_Position = uProj * uView * world;
+}
+";
+
+var fsSrc = @"
+#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+out vec4 FragColor;
+
+uniform vec3 uTint;
+uniform vec3 uLightDir;
+uniform float uAmbient;
+
+void main()
+{
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-uLightDir);
+    float ndl = max(dot(N, L), 0.0);
+    vec3 hemi = mix(vec3(0.07, 0.08, 0.10), vec3(0.18, 0.20, 0.24), clamp(N.y * 0.5 + 0.5, 0.0, 1.0));
+    vec3 color = uTint * (vec3(uAmbient) + hemi * 0.55 + vec3(ndl));
+    FragColor = vec4(color, 1.0);
+}
+";
+
+SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+InitWindow(1440, 920, "BuGL Demo - Scene API Lab");
+SetTargetFPS(60);
+
+var cubeGeom = makeCubeGeometry();
+var cubeVAO = cubeGeom[0];
+var cubeVBO = cubeGeom[1];
+var prog = linkProgram(vsSrc, fsSrc);
+if (prog <= 0)
+{
+    glDeleteBuffers(cubeVBO);
+    glDeleteVertexArrays(cubeVAO);
+    CloseWindow();
+    return;
+}
+
+glEnable(GL_DEPTH_TEST);
+glEnable(GL_CULL_FACE);
+glCullFace(GL_BACK);
+glClearColor(0.11, 0.12, 0.16, 1.0);
+
+var uModel = glGetUniformLocation(prog, "uModel");
+var uView = glGetUniformLocation(prog, "uView");
+var uProj = glGetUniformLocation(prog, "uProj");
+var uTint = glGetUniformLocation(prog, "uTint");
+var uLightDir = glGetUniformLocation(prog, "uLightDir");
+var uAmbient = glGetUniformLocation(prog, "uAmbient");
+
+var modelBuf = @(16, TYPE_FLOAT);
+var viewBuf = @(16, TYPE_FLOAT);
+var projBuf = @(16, TYPE_FLOAT);
+
+var scene = ToyScene();
+var groundNode = scene.addCube(0.0, -1.1, 0.0, 12.0, 0.08, 12.0, 0.28, 0.30, 0.34, 0.0);
+groundNode.material.ambient = 0.10;
+var center = scene.addCube(0.0, 0.9, 0.0, 1.6, 1.6, 1.6, 0.92, 0.94, 0.98, 0.75);
+center.material.ambient = 0.18;
+var left = scene.addCube(-3.0, 0.25, -1.5, 0.7, 0.7, 0.7, 1.00, 0.55, 0.26, 1.45);
+var right = scene.addCube(2.8, 0.45, 1.2, 1.0, 1.0, 1.0, 0.32, 0.82, 1.00, -1.20);
+var back = scene.addCube(0.0, 0.35, -3.4, 0.85, 0.85, 0.85, 0.48, 1.00, 0.62, 0.92);
+
+var focusX = 0.0;
+var focusY = 0.0;
+var focusZ = 0.0;
+var eyeX = 0.0;
+var eyeY = 4.8;
+var eyeZ = 10.5;
+var yaw = -118.0;
+var pitch = -18.0;
+var camDistance = 15.0;
+var cachedScreenW = 0;
+var cachedScreenH = 0;
+var proj = MatrixIdentity();
+
+while (!WindowShouldClose())
+{
+    var dt = GetFrameTime();
+    if (dt < 0.0001) dt = 0.0001;
+    if (dt > 0.05) dt = 0.05;
+
+    var (mdx, mdy) = GetMouseDelta();
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+    {
+        yaw = yaw + mdx * 0.12;
+        pitch = pitch - mdy * 0.12;
+        if (pitch > 89.0) pitch = 89.0;
+        if (pitch < -89.0) pitch = -89.0;
+    }
+
+    var yawRad = yaw * PI / 180.0;
+    var pitchRad = pitch * PI / 180.0;
+    var dirX = cos(pitchRad) * cos(yawRad);
+    var dirY = sin(pitchRad);
+    var dirZ = cos(pitchRad) * sin(yawRad);
+    var dirLen = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+    if (dirLen > 0.0001)
+    {
+        dirX = dirX / dirLen;
+        dirY = dirY / dirLen;
+        dirZ = dirZ / dirLen;
+    }
+
+    camDistance = camDistance - GetMouseWheelMove() * 0.9;
+    if (camDistance < 4.5) camDistance = 4.5;
+    if (camDistance > 40.0) camDistance = 40.0;
+
+    if (IsKeyPressed(KEY_R))
+    {
+        yaw = -118.0;
+        pitch = -18.0;
+        camDistance = 15.0;
+    }
+
+    eyeX = focusX + dirX * camDistance;
+    eyeY = focusY + 1.6 + dirY * camDistance;
+    eyeZ = focusZ + dirZ * camDistance;
+
+    var screenW = GetScreenWidth();
+    var screenH = max(GetScreenHeight(), 1);
+    if (screenW != cachedScreenW || screenH != cachedScreenH)
+    {
+        proj = MatrixPerspective(LAB_CAMERA_FOV_RAD, screenW / screenH, LAB_CAMERA_NEAR, LAB_CAMERA_FAR);
+        cachedScreenW = screenW;
+        cachedScreenH = screenH;
+    }
+
+    var view = MatrixLookAt(
+        Vector3(eyeX, eyeY, eyeZ),
+        Vector3(focusX, focusY + 0.9, focusZ),
+        Vector3(0.0, 1.0, 0.0)
+    );
+
+
+    
+    scene.update(dt);
+    
+    BeginDrawing();
+    glViewport(0, 0, screenW, screenH);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
+    glUseProgram(prog);
+    scene.render(view, proj, modelBuf, viewBuf, projBuf, uModel, uView, uProj, uTint, uLightDir, uAmbient, cubeVAO);
+    glUseProgram(0);
+
+    DrawRectangle(18, 18, 820, 92, hudBg);
+    DrawText("Scene API Lab  RMB orbit | Wheel zoom | R reset", 30, 30, 24, hudFg);
+    DrawText("This is the seed for a mini-engine style loop: scene.update(dt); scene.render(view, proj);", 30, 64, 18, hudInfo);
+
+    EndDrawing();
+}
+
+glDeleteProgram(prog);
+glDeleteBuffers(cubeVBO);
+glDeleteVertexArrays(cubeVAO);
+CloseWindow();

@@ -177,11 +177,11 @@ size_t Debug::disassembleInstruction(const Code &chunk, size_t offset)
 
     // ========== FUNCTIONS (38-43) ==========
   case OP_CALL:
-    return byteInstruction("OP_CALL", chunk, offset);
+    return shortInstruction("OP_CALL", chunk, offset);
   case OP_RETURN:
     return simpleInstruction("OP_RETURN", offset);
   case OP_RETURN_N:
-    return byteInstruction("OP_RETURN_N", chunk, offset);
+    return shortInstruction("OP_RETURN_N", chunk, offset);
   case OP_TYPE:
     return simpleInstruction("OP_TYPE", offset);
   case OP_PROC:
@@ -191,7 +191,7 @@ size_t Debug::disassembleInstruction(const Code &chunk, size_t offset)
   case OP_TOSTRING:
     return simpleInstruction("OP_TOSTRING", offset);
   case OP_CONCAT_N:
-    return byteInstruction("OP_CONCAT_N", chunk, offset);
+    return shortInstruction("OP_CONCAT_N", chunk, offset);
 
   case OP_CLOSURE:
   {
@@ -267,14 +267,14 @@ size_t Debug::disassembleInstruction(const Code &chunk, size_t offset)
     // ========== METHODS (50-51) ==========
   case OP_INVOKE:
   {
-    if (!hasBytes(chunk, offset, 3))
+    if (!hasBytes(chunk, offset, 4))
     {
       printf("OP_INVOKE <truncated>\n");
       return chunk.count;
     }
 
     uint16_t nameIdx = (uint16_t)(chunk.code[offset + 1] << 8) | chunk.code[offset + 2];
-    uint8_t argCount = chunk.code[offset + 3];
+    uint16_t argCount = (uint16_t)(chunk.code[offset + 3] << 8) | chunk.code[offset + 4];
 
     Value c = chunk.constants[nameIdx];
     const char *nm = (c.isString() ? c.asString()->chars() : "<non-string>");
@@ -282,12 +282,12 @@ size_t Debug::disassembleInstruction(const Code &chunk, size_t offset)
     printf("%-20s %4u '%s' (%u args)\n", "OP_INVOKE", (unsigned)nameIdx, nm,
            (unsigned)argCount);
 
-    return offset + 4;
+    return offset + 5;
   }
 
   case OP_SUPER_INVOKE:
   {
-    if (!hasBytes(chunk, offset, 4))
+    if (!hasBytes(chunk, offset, 5))
     {
       printf("OP_SUPER_INVOKE <truncated>\n");
       return chunk.count;
@@ -295,7 +295,7 @@ size_t Debug::disassembleInstruction(const Code &chunk, size_t offset)
 
     uint8_t ownerClassId = chunk.code[offset + 1];
     uint16_t nameIdx = (uint16_t)(chunk.code[offset + 2] << 8) | chunk.code[offset + 3];
-    uint8_t argCount = chunk.code[offset + 4];
+    uint16_t argCount = (uint16_t)(chunk.code[offset + 4] << 8) | chunk.code[offset + 5];
 
     Value c = chunk.constants[nameIdx];
     const char *nm = (c.isString() ? c.asString()->chars() : "<non-string>");
@@ -303,12 +303,12 @@ size_t Debug::disassembleInstruction(const Code &chunk, size_t offset)
     printf("%-20s class=%u name=%u '%s' (%u args)\n", "OP_SUPER_INVOKE",
            (unsigned)ownerClassId, (unsigned)nameIdx, nm, (unsigned)argCount);
 
-    return offset + 5;
+    return offset + 6;
   }
 
     // ========== I/O (52-53) ==========
   case OP_PRINT:
-    return byteInstruction("OP_PRINT", chunk, offset);
+    return shortInstruction("OP_PRINT", chunk, offset);
   case OP_FUNC_LEN:
     return simpleInstruction("OP_FUNC_LEN", offset);
 

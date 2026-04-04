@@ -1,0 +1,10 @@
+import path;
+using path;
+import STB;
+using STB;
+include "../libs/lib_image_normalmap.bu";
+var p = "assets/sponza/textures/spnza_bricks_a_diff.tga";
+var (w,h,ch,pixels) = stbi_load(p, 4);
+print("loaded=" + str(w) + "x" + str(h) + " ch=" + str(ch) + " ok=" + str(pixels != nil));
+var (_, out) = imageGenerateNormalMapBytes(w, h, 4, pixels, 4.0, false);
+print("out=" + str(out[0]) + "," + str(out[1]) + "," + str(out[2]) + "," + str(out[3]) + "," + str(out[4]) + "," + str(out[5]) + "," + str(out[6]) + "," + str(out[7]));

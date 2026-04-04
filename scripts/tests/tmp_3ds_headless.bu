@@ -1,0 +1,14 @@
+include "../libs/lib_3ds.bu";
+
+var modelPath = " assets/3ds/bmw/model.3ds";
+var model = ThreeDSModel();
+model.debugLoad = true;
+
+var ok = model.loadHeadless(modelPath);
+print("ok=" + str(ok));
+print("version=" + str(model.version));
+print("hasKeyframeData=" + str(model.hasKeyframeData));
+print("objects=" + str(model.objectCount()));
+print("surfaces=" + str(model.surfaceCount()));
+print("materials=" + str(model.materialCount()));
+print("bounds=" + str(model.sizeX) + "," + str(model.sizeY) + "," + str(model.sizeZ));
